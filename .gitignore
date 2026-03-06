@@ -2,3 +2,4 @@
 .worktrees/*
 .tasks/*
 target/*
+target-test/*
