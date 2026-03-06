@@ -1,13 +1,16 @@
 ﻿use anyhow::Context;
+use rustpilot::agent_tools::{
+    builtin_tool_definitions, clear_terminal_manager_live_sessions, handle_builtin_tool_call,
+    reset_terminal_manager,
+};
 use rustpilot::config::LlmConfig;
 use rustpilot::openai_compat::{
-    ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice, ToolFunction,
+    ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice,
 };
-use rustpilot::tools::{
-    edit_file, is_dangerous_command, read_file, run_shell_command, write_file, BashArgs,
-    BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs,
+use rustpilot::project_tools::{
+    handle_project_tool_call, project_tool_definitions, EventBus, TaskManager, TaskRecord,
+    WorktreeManager,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
@@ -15,13 +18,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
-use std::sync::{MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 
 const LLM_TIMEOUT_SECS: u64 = 120;
 const MAX_AGENT_TURNS: usize = 24;
@@ -218,342 +221,19 @@ fn truncate_for_print(text: &str) -> String {
 }
 
 fn tool_definitions() -> Vec<Tool> {
-    vec![
-        tool(
-            "bash",
-            "在当前工作目录执行 shell 命令。",
-            json!({
-                "type": "object",
-                "properties": { "command": { "type": "string" } },
-                "required": ["command"]
-            }),
-        ),
-        tool(
-            "read_file",
-            "读取文件内容。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "max_lines": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["path"]
-            }),
-        ),
-        tool(
-            "write_file",
-            "写入文件。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "content": { "type": "string" }
-                },
-                "required": ["path", "content"]
-            }),
-        ),
-        tool(
-            "edit_file",
-            "替换文件中的精确文本。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "old": { "type": "string" },
-                    "new": { "type": "string" }
-                },
-                "required": ["path", "old", "new"]
-            }),
-        ),
-        tool(
-            "task_create",
-            "在共享任务板上创建任务。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "subject": { "type": "string" },
-                    "description": { "type": "string" }
-                },
-                "required": ["subject"]
-            }),
-        ),
-        tool(
-            "task_list",
-            "列出所有任务及其 owner/worktree。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        tool(
-            "task_get",
-            "按 ID 获取任务详情。",
-            json!({
-                "type": "object",
-                "properties": { "task_id": { "type": "integer" } },
-                "required": ["task_id"]
-            }),
-        ),
-        tool(
-            "task_update",
-            "更新任务状态或 owner。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "integer" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
-                    "owner": { "type": "string" }
-                },
-                "required": ["task_id"]
-            }),
-        ),
-        tool(
-            "task_bind_worktree",
-            "将任务绑定到一个 worktree 名称。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "integer" },
-                    "worktree": { "type": "string" },
-                    "owner": { "type": "string" }
-                },
-                "required": ["task_id", "worktree"]
-            }),
-        ),
-        tool(
-            "worktree_create",
-            "创建 git worktree 并可选绑定任务。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "task_id": { "type": "integer" },
-                    "base_ref": { "type": "string" }
-                },
-                "required": ["name"]
-            }),
-        ),
-        tool(
-            "worktree_list",
-            "列出 .worktrees/index.json 中的 worktree。",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        tool(
-            "worktree_status",
-            "查看某个 worktree 的 git 状态。",
-            json!({
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }),
-        ),
-        tool(
-            "worktree_run",
-            "在指定 worktree 中执行命令。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "command": { "type": "string" }
-                },
-                "required": ["name", "command"]
-            }),
-        ),
-        tool(
-            "worktree_keep",
-            "将 worktree 标记为保留。",
-            json!({
-                "type": "object",
-                "properties": { "name": { "type": "string" } },
-                "required": ["name"]
-            }),
-        ),
-        tool(
-            "worktree_remove",
-            "移除 worktree，可选同时完成任务。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "force": { "type": "boolean" },
-                    "complete_task": { "type": "boolean" }
-                },
-                "required": ["name"]
-            }),
-        ),
-        tool(
-            "worktree_events",
-            "查看最近的 worktree 生命周期事件。",
-            json!({
-                "type": "object",
-                "properties": { "limit": { "type": "integer" } }
-            }),
-        ),
-    ]
-}
-
-fn tool(name: &str, description: &str, parameters: serde_json::Value) -> Tool {
-    Tool {
-        r#type: "function".to_string(),
-        function: ToolFunction {
-            name: name.to_string(),
-            description: description.to_string(),
-            parameters,
-        },
-    }
+    let mut tools = builtin_tool_definitions();
+    tools.extend(project_tool_definitions());
+    tools
 }
 
 fn handle_tool_call(repo_root: &Path, call: &ToolCall) -> anyhow::Result<String> {
-    let tasks = TaskManager::new(repo_root.join(".tasks"))?;
-    let events = EventBus::new(repo_root.join(".worktrees").join("events.jsonl"))?;
-    let worktrees = WorktreeManager::new(repo_root.to_path_buf(), tasks.clone(), events.clone())?;
-
-    match call.function.name.as_str() {
-        "bash" => {
-            let args: BashArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid bash arguments")?;
-            BashTool::run(&args.command)
-        }
-        "read_file" => {
-            let args: ReadFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid read_file arguments")?;
-            read_file(&args)
-        }
-        "write_file" => {
-            let args: WriteFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid write_file arguments")?;
-            write_file(&args)
-        }
-        "edit_file" => {
-            let args: EditFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid edit_file arguments")?;
-            edit_file(&args)
-        }
-        "task_create" => {
-            let args: TaskCreateArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid task_create arguments")?;
-            tasks.create(&args.subject, args.description.as_deref().unwrap_or(""))
-        }
-        "task_list" => tasks.list_all(),
-        "task_get" => {
-            let args: TaskIdArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid task_get arguments")?;
-            tasks.get(args.task_id)
-        }
-        "task_update" => {
-            let args: TaskUpdateArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid task_update arguments")?;
-            tasks.update(args.task_id, args.status.as_deref(), args.owner.as_deref())
-        }
-        "task_bind_worktree" => {
-            let args: TaskBindArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid task_bind_worktree arguments")?;
-            tasks.bind_worktree(args.task_id, &args.worktree, args.owner.as_deref().unwrap_or(""))
-        }
-        "worktree_create" => {
-            let args: WorktreeCreateArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_create arguments")?;
-            worktrees.create(&args.name, args.task_id, args.base_ref.as_deref().unwrap_or("HEAD"))
-        }
-        "worktree_list" => worktrees.list_all(),
-        "worktree_status" => {
-            let args: WorktreeNameArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_status arguments")?;
-            worktrees.status(&args.name)
-        }
-        "worktree_run" => {
-            let args: WorktreeRunArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_run arguments")?;
-            worktrees.run(&args.name, &args.command)
-        }
-        "worktree_keep" => {
-            let args: WorktreeNameArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_keep arguments")?;
-            worktrees.keep(&args.name)
-        }
-        "worktree_remove" => {
-            let args: WorktreeRemoveArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_remove arguments")?;
-            worktrees.remove(
-                &args.name,
-                args.force.unwrap_or(false),
-                args.complete_task.unwrap_or(false),
-            )
-        }
-        "worktree_events" => {
-            let args: EventsArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid worktree_events arguments")?;
-            events.list_recent(args.limit.unwrap_or(20))
-        }
-        _ => anyhow::bail!("unknown tool: {}", call.function.name),
+    if let Some(output) = handle_builtin_tool_call(call)? {
+        return Ok(output);
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct TaskCreateArgs {
-    subject: String,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TaskIdArgs {
-    task_id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TaskUpdateArgs {
-    task_id: u64,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    owner: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TaskBindArgs {
-    task_id: u64,
-    worktree: String,
-    #[serde(default)]
-    owner: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorktreeCreateArgs {
-    name: String,
-    #[serde(default)]
-    task_id: Option<u64>,
-    #[serde(default)]
-    base_ref: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorktreeNameArgs {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorktreeRunArgs {
-    name: String,
-    command: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorktreeRemoveArgs {
-    name: String,
-    #[serde(default)]
-    force: Option<bool>,
-    #[serde(default)]
-    complete_task: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventsArgs {
-    #[serde(default)]
-    limit: Option<usize>,
+    if let Some(output) = handle_project_tool_call(repo_root, call)? {
+        return Ok(output);
+    }
+    anyhow::bail!("unknown tool: {}", call.function.name)
 }
 
 fn detect_repo_root(cwd: &Path) -> Option<PathBuf> {
@@ -571,15 +251,6 @@ fn detect_repo_root(cwd: &Path) -> Option<PathBuf> {
     }
     let path = PathBuf::from(text);
     path.exists().then_some(path)
-}
-
-fn is_git_repo(path: &Path) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 fn now_secs_f64() -> f64 {
@@ -688,596 +359,12 @@ fn llm_timeout_secs() -> u64 {
         .unwrap_or(LLM_TIMEOUT_SECS)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EventRecord {
-    event: String,
-    ts: f64,
-    task: serde_json::Value,
-    worktree: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct EventBus {
-    path: PathBuf,
-}
-
-impl EventBus {
-    fn new(path: PathBuf) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if !path.exists() {
-            fs::write(&path, "")?;
-        }
-        Ok(Self { path })
-    }
-
-    fn emit(
-        &self,
-        event: &str,
-        task: serde_json::Value,
-        worktree: serde_json::Value,
-        error: Option<String>,
-    ) -> anyhow::Result<()> {
-        let payload = EventRecord {
-            event: event.to_string(),
-            ts: now_secs_f64(),
-            task,
-            worktree,
-            error,
-        };
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)?;
-        writeln!(file, "{}", serde_json::to_string(&payload)?)?;
-        Ok(())
-    }
-
-    fn list_recent(&self, limit: usize) -> anyhow::Result<String> {
-        let count = limit.clamp(1, 200);
-        let content = fs::read_to_string(&self.path)?;
-        let lines: Vec<&str> = content.lines().collect();
-        let mut items = Vec::new();
-        for line in lines
-            .into_iter()
-            .rev()
-            .take(count)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(value) => items.push(value),
-                Err(_) => items.push(json!({ "event": "parse_error", "raw": line })),
-            }
-        }
-        Ok(serde_json::to_string_pretty(&items)?)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct TaskRecord {
-    id: u64,
-    subject: String,
-    description: String,
-    status: String,
-    owner: String,
-    worktree: String,
-    #[serde(rename = "blockedBy")]
-    blocked_by: Vec<u64>,
-    created_at: f64,
-    updated_at: f64,
-}
-
-#[derive(Debug, Clone)]
-struct TaskManager {
-    dir: PathBuf,
-}
-
-impl TaskManager {
-    fn new(dir: PathBuf) -> anyhow::Result<Self> {
-        fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
-    }
-
-    fn create(&self, subject: &str, description: &str) -> anyhow::Result<String> {
-        let now = now_secs_f64();
-        let task = TaskRecord {
-            id: self.max_id()? + 1,
-            subject: subject.to_string(),
-            description: description.to_string(),
-            status: "pending".to_string(),
-            owner: String::new(),
-            worktree: String::new(),
-            blocked_by: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
-    }
-
-    fn get(&self, task_id: u64) -> anyhow::Result<String> {
-        Ok(serde_json::to_string_pretty(&self.load(task_id)?)?)
-    }
-
-    fn exists(&self, task_id: u64) -> bool {
-        self.path(task_id).exists()
-    }
-
-    fn update(&self, task_id: u64, status: Option<&str>, owner: Option<&str>) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        if let Some(status) = status {
-            if !matches!(status, "pending" | "in_progress" | "completed") {
-                anyhow::bail!("非法状态: {}", status);
-            }
-            task.status = status.to_string();
-        }
-        if let Some(owner) = owner {
-            task.owner = owner.to_string();
-        }
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
-    }
-
-    fn bind_worktree(&self, task_id: u64, worktree: &str, owner: &str) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        task.worktree = worktree.to_string();
-        if !owner.is_empty() {
-            task.owner = owner.to_string();
-        }
-        if task.status == "pending" {
-            task.status = "in_progress".to_string();
-        }
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
-    }
-
-    fn unbind_worktree(&self, task_id: u64) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        task.worktree.clear();
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
-    }
-
-    fn list_all(&self) -> anyhow::Result<String> {
-        let mut tasks = self.load_all()?;
-        tasks.sort_by_key(|task| task.id);
-        if tasks.is_empty() {
-            return Ok("没有任务。".to_string());
-        }
-
-        let mut lines = Vec::new();
-        for task in tasks {
-            let marker = match task.status.as_str() {
-                "pending" => "[ ]",
-                "in_progress" => "[>]",
-                "completed" => "[x]",
-                _ => "[?]",
-            };
-            let owner = if task.owner.is_empty() {
-                String::new()
-            } else {
-                format!(" owner={}", task.owner)
-            };
-            let worktree = if task.worktree.is_empty() {
-                String::new()
-            } else {
-                format!(" wt={}", task.worktree)
-            };
-            lines.push(format!(
-                "{marker} #{}: {}{}{}",
-                task.id, task.subject, owner, worktree
-            ));
-        }
-        Ok(lines.join("\n"))
-    }
-
-    fn path(&self, task_id: u64) -> PathBuf {
-        self.dir.join(format!("task_{}.json", task_id))
-    }
-
-    fn max_id(&self) -> anyhow::Result<u64> {
-        let mut max_id = 0u64;
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if let Some(id) = stem
-                .strip_prefix("task_")
-                .and_then(|value| value.parse::<u64>().ok())
-            {
-                max_id = max_id.max(id);
-            }
-        }
-        Ok(max_id)
-    }
-
-    fn load(&self, task_id: u64) -> anyhow::Result<TaskRecord> {
-        let path = self.path(task_id);
-        if !path.exists() {
-            anyhow::bail!("任务 {} 不存在", task_id);
-        }
-        let content = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&content)?)
-    }
-
-    fn save(&self, task: &TaskRecord) -> anyhow::Result<()> {
-        fs::write(self.path(task.id), serde_json::to_string_pretty(task)?)?;
-        Ok(())
-    }
-
-    fn load_all(&self) -> anyhow::Result<Vec<TaskRecord>> {
-        let mut tasks = Vec::new();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if !name.starts_with("task_") || !name.ends_with(".json") {
-                continue;
-            }
-            let content = fs::read_to_string(path)?;
-            tasks.push(serde_json::from_str(&content)?);
-        }
-        Ok(tasks)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct WorktreeRecord {
-    name: String,
-    path: String,
-    branch: String,
-    task_id: Option<u64>,
-    status: String,
-    created_at: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    removed_at: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kept_at: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct WorktreeIndex {
-    worktrees: Vec<WorktreeRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct WorktreeManager {
-    repo_root: PathBuf,
-    tasks: TaskManager,
-    events: EventBus,
-    dir: PathBuf,
-    index_path: PathBuf,
-    git_available: bool,
-}
-
-impl WorktreeManager {
-    fn new(repo_root: PathBuf, tasks: TaskManager, events: EventBus) -> anyhow::Result<Self> {
-        let dir = repo_root.join(".worktrees");
-        fs::create_dir_all(&dir)?;
-        let index_path = dir.join("index.json");
-        if !index_path.exists() {
-            fs::write(
-                &index_path,
-                serde_json::to_string_pretty(&WorktreeIndex::default())?,
-            )?;
-        }
-        let git_available = is_git_repo(&repo_root);
-        Ok(Self {
-            repo_root,
-            tasks,
-            events,
-            dir,
-            index_path,
-            git_available,
-        })
-    }
-
-    fn create(&self, name: &str, task_id: Option<u64>, base_ref: &str) -> anyhow::Result<String> {
-        self.validate_name(name)?;
-        if self.find(name)?.is_some() {
-            anyhow::bail!("索引中已存在 worktree '{}'", name);
-        }
-        if let Some(task_id) = task_id {
-            if !self.tasks.exists(task_id) {
-                anyhow::bail!("任务 {} 不存在", task_id);
-            }
-        }
-
-        let path = self.dir.join(name);
-        let branch = format!("wt/{}", name);
-        let task_payload = task_id
-            .map(|id| json!({ "id": id }))
-            .unwrap_or_else(|| json!({}));
-        self.events.emit(
-            "worktree.create.before",
-            task_payload.clone(),
-            json!({ "name": name, "base_ref": base_ref }),
-            None,
-        )?;
-
-        if let Err(err) = self.run_git(&[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            path.to_string_lossy().as_ref(),
-            base_ref,
-        ]) {
-            self.events.emit(
-                "worktree.create.failed",
-                task_payload,
-                json!({ "name": name, "base_ref": base_ref }),
-                Some(err.to_string()),
-            )?;
-            return Err(err);
-        }
-
-        let record = WorktreeRecord {
-            name: name.to_string(),
-            path: path.display().to_string(),
-            branch,
-            task_id,
-            status: "active".to_string(),
-            created_at: now_secs_f64(),
-            removed_at: None,
-            kept_at: None,
-        };
-
-        let mut index = self.load_index()?;
-        index.worktrees.push(record.clone());
-        self.save_index(&index)?;
-        if let Some(task_id) = task_id {
-            self.tasks.bind_worktree(task_id, name, "")?;
-        }
-
-        self.events.emit(
-            "worktree.create.after",
-            record
-                .task_id
-                .map(|id| json!({ "id": id }))
-                .unwrap_or_else(|| json!({})),
-            json!({
-                "name": record.name,
-                "path": record.path,
-                "branch": record.branch,
-                "status": record.status,
-            }),
-            None,
-        )?;
-        Ok(serde_json::to_string_pretty(&record)?)
-    }
-
-    fn list_all(&self) -> anyhow::Result<String> {
-        let index = self.load_index()?;
-        if index.worktrees.is_empty() {
-            return Ok("索引中没有 worktree。".to_string());
-        }
-
-        let mut lines = Vec::new();
-        for wt in index.worktrees {
-            let suffix = wt
-                .task_id
-                .map(|id| format!(" task={}", id))
-                .unwrap_or_default();
-            lines.push(format!(
-                "[{}] {} -> {} ({}){}",
-                wt.status, wt.name, wt.path, wt.branch, suffix
-            ));
-        }
-        Ok(lines.join("\n"))
-    }
-
-    fn status(&self, name: &str) -> anyhow::Result<String> {
-        let wt = self
-            .find(name)?
-            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
-        let path = PathBuf::from(&wt.path);
-        if !path.exists() {
-            anyhow::bail!("worktree 路径不存在: {}", path.display());
-        }
-
-        let output = Command::new("git")
-            .args(["status", "--short", "--branch"])
-            .current_dir(&path)
-            .output()?;
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        let text = text.trim();
-        Ok(if text.is_empty() {
-            "worktree 干净".to_string()
-        } else {
-            text.to_string()
-        })
-    }
-
-    fn run(&self, name: &str, command: &str) -> anyhow::Result<String> {
-        if is_dangerous_command(command) {
-            return Ok("错误: 已拦截危险命令".to_string());
-        }
-
-        let wt = self
-            .find(name)?
-            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
-        let path = PathBuf::from(&wt.path);
-        if !path.exists() {
-            anyhow::bail!("worktree 路径不存在: {}", path.display());
-        }
-
-        run_shell_command(command, Some(&path))
-    }
-
-    fn remove(&self, name: &str, force: bool, complete_task: bool) -> anyhow::Result<String> {
-        let wt = self
-            .find(name)?
-            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
-
-        self.events.emit(
-            "worktree.remove.before",
-            wt.task_id
-                .map(|id| json!({ "id": id }))
-                .unwrap_or_else(|| json!({})),
-            json!({ "name": wt.name, "path": wt.path }),
-            None,
-        )?;
-
-        let mut args = vec!["worktree", "remove"];
-        if force {
-            args.push("--force");
-        }
-        args.push(&wt.path);
-
-        if let Err(err) = self.run_git(&args) {
-            self.events.emit(
-                "worktree.remove.failed",
-                wt.task_id
-                    .map(|id| json!({ "id": id }))
-                    .unwrap_or_else(|| json!({})),
-                json!({ "name": wt.name, "path": wt.path }),
-                Some(err.to_string()),
-            )?;
-            return Err(err);
-        }
-
-        if complete_task {
-            if let Some(task_id) = wt.task_id {
-                let before: TaskRecord = serde_json::from_str(&self.tasks.get(task_id)?)?;
-                self.tasks.update(task_id, Some("completed"), None)?;
-                self.tasks.unbind_worktree(task_id)?;
-                self.events.emit(
-                    "task.completed",
-                    json!({
-                        "id": task_id,
-                        "subject": before.subject,
-                        "status": "completed",
-                    }),
-                    json!({ "name": wt.name }),
-                    None,
-                )?;
-            }
-        }
-
-        let mut index = self.load_index()?;
-        for item in &mut index.worktrees {
-            if item.name == name {
-                item.status = "removed".to_string();
-                item.removed_at = Some(now_secs_f64());
-            }
-        }
-        self.save_index(&index)?;
-
-        self.events.emit(
-            "worktree.remove.after",
-            wt.task_id
-                .map(|id| json!({ "id": id }))
-                .unwrap_or_else(|| json!({})),
-            json!({ "name": wt.name, "path": wt.path, "status": "removed" }),
-            None,
-        )?;
-
-        Ok(format!("已移除 worktree '{}'", name))
-    }
-
-    fn keep(&self, name: &str) -> anyhow::Result<String> {
-        let mut index = self.load_index()?;
-        let mut kept = None;
-        for item in &mut index.worktrees {
-            if item.name == name {
-                item.status = "kept".to_string();
-                item.kept_at = Some(now_secs_f64());
-                kept = Some(item.clone());
-            }
-        }
-        let kept = kept.ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
-        self.save_index(&index)?;
-
-        self.events.emit(
-            "worktree.keep",
-            kept.task_id
-                .map(|id| json!({ "id": id }))
-                .unwrap_or_else(|| json!({})),
-            json!({ "name": kept.name, "path": kept.path, "status": kept.status }),
-            None,
-        )?;
-        Ok(serde_json::to_string_pretty(&kept)?)
-    }
-
-    fn find(&self, name: &str) -> anyhow::Result<Option<WorktreeRecord>> {
-        Ok(self
-            .load_index()?
-            .worktrees
-            .into_iter()
-            .find(|record| record.name == name))
-    }
-
-    fn load_index(&self) -> anyhow::Result<WorktreeIndex> {
-        Ok(serde_json::from_str(&fs::read_to_string(&self.index_path)?)?)
-    }
-
-    fn save_index(&self, index: &WorktreeIndex) -> anyhow::Result<()> {
-        fs::write(&self.index_path, serde_json::to_string_pretty(index)?)?;
-        Ok(())
-    }
-
-    fn validate_name(&self, name: &str) -> anyhow::Result<()> {
-        let valid = !name.is_empty()
-            && name.len() <= 40
-            && name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
-        if !valid {
-            anyhow::bail!("非法的 worktree 名称。请使用 1-40 个字符：字母、数字、.、_、-");
-        }
-        Ok(())
-    }
-
-    fn run_git(&self, args: &[&str]) -> anyhow::Result<String> {
-        if !self.git_available {
-            anyhow::bail!("当前目录不是 git 仓库，worktree 工具需要 git。");
-        }
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_root)
-            .output()?;
-        if !output.status.success() {
-            let mut text = String::new();
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            anyhow::bail!("{}", text.trim());
-        }
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        let text = text.trim();
-        Ok(if text.is_empty() {
-            "(no output)".to_string()
-        } else {
-            text.to_string()
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::thread;
+    use std::time::Duration;
 
     struct TestDir {
         path: PathBuf,
@@ -1341,6 +428,41 @@ mod tests {
         fs::write(path.join("README.md"), "hello\n").expect("write readme");
         run(path, "git", &["add", "."]);
         run(path, "git", &["commit", "-m", "init"]);
+    }
+
+    fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: format!("call-{}", name),
+            r#type: "function".to_string(),
+            function: rustpilot::openai_compat::ToolCallFunction {
+                name: name.to_string(),
+                arguments: serde_json::to_string(&arguments).expect("serialize arguments"),
+            },
+        }
+    }
+
+    fn wait_for_terminal_output(
+        repo_root: &Path,
+        session_id: &str,
+        needle: &str,
+    ) -> serde_json::Value {
+        for _ in 0..40 {
+            let output = handle_tool_call(
+                repo_root,
+                &tool_call(
+                    "terminal_read",
+                    json!({ "session_id": session_id, "from": 0 }),
+                ),
+            )
+            .expect("terminal_read");
+            let parsed: Value = serde_json::from_str(&output).expect("parse terminal_read");
+            let data = parsed["data"].as_str().unwrap_or_default();
+            if data.contains(needle) {
+                return parsed;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("timed out waiting for terminal output: {}", needle);
     }
 
     #[test]
@@ -1437,6 +559,188 @@ mod tests {
         };
         let output = handle_tool_call(temp.path(), &call).unwrap_err().to_string();
         assert!(output.contains("任务 999 不存在"));
+    }
+
+    #[test]
+    fn terminal_tools_support_session_lifecycle() {
+        let _guard = lock_global();
+        reset_terminal_manager().expect("reset terminal manager");
+        let temp = TestDir::new("terminal_tool_lifecycle");
+        init_git_repo(temp.path());
+
+        let created = handle_tool_call(
+            temp.path(),
+            &tool_call(
+                "terminal_create",
+                json!({
+                    "cwd": temp.path().display().to_string()
+                }),
+            ),
+        )
+        .expect("terminal_create");
+        let created: Value = serde_json::from_str(&created).expect("parse terminal_create");
+        let session_id = created["id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let log_path = PathBuf::from(
+            created["log_path"]
+                .as_str()
+                .expect("session log path"),
+        );
+
+        #[cfg(target_os = "windows")]
+        let input = "Write-Output 'tool-session-ok'\n";
+        #[cfg(not(target_os = "windows"))]
+        let input = "printf 'tool-session-ok\\n'\n";
+
+        let write_output = handle_tool_call(
+            temp.path(),
+            &tool_call(
+                "terminal_write",
+                json!({
+                    "session_id": session_id.clone(),
+                    "input": input
+                }),
+            ),
+        )
+        .expect("terminal_write");
+        assert!(write_output.contains("已写入会话"));
+
+        let read = wait_for_terminal_output(temp.path(), &session_id, "tool-session-ok");
+        assert_eq!(read["session_id"].as_str(), Some(session_id.as_str()));
+        assert!(
+            read["data"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("tool-session-ok")
+        );
+        let persisted = fs::read_to_string(&log_path).expect("read terminal log");
+        assert!(persisted.contains("tool-session-ok"));
+
+        let listed = handle_tool_call(temp.path(), &tool_call("terminal_list", json!({})))
+            .expect("terminal_list");
+        let listed: Value = serde_json::from_str(&listed).expect("parse terminal_list");
+        assert!(listed
+            .as_array()
+            .expect("list array")
+            .iter()
+            .any(|item| item["id"].as_str() == Some(session_id.as_str())));
+        let listed_item = listed
+            .as_array()
+            .expect("list array")
+            .iter()
+            .find(|item| item["id"].as_str() == Some(session_id.as_str()))
+            .expect("session in list");
+        assert_eq!(listed_item["source"].as_str(), Some("Live"));
+        assert_eq!(listed_item["read_only"].as_bool(), Some(false));
+
+        let status = handle_tool_call(
+            temp.path(),
+            &tool_call("terminal_status", json!({ "session_id": session_id })),
+        )
+        .expect("terminal_status");
+        let status: Value = serde_json::from_str(&status).expect("parse terminal_status");
+        assert_eq!(status["id"].as_str(), Some(session_id.as_str()));
+        assert_eq!(status["source"].as_str(), Some("Live"));
+        assert_eq!(status["read_only"].as_bool(), Some(false));
+
+        let killed = handle_tool_call(
+            temp.path(),
+            &tool_call("terminal_kill", json!({ "session_id": session_id })),
+        )
+        .expect("terminal_kill");
+        let killed: Value = serde_json::from_str(&killed).expect("parse terminal_kill");
+        assert!(killed["state"].get("Exited").and_then(Value::as_i64).is_some());
+
+        reset_terminal_manager().expect("reset terminal manager");
+    }
+
+    #[test]
+    fn terminal_tools_mark_restored_sessions_read_only() {
+        let _guard = lock_global();
+        reset_terminal_manager().expect("reset terminal manager");
+        let temp = TestDir::new("terminal_tool_restored");
+        init_git_repo(temp.path());
+
+        let created = handle_tool_call(
+            temp.path(),
+            &tool_call(
+                "terminal_create",
+                json!({
+                    "cwd": temp.path().display().to_string()
+                }),
+            ),
+        )
+        .expect("terminal_create");
+        let created: Value = serde_json::from_str(&created).expect("parse terminal_create");
+        let session_id = created["id"].as_str().expect("session id").to_string();
+        let log_path = PathBuf::from(created["log_path"].as_str().expect("log path"));
+
+        #[cfg(target_os = "windows")]
+        let input = "Write-Output 'restored-tool-ok'\n";
+        #[cfg(not(target_os = "windows"))]
+        let input = "printf 'restored-tool-ok\\n'\n";
+
+        handle_tool_call(
+            temp.path(),
+            &tool_call(
+                "terminal_write",
+                json!({
+                    "session_id": session_id.clone(),
+                    "input": input
+                }),
+            ),
+        )
+        .expect("terminal_write");
+        let _ = wait_for_terminal_output(temp.path(), &session_id, "restored-tool-ok");
+        let _ = handle_tool_call(
+            temp.path(),
+            &tool_call("terminal_kill", json!({ "session_id": session_id.clone() })),
+        )
+        .expect("terminal_kill");
+
+        clear_terminal_manager_live_sessions().expect("clear live terminal sessions");
+
+        let listed = handle_tool_call(temp.path(), &tool_call("terminal_list", json!({})))
+            .expect("terminal_list");
+        let listed: Value = serde_json::from_str(&listed).expect("parse terminal_list");
+        let listed_item = listed
+            .as_array()
+            .expect("list array")
+            .iter()
+            .find(|item| item["id"].as_str() == Some(session_id.as_str()))
+            .expect("restored session in list");
+        assert_eq!(listed_item["source"].as_str(), Some("Restored"));
+        assert_eq!(listed_item["read_only"].as_bool(), Some(true));
+
+        let status = handle_tool_call(
+            temp.path(),
+            &tool_call("terminal_status", json!({ "session_id": session_id.clone() })),
+        )
+        .expect("terminal_status");
+        let status: Value = serde_json::from_str(&status).expect("parse terminal_status");
+        assert_eq!(status["source"].as_str(), Some("Restored"));
+        assert_eq!(status["read_only"].as_bool(), Some(true));
+
+        let write_error = handle_tool_call(
+            temp.path(),
+            &tool_call(
+                "terminal_write",
+                json!({
+                    "session_id": session_id,
+                    "input": "echo should-fail\n"
+                }),
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(write_error.contains("restored and read-only"));
+
+        let persisted = fs::read_to_string(log_path).expect("read terminal log");
+        assert!(persisted.contains("restored-tool-ok"));
+
+        reset_terminal_manager().expect("reset terminal manager");
     }
 
     #[test]
