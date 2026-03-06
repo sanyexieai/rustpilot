@@ -4,8 +4,8 @@ use rustpilot::openai_compat::{
     ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice, ToolFunction,
 };
 use rustpilot::tools::{
-    edit_file, read_file, write_file, BashArgs, BashTool, EditFileArgs, ReadFileArgs,
-    WriteFileArgs,
+    edit_file, is_dangerous_command, read_file, run_shell_command, write_file, BashArgs,
+    BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1110,10 +1110,8 @@ impl WorktreeManager {
     }
 
     fn run(&self, name: &str, command: &str) -> anyhow::Result<String> {
-        for token in ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"] {
-            if command.contains(token) {
-                return Ok("错误: 已拦截危险命令".to_string());
-            }
+        if is_dangerous_command(command) {
+            return Ok("错误: 已拦截危险命令".to_string());
         }
 
         let wt = self
@@ -1124,20 +1122,7 @@ impl WorktreeManager {
             anyhow::bail!("worktree 路径不存在: {}", path.display());
         }
 
-        let wrapped = wrap_powershell_command(command);
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &wrapped])
-            .current_dir(path)
-            .output()?;
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        let text = text.trim();
-        Ok(if text.is_empty() {
-            "(no output)".to_string()
-        } else {
-            text.to_string()
-        })
+        run_shell_command(command, Some(&path))
     }
 
     fn remove(&self, name: &str, force: bool, complete_task: bool) -> anyhow::Result<String> {
@@ -1288,13 +1273,6 @@ impl WorktreeManager {
             text.to_string()
         })
     }
-}
-
-fn wrap_powershell_command(command: &str) -> String {
-    format!(
-        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $OutputEncoding = [Console]::OutputEncoding; {}",
-        command
-    )
 }
 
 #[cfg(test)]

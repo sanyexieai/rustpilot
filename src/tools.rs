@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 const MAX_OUTPUT_BYTES: usize = 50_000;
 
@@ -34,22 +34,31 @@ pub struct BashTool;
 
 impl BashTool {
     pub fn run(command: &str) -> anyhow::Result<String> {
-        let normalized = normalize_command(command);
-        let wrapped = wrap_powershell_command(&normalized);
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &wrapped])
-            .output()?;
-
-        let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout));
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-
-        if combined.trim().is_empty() {
-            combined = "(no output)".to_string();
-        }
-
-        Ok(truncate_output(combined))
+        run_shell_command(command, None)
     }
+}
+
+pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<String> {
+    let normalized = normalize_command(command);
+    let output = shell_command(&normalized, current_dir)?.output()?;
+    Ok(format_command_output(output))
+}
+
+pub fn is_dangerous_command(command: &str) -> bool {
+    const COMMON_TOKENS: &[&str] = &["shutdown", "reboot"];
+    const UNIX_TOKENS: &[&str] = &["rm -rf /", "sudo", "> /dev/"];
+    const WINDOWS_TOKENS: &[&str] = &[
+        "Remove-Item",
+        "rd /s /q",
+        "del /f /s /q",
+        "format ",
+    ];
+
+    COMMON_TOKENS
+        .iter()
+        .chain(UNIX_TOKENS.iter())
+        .chain(WINDOWS_TOKENS.iter())
+        .any(|token| command.contains(token))
 }
 
 pub fn read_file(args: &ReadFileArgs) -> anyhow::Result<String> {
@@ -119,7 +128,24 @@ fn truncate_output(mut text: String) -> String {
     text
 }
 
+fn format_command_output(output: Output) -> String {
+    let mut combined = String::new();
+    combined.push_str(&String::from_utf8_lossy(&output.stdout));
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    if combined.trim().is_empty() {
+        combined = "(no output)".to_string();
+    }
+
+    truncate_output(combined)
+}
+
 fn normalize_command(command: &str) -> String {
+    normalize_command_impl(command)
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_command_impl(command: &str) -> String {
     let mut normalized = command.replace("2>/dev/null", "2>$null");
     normalized = normalized.replace("ls -la", "Get-ChildItem -Force");
     normalized = normalized.replace("&&", "; if (-not $?) { exit 1 };");
@@ -138,6 +164,33 @@ fn normalize_command(command: &str) -> String {
     normalized
 }
 
+#[cfg(not(target_os = "windows"))]
+fn normalize_command_impl(command: &str) -> String {
+    command.to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<Command> {
+    let wrapped = wrap_powershell_command(command);
+    let mut process = Command::new("powershell");
+    process.args(["-NoProfile", "-Command", &wrapped]);
+    if let Some(dir) = current_dir {
+        process.current_dir(dir);
+    }
+    Ok(process)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<Command> {
+    let mut process = Command::new("sh");
+    process.args(["-lc", command]);
+    if let Some(dir) = current_dir {
+        process.current_dir(dir);
+    }
+    Ok(process)
+}
+
+#[cfg(target_os = "windows")]
 fn wrap_powershell_command(command: &str) -> String {
     format!(
         "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); \
