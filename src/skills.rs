@@ -143,7 +143,9 @@ mod tests {
                     .expect("time")
                     .as_nanos()
             );
-            let path = std::env::temp_dir().join("rustpilot_skills_tests").join(unique);
+            let path = std::env::temp_dir()
+                .join("rustpilot_skills_tests")
+                .join(unique);
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

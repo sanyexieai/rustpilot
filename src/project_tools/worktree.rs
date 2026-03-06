@@ -1,0 +1,354 @@
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use crate::shell_file_tools::{is_dangerous_command, run_shell_command};
+
+use super::event::EventBus;
+use super::task::{TaskManager, TaskRecord};
+use super::util::{is_git_repo, now_secs_f64};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorktreeRecord {
+    pub name: String,
+    pub path: String,
+    pub branch: String,
+    pub task_id: Option<u64>,
+    pub status: String,
+    pub created_at: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_at: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct WorktreeIndex {
+    worktrees: Vec<WorktreeRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeManager {
+    repo_root: PathBuf,
+    tasks: TaskManager,
+    events: EventBus,
+    dir: PathBuf,
+    index_path: PathBuf,
+    pub git_available: bool,
+}
+
+impl WorktreeManager {
+    pub fn new(repo_root: PathBuf, tasks: TaskManager, events: EventBus) -> anyhow::Result<Self> {
+        let dir = repo_root.join(".worktrees");
+        fs::create_dir_all(&dir)?;
+        let index_path = dir.join("index.json");
+        if !index_path.exists() {
+            fs::write(
+                &index_path,
+                serde_json::to_string_pretty(&WorktreeIndex::default())?,
+            )?;
+        }
+        let git_available = is_git_repo(&repo_root);
+        Ok(Self {
+            repo_root,
+            tasks,
+            events,
+            dir,
+            index_path,
+            git_available,
+        })
+    }
+
+    pub fn create(
+        &self,
+        name: &str,
+        task_id: Option<u64>,
+        base_ref: &str,
+    ) -> anyhow::Result<String> {
+        self.validate_name(name)?;
+        if self.find(name)?.is_some() {
+            anyhow::bail!("索引中已存在 worktree '{}'", name);
+        }
+        if let Some(task_id) = task_id {
+            if !self.tasks.exists(task_id) {
+                anyhow::bail!("任务 {} 不存在", task_id);
+            }
+        }
+
+        let path = self.dir.join(name);
+        let branch = format!("wt/{}", name);
+        let task_payload = task_id
+            .map(|id| json!({ "id": id }))
+            .unwrap_or_else(|| json!({}));
+        self.events.emit(
+            "worktree.create.before",
+            task_payload.clone(),
+            json!({ "name": name, "base_ref": base_ref }),
+            None,
+        )?;
+
+        if let Err(err) = self.run_git(&[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            path.to_string_lossy().as_ref(),
+            base_ref,
+        ]) {
+            self.events.emit(
+                "worktree.create.failed",
+                task_payload,
+                json!({ "name": name, "base_ref": base_ref }),
+                Some(err.to_string()),
+            )?;
+            return Err(err);
+        }
+
+        let record = WorktreeRecord {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            branch,
+            task_id,
+            status: "active".to_string(),
+            created_at: now_secs_f64(),
+            removed_at: None,
+            kept_at: None,
+        };
+
+        let mut index = self.load_index()?;
+        index.worktrees.push(record.clone());
+        self.save_index(&index)?;
+        if let Some(task_id) = task_id {
+            self.tasks.bind_worktree(task_id, name, "")?;
+        }
+
+        self.events.emit(
+            "worktree.create.after",
+            record
+                .task_id
+                .map(|id| json!({ "id": id }))
+                .unwrap_or_else(|| json!({})),
+            json!({
+                "name": record.name,
+                "path": record.path,
+                "branch": record.branch,
+                "status": record.status,
+            }),
+            None,
+        )?;
+        Ok(serde_json::to_string_pretty(&record)?)
+    }
+
+    pub fn list_all(&self) -> anyhow::Result<String> {
+        let index = self.load_index()?;
+        if index.worktrees.is_empty() {
+            return Ok("索引中没有 worktree。".to_string());
+        }
+
+        let mut lines = Vec::new();
+        for wt in index.worktrees {
+            let suffix = wt
+                .task_id
+                .map(|id| format!(" task={}", id))
+                .unwrap_or_default();
+            lines.push(format!(
+                "[{}] {} -> {} ({}){}",
+                wt.status, wt.name, wt.path, wt.branch, suffix
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    pub fn status(&self, name: &str) -> anyhow::Result<String> {
+        let wt = self
+            .find(name)?
+            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
+        let path = PathBuf::from(&wt.path);
+        if !path.exists() {
+            anyhow::bail!("worktree 路径不存在: {}", path.display());
+        }
+
+        let output = Command::new("git")
+            .args(["status", "--short", "--branch"])
+            .current_dir(&path)
+            .output()?;
+        let mut text = String::new();
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        let text = text.trim();
+        Ok(if text.is_empty() {
+            "worktree 干净".to_string()
+        } else {
+            text.to_string()
+        })
+    }
+
+    pub fn run(&self, name: &str, command: &str) -> anyhow::Result<String> {
+        if is_dangerous_command(command) {
+            return Ok("错误: 已拦截危险命令".to_string());
+        }
+
+        let wt = self
+            .find(name)?
+            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
+        let path = PathBuf::from(&wt.path);
+        if !path.exists() {
+            anyhow::bail!("worktree 路径不存在: {}", path.display());
+        }
+
+        run_shell_command(command, Some(&path))
+    }
+
+    pub fn remove(&self, name: &str, force: bool, complete_task: bool) -> anyhow::Result<String> {
+        let wt = self
+            .find(name)?
+            .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
+
+        self.events.emit(
+            "worktree.remove.before",
+            wt.task_id
+                .map(|id| json!({ "id": id }))
+                .unwrap_or_else(|| json!({})),
+            json!({ "name": wt.name, "path": wt.path }),
+            None,
+        )?;
+
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&wt.path);
+
+        if let Err(err) = self.run_git(&args) {
+            self.events.emit(
+                "worktree.remove.failed",
+                wt.task_id
+                    .map(|id| json!({ "id": id }))
+                    .unwrap_or_else(|| json!({})),
+                json!({ "name": wt.name, "path": wt.path }),
+                Some(err.to_string()),
+            )?;
+            return Err(err);
+        }
+
+        if complete_task {
+            if let Some(task_id) = wt.task_id {
+                let before: TaskRecord = serde_json::from_str(&self.tasks.get(task_id)?)?;
+                self.tasks.update(task_id, Some("completed"), None)?;
+                self.tasks.unbind_worktree(task_id)?;
+                self.events.emit(
+                    "task.completed",
+                    json!({
+                        "id": task_id,
+                        "subject": before.subject,
+                        "status": "completed",
+                    }),
+                    json!({ "name": wt.name }),
+                    None,
+                )?;
+            }
+        }
+
+        let mut index = self.load_index()?;
+        for item in &mut index.worktrees {
+            if item.name == name {
+                item.status = "removed".to_string();
+                item.removed_at = Some(now_secs_f64());
+            }
+        }
+        self.save_index(&index)?;
+
+        self.events.emit(
+            "worktree.remove.after",
+            wt.task_id
+                .map(|id| json!({ "id": id }))
+                .unwrap_or_else(|| json!({})),
+            json!({ "name": wt.name, "path": wt.path, "status": "removed" }),
+            None,
+        )?;
+
+        Ok(format!("已移除 worktree '{}'", name))
+    }
+
+    pub fn keep(&self, name: &str) -> anyhow::Result<String> {
+        let mut index = self.load_index()?;
+        let mut kept = None;
+        for item in &mut index.worktrees {
+            if item.name == name {
+                item.status = "kept".to_string();
+                item.kept_at = Some(now_secs_f64());
+                kept = Some(item.clone());
+            }
+        }
+        let kept = kept.ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;
+        self.save_index(&index)?;
+
+        self.events.emit(
+            "worktree.keep",
+            kept.task_id
+                .map(|id| json!({ "id": id }))
+                .unwrap_or_else(|| json!({})),
+            json!({ "name": kept.name, "path": kept.path, "status": kept.status }),
+            None,
+        )?;
+        Ok(serde_json::to_string_pretty(&kept)?)
+    }
+
+    fn find(&self, name: &str) -> anyhow::Result<Option<WorktreeRecord>> {
+        Ok(self
+            .load_index()?
+            .worktrees
+            .into_iter()
+            .find(|record| record.name == name))
+    }
+
+    fn load_index(&self) -> anyhow::Result<WorktreeIndex> {
+        Ok(serde_json::from_str(&fs::read_to_string(
+            &self.index_path,
+        )?)?)
+    }
+
+    fn save_index(&self, index: &WorktreeIndex) -> anyhow::Result<()> {
+        fs::write(&self.index_path, serde_json::to_string_pretty(index)?)?;
+        Ok(())
+    }
+
+    fn validate_name(&self, name: &str) -> anyhow::Result<()> {
+        let valid = !name.is_empty()
+            && name.len() <= 40
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+        if !valid {
+            anyhow::bail!("非法的 worktree 名称。请使用 1-40 个字符：字母、数字、.、_、-");
+        }
+        Ok(())
+    }
+
+    fn run_git(&self, args: &[&str]) -> anyhow::Result<String> {
+        if !self.git_available {
+            anyhow::bail!("当前目录不是 git 仓库，worktree 工具需要 git。");
+        }
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            let mut text = String::new();
+            text.push_str(&String::from_utf8_lossy(&output.stdout));
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!("{}", text.trim());
+        }
+        let mut text = String::new();
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        let text = text.trim();
+        Ok(if text.is_empty() {
+            "(no output)".to_string()
+        } else {
+            text.to_string()
+        })
+    }
+}

@@ -170,8 +170,7 @@ impl TerminalManager {
 
     pub fn write(&self, session_id: &str, input: &str) -> anyhow::Result<()> {
         let mut sessions = self.sessions.lock().map_err(lock_error)?;
-        let entry = sessions
-            .get_mut(session_id);
+        let entry = sessions.get_mut(session_id);
         if let Some(entry) = entry {
             refresh_state(entry)?;
             if !matches!(entry.state, SessionState::Running) {
@@ -297,7 +296,8 @@ impl TerminalManager {
             }
         }
         sessions.clear();
-        *self.next_id.lock().map_err(lock_error)? = load_next_session_id(&self.index_path).unwrap_or(1);
+        *self.next_id.lock().map_err(lock_error)? =
+            load_next_session_id(&self.index_path).unwrap_or(1);
         Ok(())
     }
 
@@ -498,7 +498,9 @@ mod tests {
     #[test]
     fn create_and_list_session() {
         let manager = TerminalManager::with_log_dir(temp_dir("create_list_logs"));
-        let info = manager.create(TerminalCreateRequest::new()).expect("create");
+        let info = manager
+            .create(TerminalCreateRequest::new())
+            .expect("create");
         assert_eq!(info.id, "term-1");
         assert_eq!(info.state, SessionState::Running);
         assert_eq!(info.source, SessionSource::Live);
@@ -554,7 +556,9 @@ mod tests {
     #[test]
     fn kill_updates_session_state() {
         let manager = TerminalManager::with_log_dir(temp_dir("kill_logs"));
-        let info = manager.create(TerminalCreateRequest::new()).expect("create");
+        let info = manager
+            .create(TerminalCreateRequest::new())
+            .expect("create");
         let killed = manager.kill(&info.id).expect("kill");
         assert!(matches!(killed.state, SessionState::Exited(_)));
         manager.reset().expect("reset");
@@ -564,12 +568,18 @@ mod tests {
     fn persisted_metadata_supports_reload_and_read() {
         let log_dir = temp_dir("metadata_reload_logs");
         let manager = TerminalManager::with_log_dir(log_dir.clone());
-        let info = manager.create(TerminalCreateRequest::new()).expect("create");
+        let info = manager
+            .create(TerminalCreateRequest::new())
+            .expect("create");
 
         #[cfg(target_os = "windows")]
-        manager.write(&info.id, "Write-Output 'persisted-ok'\n").expect("write");
+        manager
+            .write(&info.id, "Write-Output 'persisted-ok'\n")
+            .expect("write");
         #[cfg(not(target_os = "windows"))]
-        manager.write(&info.id, "printf 'persisted-ok\\n'\n").expect("write");
+        manager
+            .write(&info.id, "printf 'persisted-ok\\n'\n")
+            .expect("write");
 
         let _ = wait_for_output(&manager, &info.id, "persisted-ok");
         let _ = manager.kill(&info.id).expect("kill");
@@ -581,7 +591,9 @@ mod tests {
         assert!(status.read_only);
         let read = reloaded.read(&info.id, 0).expect("read");
         assert!(read.data.contains("persisted-ok"));
-        let next = reloaded.create(TerminalCreateRequest::new()).expect("create next");
+        let next = reloaded
+            .create(TerminalCreateRequest::new())
+            .expect("create next");
         assert_eq!(next.id, "term-2");
         let _ = reloaded.kill(&next.id);
 
@@ -592,10 +604,15 @@ mod tests {
     fn write_rejects_restored_and_unknown_sessions() {
         let log_dir = temp_dir("write_error_logs");
         let manager = TerminalManager::with_log_dir(log_dir.clone());
-        let info = manager.create(TerminalCreateRequest::new()).expect("create");
+        let info = manager
+            .create(TerminalCreateRequest::new())
+            .expect("create");
         let _ = manager.kill(&info.id).expect("kill");
 
-        let exited = manager.write(&info.id, "echo should-fail\n").unwrap_err().to_string();
+        let exited = manager
+            .write(&info.id, "echo should-fail\n")
+            .unwrap_err()
+            .to_string();
         assert!(exited.contains("session has exited"));
 
         let reloaded = TerminalManager::with_log_dir(log_dir);
@@ -618,12 +635,12 @@ mod tests {
     fn cleared_live_sessions_make_entries_restored() {
         let log_dir = temp_dir("clear_live_logs");
         let manager = TerminalManager::with_log_dir(log_dir.clone());
-        let info = manager.create(TerminalCreateRequest::new()).expect("create");
+        let info = manager
+            .create(TerminalCreateRequest::new())
+            .expect("create");
         let _ = manager.kill(&info.id).expect("kill");
 
-        manager
-            .clear_live_sessions()
-            .expect("clear live sessions");
+        manager.clear_live_sessions().expect("clear live sessions");
         let listed = manager.list().expect("list");
         let session = listed
             .into_iter()

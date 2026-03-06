@@ -1,15 +1,15 @@
 use anyhow::Context;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::openai_compat::{Tool, ToolCall, ToolFunction};
-use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
-use crate::tools::{
-    edit_file, read_file, write_file, BashArgs, BashTool, EditFileArgs, ReadFileArgs,
-    WriteFileArgs,
+use crate::shell_file_tools::{
+    BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file, read_file, write_file,
 };
+use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
 
 fn terminal_manager() -> &'static TerminalManager {
     static MANAGER: OnceLock<TerminalManager> = OnceLock::new();
@@ -145,14 +145,15 @@ pub fn builtin_tool_definitions() -> Vec<Tool> {
 
 pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String>> {
     let output = match call.function.name.as_str() {
-        "bash" => {
-            let args: BashArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid bash arguments")?;
-            BashTool::run(&args.command)?
-        }
-        "terminal_create" => {
-            let args: TerminalCreateArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid terminal_create arguments")?;
+        "bash" => run_builtin_tool("bash", || {
+            let args: BashArgs = parse_tool_args("bash", &call.function.arguments)?;
+            run_with_classified_error("bash", BuiltinToolErrorKind::Execution, || {
+                BashTool::run(&args.command)
+            })
+        })?,
+        "terminal_create" => run_builtin_tool("terminal_create", || {
+            let args: TerminalCreateArgs =
+                parse_tool_args("terminal_create", &call.function.arguments)?;
             let request = TerminalCreateRequest {
                 cwd: args.cwd.map(PathBuf::from),
                 shell: args.shell,
@@ -163,47 +164,70 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
                     .map(|item| (item.key, item.value))
                     .collect(),
             };
-            serde_json::to_string_pretty(&terminal_manager().create(request)?)?
-        }
-        "terminal_write" => {
-            let args: TerminalWriteArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid terminal_write arguments")?;
-            terminal_manager().write(&args.session_id, &args.input)?;
-            format!("已写入会话 {}", args.session_id)
-        }
-        "terminal_read" => {
-            let args: TerminalReadArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid terminal_read arguments")?;
-            serde_json::to_string_pretty(
-                &terminal_manager().read(&args.session_id, args.from.unwrap_or(0))?,
-            )?
-        }
-        "terminal_list" => serde_json::to_string_pretty(&terminal_manager().list()?)?,
-        "terminal_status" => {
-            let args: TerminalSessionArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid terminal_status arguments")?;
-            serde_json::to_string_pretty(&terminal_manager().status(&args.session_id)?)?
-        }
-        "terminal_kill" => {
-            let args: TerminalSessionArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid terminal_kill arguments")?;
-            serde_json::to_string_pretty(&terminal_manager().kill(&args.session_id)?)?
-        }
-        "read_file" => {
-            let args: ReadFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid read_file arguments")?;
-            read_file(&args)?
-        }
-        "write_file" => {
-            let args: WriteFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid write_file arguments")?;
-            write_file(&args)?
-        }
-        "edit_file" => {
-            let args: EditFileArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid edit_file arguments")?;
-            edit_file(&args)?
-        }
+            run_with_classified_error("terminal_create", BuiltinToolErrorKind::Session, || {
+                Ok(serde_json::to_string_pretty(
+                    &terminal_manager().create(request)?,
+                )?)
+            })
+        })?,
+        "terminal_write" => run_builtin_tool("terminal_write", || {
+            let args: TerminalWriteArgs =
+                parse_tool_args("terminal_write", &call.function.arguments)?;
+            run_with_classified_error("terminal_write", BuiltinToolErrorKind::Session, || {
+                terminal_manager().write(&args.session_id, &args.input)?;
+                Ok(format!("已写入会话 {}", args.session_id))
+            })
+        })?,
+        "terminal_read" => run_builtin_tool("terminal_read", || {
+            let args: TerminalReadArgs =
+                parse_tool_args("terminal_read", &call.function.arguments)?;
+            run_with_classified_error("terminal_read", BuiltinToolErrorKind::Session, || {
+                Ok(serde_json::to_string_pretty(
+                    &terminal_manager().read(&args.session_id, args.from.unwrap_or(0))?,
+                )?)
+            })
+        })?,
+        "terminal_list" => run_builtin_tool("terminal_list", || {
+            run_with_classified_error("terminal_list", BuiltinToolErrorKind::Session, || {
+                Ok(serde_json::to_string_pretty(&terminal_manager().list()?)?)
+            })
+        })?,
+        "terminal_status" => run_builtin_tool("terminal_status", || {
+            let args: TerminalSessionArgs =
+                parse_tool_args("terminal_status", &call.function.arguments)?;
+            run_with_classified_error("terminal_status", BuiltinToolErrorKind::Session, || {
+                Ok(serde_json::to_string_pretty(
+                    &terminal_manager().status(&args.session_id)?,
+                )?)
+            })
+        })?,
+        "terminal_kill" => run_builtin_tool("terminal_kill", || {
+            let args: TerminalSessionArgs =
+                parse_tool_args("terminal_kill", &call.function.arguments)?;
+            run_with_classified_error("terminal_kill", BuiltinToolErrorKind::Session, || {
+                Ok(serde_json::to_string_pretty(
+                    &terminal_manager().kill(&args.session_id)?,
+                )?)
+            })
+        })?,
+        "read_file" => run_builtin_tool("read_file", || {
+            let args: ReadFileArgs = parse_tool_args("read_file", &call.function.arguments)?;
+            run_with_classified_error("read_file", BuiltinToolErrorKind::FileSystem, || {
+                read_file(&args)
+            })
+        })?,
+        "write_file" => run_builtin_tool("write_file", || {
+            let args: WriteFileArgs = parse_tool_args("write_file", &call.function.arguments)?;
+            run_with_classified_error("write_file", BuiltinToolErrorKind::FileSystem, || {
+                write_file(&args)
+            })
+        })?,
+        "edit_file" => run_builtin_tool("edit_file", || {
+            let args: EditFileArgs = parse_tool_args("edit_file", &call.function.arguments)?;
+            run_with_classified_error("edit_file", BuiltinToolErrorKind::FileSystem, || {
+                edit_file(&args)
+            })
+        })?,
         _ => return Ok(None),
     };
 
@@ -226,6 +250,77 @@ fn tool(name: &str, description: &str, parameters: serde_json::Value) -> Tool {
             description: description.to_string(),
             parameters,
         },
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BuiltinToolErrorKind {
+    Input,
+    Execution,
+    FileSystem,
+    Session,
+}
+
+impl BuiltinToolErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Execution => "execution",
+            Self::FileSystem => "filesystem",
+            Self::Session => "session",
+        }
+    }
+}
+
+fn parse_tool_args<T: DeserializeOwned>(tool: &str, arguments: &str) -> anyhow::Result<T> {
+    serde_json::from_str(arguments)
+        .with_context(|| format!("invalid {} arguments", tool))
+        .map_err(|err| wrap_builtin_error(tool, BuiltinToolErrorKind::Input, err))
+}
+
+fn run_builtin_tool<F>(tool: &str, run: F) -> anyhow::Result<String>
+where
+    F: FnOnce() -> anyhow::Result<String>,
+{
+    log_builtin_tool(tool, "start", None);
+    match run() {
+        Ok(output) => {
+            let detail = format!("output_bytes={}", output.len());
+            log_builtin_tool(tool, "ok", Some(&detail));
+            Ok(output)
+        }
+        Err(err) => {
+            let detail = err.to_string();
+            log_builtin_tool(tool, "error", Some(&detail));
+            Err(err)
+        }
+    }
+}
+
+fn run_with_classified_error<F>(
+    tool: &str,
+    kind: BuiltinToolErrorKind,
+    run: F,
+) -> anyhow::Result<String>
+where
+    F: FnOnce() -> anyhow::Result<String>,
+{
+    run().map_err(|err| wrap_builtin_error(tool, kind, err))
+}
+
+fn wrap_builtin_error(tool: &str, kind: BuiltinToolErrorKind, err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "builtin tool '{}' failed [{}]: {}",
+        tool,
+        kind.as_str(),
+        err
+    )
+}
+
+fn log_builtin_tool(tool: &str, stage: &str, detail: Option<&str>) {
+    match detail {
+        Some(detail) => eprintln!("[builtin:{}] {} {}", tool, stage, detail),
+        None => eprintln!("[builtin:{}] {}", tool, stage),
     }
 }
 

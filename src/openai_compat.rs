@@ -53,7 +53,10 @@ pub struct ToolCallFunction {
 #[serde(untagged)]
 pub enum ToolChoice {
     Auto(String),
-    Named { r#type: String, function: ToolChoiceFunction },
+    Named {
+        r#type: String,
+        function: ToolChoiceFunction,
+    },
 }
 
 #[derive(Debug, Serialize)]

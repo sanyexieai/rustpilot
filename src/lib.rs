@@ -1,8 +1,11 @@
 pub mod activity;
+pub mod agent;
 pub mod agent_tools;
+pub mod cli;
 pub mod config;
+pub mod constants;
 pub mod openai_compat;
 pub mod project_tools;
+pub mod shell_file_tools;
 pub mod skills;
 pub mod terminal_session;
-pub mod tools;

@@ -47,12 +47,7 @@ pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::R
 pub fn is_dangerous_command(command: &str) -> bool {
     const COMMON_TOKENS: &[&str] = &["shutdown", "reboot"];
     const UNIX_TOKENS: &[&str] = &["rm -rf /", "sudo", "> /dev/"];
-    const WINDOWS_TOKENS: &[&str] = &[
-        "Remove-Item",
-        "rd /s /q",
-        "del /f /s /q",
-        "format ",
-    ];
+    const WINDOWS_TOKENS: &[&str] = &["Remove-Item", "rd /s /q", "del /f /s /q", "format "];
 
     COMMON_TOKENS
         .iter()
@@ -71,7 +66,7 @@ pub fn read_file(args: &ReadFileArgs) -> anyhow::Result<String> {
             let omitted = lines.len() - max_lines;
             lines.truncate(max_lines);
             let mut out = lines.join("\n");
-            out.push_str(&format!("\n...（还有 {} 行）", omitted));
+            out.push_str(&format!("\n...(还有 {} 行)", omitted));
             out
         } else {
             lines.join("\n")
@@ -89,7 +84,11 @@ pub fn write_file(args: &WriteFileArgs) -> anyhow::Result<String> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, &args.content)?;
-    Ok(format!("已写入 {} 字节到 {}", args.content.len(), path.display()))
+    Ok(format!(
+        "已写入 {} 字节到 {}",
+        args.content.len(),
+        path.display()
+    ))
 }
 
 pub fn edit_file(args: &EditFileArgs) -> anyhow::Result<String> {
@@ -111,7 +110,11 @@ pub fn edit_file(args: &EditFileArgs) -> anyhow::Result<String> {
 fn safe_path(input: &str) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let raw = PathBuf::from(input);
-    let candidate = if raw.is_absolute() { raw } else { cwd.join(raw) };
+    let candidate = if raw.is_absolute() {
+        raw
+    } else {
+        cwd.join(raw)
+    };
 
     match candidate.canonicalize() {
         Ok(path) => Ok(path),
@@ -124,7 +127,7 @@ fn truncate_output(mut text: String) -> String {
         return text;
     }
     text.truncate(MAX_OUTPUT_BYTES);
-    text.push_str("\n...（输出已截断）");
+    text.push_str("\n...(输出已截断)");
     text
 }
 

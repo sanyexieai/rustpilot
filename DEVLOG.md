@@ -37,6 +37,7 @@ This keeps the plan dynamic instead of locking the project into an outdated task
 - Replaced per-call project manager construction with a shared `ProjectContext` created once at startup.
 - Moved activity/progress rendering and heartbeat logic out of `main.rs` into a dedicated runtime module.
 - Activated the `skills` module with minimal CLI entrypoints and test coverage.
+- Split the project tool layer into submodules under `src/project_tools/`.
 
 ### Current Limitations
 
@@ -77,6 +78,19 @@ Changes made:
 - Added shared project state in [src/project_tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools.rs) so CLI commands and tool dispatch reuse the same managers instead of recreating them per call.
 - Extracted activity state, rendering, and wait heartbeat into [src/activity.rs](/d:/code/rustpilot/rustpilot/src/activity.rs).
 - Added `/skills` and `/skill <name>` commands in [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) and covered `SkillRegistry` loading in [src/skills.rs](/d:/code/rustpilot/rustpilot/src/skills.rs).
+- Replaced the single [src/project_tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools.rs) file with `context.rs`, `event.rs`, `task.rs`, `tools.rs`, `util.rs`, and `worktree.rs` under [project_tools](/d:/code/rustpilot/rustpilot/src/project_tools/mod.rs).
+- Split more `main.rs` orchestration into dedicated modules:
+  - added [src/constants.rs](/d:/code/rustpilot/rustpilot/src/constants.rs) for shared runtime constants
+  - added [src/agent.rs](/d:/code/rustpilot/rustpilot/src/agent.rs) for agent loop and tool dispatch aggregation
+  - added [src/cli.rs](/d:/code/rustpilot/rustpilot/src/cli.rs) for slash-command handling
+- Reduced [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) to the binary entrypoint, repo-root detection, timeout lookup, and integration tests.
+- Renamed the top-level builtin shell/file support module from [src/tools.rs](/d:/code/rustpilot/rustpilot/src/tools.rs) to [src/shell_file_tools.rs](/d:/code/rustpilot/rustpilot/src/shell_file_tools.rs) so it is no longer confused with [src/agent_tools.rs](/d:/code/rustpilot/rustpilot/src/agent_tools.rs) or [src/project_tools/tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools/tools.rs).
+- Updated imports in [src/agent_tools.rs](/d:/code/rustpilot/rustpilot/src/agent_tools.rs) and [src/project_tools/worktree.rs](/d:/code/rustpilot/rustpilot/src/project_tools/worktree.rs) to use the renamed low-level module.
+- Moved binary-level integration coverage out of [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) into [tests/app_integration.rs](/d:/code/rustpilot/rustpilot/tests/app_integration.rs), keeping only the entrypoint-private tests for repo-root detection and timeout lookup inside `main.rs`.
+- Slimmed [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) imports so the binary entrypoint no longer depends on task/worktree/event/terminal test helpers.
+- Repaired user-facing mojibake/garbled strings in [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs), [src/cli.rs](/d:/code/rustpilot/rustpilot/src/cli.rs), [src/agent_tools.rs](/d:/code/rustpilot/rustpilot/src/agent_tools.rs), [src/shell_file_tools.rs](/d:/code/rustpilot/rustpilot/src/shell_file_tools.rs), and [src/project_tools/tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools/tools.rs).
+- Added builtin tool execution logging and error classification in [src/agent_tools.rs](/d:/code/rustpilot/rustpilot/src/agent_tools.rs), so parse/runtime failures now carry a stable `input` / `filesystem` / `execution` / `session` category.
+- Added regression coverage in [tests/app_integration.rs](/d:/code/rustpilot/rustpilot/tests/app_integration.rs) for builtin tool input-error and filesystem-error classification.
 
 Adjustment:
 
@@ -87,4 +101,9 @@ Adjustment:
 - `main.rs` is now much closer to an orchestration entrypoint; the next coupling boundary is likely activity/progress rendering rather than tool plumbing.
 - The next worthwhile runtime improvement is deciding whether project state should stay file-backed-only or gain a bounded cache for hot paths.
 - The lingering `skills` warning is resolved; the next cleanup target is now functional rather than structural.
+- The next structural cleanup, if needed, is likely the builtin tool side (`agent_tools.rs` vs `tools.rs`) rather than the project tool side.
 - With runtime progress extracted, the next practical cleanup target is either the lingering `skills` warning or a bounded cache for task/worktree hot paths.
+- The next `main.rs` cleanup after this split is no longer coarse module extraction; it is likely either moving CLI tests out of the binary or tightening builtin tool naming (`agent_tools.rs` vs `tools.rs`).
+- After renaming the low-level shell/file module, the next cleanup is less about naming and more about behavior boundaries: either move binary integration tests out of [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) or decide whether builtin tool execution should gain stronger runtime logging and error classification.
+- With integration coverage now in `tests/`, the next cleanup target is probably behavioral rather than structural: builtin tool logging/error classification, or a deeper terminal backend upgrade.
+- With builtin logging/error classification in place and the visible mojibake removed, the next worthwhile step is likely structured logging (`tracing`) or a terminal backend upgrade rather than more string/packaging cleanup.
