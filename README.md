@@ -129,12 +129,13 @@ src/
 
 ```bash
 # LLM 配置
-LLM_API_BASE=http://localhost:11434/v1
+LLM_PROVIDER=minimax
+LLM_API_BASE_URL=https://api.minimaxi.com/v1
 LLM_API_KEY=your-api-key
-LLM_MODEL=claude-3-sonnet-20240229
+LLM_MODEL=MiniMax-M2.5
 
 # API 超时设置（秒）
-LLM_TIMEOUT_SECS=120
+S12_LLM_TIMEOUT_SECS=120
 ```
 
 ### 配置文件
@@ -161,13 +162,15 @@ cargo run
 
 ### CLI 命令
 
-参考 Claude Code 的命令风格：
+支持以下命令：
 
-- `/help` - 显示帮助
-- `/skills` - 列出技能（参考 Claude Code）
-- `/skill <name>` - 使用技能
-- `/clear` - 清除对话历史
-- `/exit` 或 `/quit` - 退出程序
+- `q` / `quit` / `exit` - 退出程序
+- `/tasks` - 查看任务列表
+- `/worktrees` - 查看 Worktree 列表
+- `/events` - 查看最近事件
+- `/status` - 查看当前执行状态
+- `/skills` - 列出技能
+- `/skill <name>` - 查看指定技能内容
 
 ### 工具调用
 
@@ -213,6 +216,36 @@ cargo test
 - [ ] 指定程序窗口的远端查看
 - [ ] 命令执行结果的优化展示
 - [ ] 不同平台下的兼容方案
+
+## CI/CD
+
+项目使用 GitHub Actions 实现自动构建和发布：
+
+### 构建工作流
+
+- **触发条件**：
+  - 推送至 `main` 分支
+  - 推送 `v*` 标签
+  - 提交 Pull Request 到 `main` 分支
+
+- **构建平台**：
+  - Linux x86_64
+  - Linux ARM64
+  - macOS x86_64
+  - macOS ARM64 (Apple Silicon)
+  - Windows x86_64
+
+### 发布流程
+
+1. 推送标签到 GitHub：
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+2. GitHub Actions 会自动构建所有平台的二进制文件
+
+3. 构建完成后自动创建 GitHub Release
 
 ## 依赖项
 

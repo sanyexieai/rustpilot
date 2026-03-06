@@ -20,7 +20,7 @@ pub fn detect_repo_root(cwd: &Path) -> Option<PathBuf> {
 }
 
 pub fn llm_timeout_secs() -> u64 {
-    std::env::var("S12_LLM_TIMEOUT_SECS")
+    std::env::var("LLM_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(LLM_TIMEOUT_SECS)

@@ -49,7 +49,7 @@ fn detect_repo_root_finds_parent_repo() {
 #[test]
 fn llm_timeout_uses_default_when_env_missing() {
     unsafe {
-        std::env::remove_var("S12_LLM_TIMEOUT_SECS");
+        std::env::remove_var("LLM_TIMEOUT_SECS");
     }
     assert_eq!(llm_timeout_secs(), LLM_TIMEOUT_SECS);
 }
