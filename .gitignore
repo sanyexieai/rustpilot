@@ -3,3 +3,4 @@
 .tasks/*
 target/*
 target-test/*
+.vscode/settings.json
