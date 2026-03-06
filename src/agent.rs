@@ -4,6 +4,7 @@ use crate::activity::{ActivityHandle, WaitHeartbeat, set_activity};
 use crate::agent_tools::{builtin_tool_definitions, handle_builtin_tool_call};
 use crate::config::LlmConfig;
 use crate::constants::{MAX_AGENT_TURNS, RETRY_MAX_ATTEMPTS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS};
+use crate::external_tools::{external_tool_definitions, handle_external_tool_call};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
 use crate::project_tools::{ProjectContext, handle_project_tool_call, project_tool_definitions};
 
@@ -188,6 +189,7 @@ pub fn truncate_for_print(text: &str) -> String {
 pub fn tool_definitions() -> Vec<Tool> {
     let mut tools = builtin_tool_definitions();
     tools.extend(project_tool_definitions());
+    tools.extend(external_tool_definitions());
     tools
 }
 
@@ -196,6 +198,9 @@ pub fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Re
         return Ok(output);
     }
     if let Some(output) = handle_project_tool_call(project, call)? {
+        return Ok(output);
+    }
+    if let Some(output) = handle_external_tool_call(call)? {
         return Ok(output);
     }
     anyhow::bail!("unknown tool: {}", call.function.name)

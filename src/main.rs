@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let project = ProjectContext::new(repo_root.clone())?;
-    let skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+    let mut skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
     let progress = new_activity_handle();
 
     println!("仓库根目录: {}", repo_root.display());
@@ -79,7 +79,6 @@ async fn main() -> anyhow::Result<()> {
         tool_calls: None,
     }];
 
-    let tools = tool_definitions();
     loop {
         let mut input = String::new();
         print!("> ");
@@ -94,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
         let trimmed = input.trim();
         match handle_cli_command(trimmed, &project, &progress, &skills)? {
             Some(CliAction::Exit) => break,
+            Some(CliAction::ReloadSkills) => {
+                skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+                continue;
+            }
             Some(CliAction::Continue) => continue,
             None => {}
         }
@@ -108,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
             tool_calls: None,
         });
 
+        let tools = tool_definitions();
         run_agent_loop(
             &client,
             &llm,

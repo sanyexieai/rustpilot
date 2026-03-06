@@ -65,6 +65,85 @@ fn resolve_skills_dir() -> anyhow::Result<PathBuf> {
     anyhow::bail!("skills directory not found")
 }
 
+pub fn init_tool_skill(raw_name: &str) -> anyhow::Result<PathBuf> {
+    let name = normalize_skill_name(raw_name);
+    if name.is_empty() {
+        anyhow::bail!("invalid skill name: {}", raw_name);
+    }
+
+    let base_dir = resolve_or_create_skills_dir()?;
+    let skill_dir = base_dir.join(&name);
+    if skill_dir.exists() {
+        anyhow::bail!("skill already exists: {}", skill_dir.display());
+    }
+
+    fs::create_dir_all(skill_dir.join("tests"))?;
+    fs::write(skill_dir.join("SKILL.md"), skill_md_template(&name))?;
+    fs::write(skill_dir.join("tool.sh"), tool_script_template())?;
+    fs::write(
+        skill_dir.join("tests").join("smoke.json"),
+        test_case_template(),
+    )?;
+    Ok(skill_dir)
+}
+
+fn resolve_or_create_skills_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("SKILLS_DIR") {
+        let path = PathBuf::from(dir);
+        fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
+
+    let cwd = std::env::current_dir()?;
+    let direct = cwd.join("skills");
+    fs::create_dir_all(&direct)?;
+    Ok(direct)
+}
+
+fn normalize_skill_name(input: &str) -> String {
+    let mut out = String::new();
+    let mut prev_hyphen = false;
+    for ch in input.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == '-' || ch == '_' || ch.is_whitespace() {
+            Some('-')
+        } else {
+            None
+        };
+
+        if let Some(c) = normalized {
+            if c == '-' {
+                if prev_hyphen || out.is_empty() {
+                    continue;
+                }
+                prev_hyphen = true;
+            } else {
+                prev_hyphen = false;
+            }
+            out.push(c);
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+fn skill_md_template(name: &str) -> String {
+    format!(
+        "---\nname: {name}\ndescription: external tool skill\ntool_language: bash\ntool_runtime: bash 5\ntool_command: bash\ntool_args_json: [\"./tool.sh\"]\n---\n\n# {name}\n\n该 skill 提供一个外部工具适配模板。\n"
+    )
+}
+
+fn tool_script_template() -> &'static str {
+    "#!/usr/bin/env bash\nset -euo pipefail\ncat\n"
+}
+
+fn test_case_template() -> &'static str {
+    "{\n  \"name\": \"smoke\",\n  \"arguments\": { \"input\": \"hello\" },\n  \"expect_status\": 0,\n  \"expect_stdout_contains\": \"hello\"\n}\n"
+}
+
 fn scan_skills(base_dir: &Path) -> anyhow::Result<Vec<SkillInfo>> {
     let mut skills = Vec::new();
     for entry in fs::read_dir(base_dir)? {
@@ -187,5 +266,26 @@ mod tests {
 
         let content = registry.get("demo").expect("get skill");
         assert!(content.contains("body"));
+    }
+
+    #[test]
+    fn init_tool_skill_creates_template_files() {
+        let temp = TestDir::new("init_tool_skill");
+        unsafe {
+            std::env::set_var("SKILLS_DIR", temp.path());
+        }
+
+        let created = init_tool_skill("Echo Tool").expect("init tool skill");
+        assert!(created.join("SKILL.md").is_file());
+        assert!(created.join("tool.sh").is_file());
+        assert!(created.join("tests").join("smoke.json").is_file());
+
+        let skill_md = fs::read_to_string(created.join("SKILL.md")).expect("read skill md");
+        assert!(skill_md.contains("tool_command"));
+        assert!(skill_md.contains("tool_language"));
+
+        unsafe {
+            std::env::remove_var("SKILLS_DIR");
+        }
     }
 }

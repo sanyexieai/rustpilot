@@ -1,9 +1,10 @@
 use crate::activity::{ActivityHandle, render_activity};
 use crate::project_tools::ProjectContext;
-use crate::skills::SkillRegistry;
+use crate::skills::{SkillRegistry, init_tool_skill};
 
 pub enum CliAction {
     Continue,
+    ReloadSkills,
     Exit,
 }
 
@@ -49,6 +50,20 @@ pub fn handle_cli_command(
         } else {
             match skills.get(name) {
                 Ok(content) => println!("{}", content),
+                Err(err) => println!("错误: {}", err),
+            }
+        }
+        return Ok(Some(CliAction::Continue));
+    }
+    if let Some(name) = trimmed.strip_prefix("/skill-tool-init ").map(str::trim) {
+        if name.is_empty() {
+            println!("用法: /skill-tool-init <name>");
+        } else {
+            match init_tool_skill(name) {
+                Ok(path) => {
+                    println!("已创建工具 skill 模板: {}", path.display());
+                    return Ok(Some(CliAction::ReloadSkills));
+                }
                 Err(err) => println!("错误: {}", err),
             }
         }

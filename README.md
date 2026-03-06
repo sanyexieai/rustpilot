@@ -171,10 +171,60 @@ cargo run
 - `/status` - 查看当前执行状态
 - `/skills` - 列出技能
 - `/skill <name>` - 查看指定技能内容
+- `/skill-tool-init <name>` - 创建外部工具 skill 模板
 
 ### 工具调用
 
 Agent 可以自动调用各种工具执行任务，也可以手动触发任务和 Worktree 操作。
+
+### 外部工具加载
+
+通过 Skill 对接外部工具。默认扫描 `skills/`（或 `SKILLS_DIR` 指定目录）下的技能目录。
+
+每个技能目录就是一个完整外部工具，推荐模板：
+
+```
+skills/
+  echo-tool/
+    SKILL.md
+    tests/
+      smoke.json
+    tool.sh
+```
+
+`SKILL.md` frontmatter 示例：
+
+```yaml
+---
+name: echo_external
+description: 回显输入参数
+tool_language: bash
+tool_runtime: bash 5
+tool_command: bash
+tool_args_json: ["./tool.sh"]
+---
+```
+
+`tests/smoke.json` 示例：
+
+```json
+{
+  "name": "smoke",
+  "arguments": { "input": "hello" },
+  "expect_status": 0,
+  "expect_stdout_contains": "hello"
+}
+```
+
+加载规则：
+- 必须有 `SKILL.md` 和 `tests/`
+- `tests/` 目录必须至少有 1 个 `.json` 测试用例
+- 工具加载时会主动执行测试，失败则该工具跳过
+- 目录内容发生变化时，系统会重新测试并重载工具
+
+执行约定：
+- 调用参数 JSON 会写入外部命令 `stdin`
+- 同时注入环境变量 `RUSTPILOT_TOOL_NAME`、`RUSTPILOT_TOOL_ARGS`
 
 ## 开发指南
 
