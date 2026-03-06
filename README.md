@@ -172,6 +172,7 @@ cargo run
 - `/skills` - 列出技能
 - `/skill <name>` - 查看指定技能内容
 - `/skill-tool-init <name>` - 创建外部工具 skill 模板
+- `/mcp-tool-init <name>` - 创建 MCP 工具模板
 
 ### 工具调用
 
@@ -225,6 +226,88 @@ tool_args_json: ["./tool.sh"]
 执行约定：
 - 调用参数 JSON 会写入外部命令 `stdin`
 - 同时注入环境变量 `RUSTPILOT_TOOL_NAME`、`RUSTPILOT_TOOL_ARGS`
+
+### MCP 支持
+
+支持通过 MCP（Model Context Protocol）加载外部工具。采用“每个 JSON 一个 MCP 工具”的目录化方式，默认扫描 `mcps/`（可用 `MCPS_DIR` 覆盖）。
+
+目录模板：
+
+```
+mcps/
+  filesystem-read/
+    mcp.json
+    tests/
+      smoke.json
+```
+
+可通过命令快速初始化：
+
+```text
+/mcp-tool-init filesystem-read
+```
+
+示例 `mcps/filesystem-read/mcp.json`：
+
+```json
+{
+  "name": "mcp_fs_read_file",
+  "description": "Read file through MCP filesystem server",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" }
+    },
+    "required": ["path"]
+  },
+  "mcp_tool": "read_file",
+  "server": {
+    "name": "filesystem",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+  }
+}
+```
+
+示例 `mcps/filesystem-read/tests/smoke.json`：
+
+```json
+{
+  "name": "smoke",
+  "arguments": { "path": "README.md" },
+  "expect_error": false,
+  "expect_text_contains": "Rustpilot"
+}
+```
+
+加载规则：
+- 每个工具目录必须有 `mcp.json` 和 `tests/`
+- `tests/` 至少包含 1 个 `.json` 用例
+- 加载时主动运行测试，通过后才注册工具
+- 目录内容变化时，才会触发重测和重载
+
+注册后的工具名称就是 `mcp.json` 里的 `name`，例如：
+
+```text
+mcp_fs_read_file
+```
+
+调用时参数会转发到对应 server 的 MCP `tools/call`：
+
+```json
+{
+  "name": "read_file",
+  "arguments": { "path": "README.md" }
+}
+```
+
+如果你希望忽略 `parameters`，也可以不写，系统会默认:
+
+```json
+{
+  "type": "object"
+}
+```
 
 ## 开发指南
 

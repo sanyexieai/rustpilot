@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod constants;
 pub mod external_tools;
+pub mod mcp;
 pub mod openai_compat;
 pub mod project_tools;
 pub mod runtime_env;

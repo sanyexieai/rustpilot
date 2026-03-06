@@ -1,4 +1,5 @@
 use crate::activity::{ActivityHandle, render_activity};
+use crate::mcp::init_mcp_tool;
 use crate::project_tools::ProjectContext;
 use crate::skills::{SkillRegistry, init_tool_skill};
 
@@ -64,6 +65,17 @@ pub fn handle_cli_command(
                     println!("已创建工具 skill 模板: {}", path.display());
                     return Ok(Some(CliAction::ReloadSkills));
                 }
+                Err(err) => println!("错误: {}", err),
+            }
+        }
+        return Ok(Some(CliAction::Continue));
+    }
+    if let Some(name) = trimmed.strip_prefix("/mcp-tool-init ").map(str::trim) {
+        if name.is_empty() {
+            println!("用法: /mcp-tool-init <name>");
+        } else {
+            match init_mcp_tool(name) {
+                Ok(path) => println!("已创建 MCP 工具模板: {}", path.display()),
                 Err(err) => println!("错误: {}", err),
             }
         }
