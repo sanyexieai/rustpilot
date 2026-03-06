@@ -38,13 +38,15 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/release/rustpilot release/rustpilot-linux-x86_64
+          mkdir -p release/pkg
+          cp target/release/rustpilot release/pkg/rustpilot
+          tar -C release/pkg -czf release/rustpilot-x86_64-unknown-linux-gnu.tar.gz rustpilot
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustpilot-linux-x86_64
-          path: release/rustpilot-linux-x86_64
+          name: rustpilot-x86_64-unknown-linux-gnu
+          path: release/rustpilot-x86_64-unknown-linux-gnu.tar.gz
           retention-days: 30
 
   # 构建 Linux ARM64
@@ -78,13 +80,15 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/aarch64-unknown-linux-gnu/release/rustpilot release/rustpilot-linux-arm64
+          mkdir -p release/pkg
+          cp target/aarch64-unknown-linux-gnu/release/rustpilot release/pkg/rustpilot
+          tar -C release/pkg -czf release/rustpilot-aarch64-unknown-linux-gnu.tar.gz rustpilot
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustpilot-linux-arm64
-          path: release/rustpilot-linux-arm64
+          name: rustpilot-aarch64-unknown-linux-gnu
+          path: release/rustpilot-aarch64-unknown-linux-gnu.tar.gz
           retention-days: 30
 
   # 构建 macOS x86_64
@@ -106,13 +110,15 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/x86_64-apple-darwin/release/rustpilot release/rustpilot-macos-x86_64
+          mkdir -p release/pkg
+          cp target/x86_64-apple-darwin/release/rustpilot release/pkg/rustpilot
+          tar -C release/pkg -czf release/rustpilot-x86_64-apple-darwin.tar.gz rustpilot
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustpilot-macos-x86_64
-          path: release/rustpilot-macos-x86_64
+          name: rustpilot-x86_64-apple-darwin
+          path: release/rustpilot-x86_64-apple-darwin.tar.gz
           retention-days: 30
 
   # 构建 macOS ARM64 (Apple Silicon)
@@ -134,13 +140,15 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/aarch64-apple-darwin/release/rustpilot release/rustpilot-macos-arm64
+          mkdir -p release/pkg
+          cp target/aarch64-apple-darwin/release/rustpilot release/pkg/rustpilot
+          tar -C release/pkg -czf release/rustpilot-aarch64-apple-darwin.tar.gz rustpilot
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustpilot-macos-arm64
-          path: release/rustpilot-macos-arm64
+          name: rustpilot-aarch64-apple-darwin
+          path: release/rustpilot-aarch64-apple-darwin.tar.gz
           retention-days: 30
 
   # 构建 Windows x86_64
@@ -160,13 +168,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/rustpilot.exe release/rustpilot-windows-x86_64.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/rustpilot.exe release/rustpilot-x86_64-pc-windows-msvc.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustpilot-windows-x86_64
-          path: release/rustpilot-windows-x86_64.exe
+          name: rustpilot-x86_64-pc-windows-msvc
+          path: release/rustpilot-x86_64-pc-windows-msvc.exe
           retention-days: 30
 
   # 创建 Release（仅在 tag 推送时运行）
@@ -187,25 +195,31 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare release files
-        run: |
-          mkdir -p release
-          # Linux x86_64
-          cp artifacts/rustpilot-linux-x86_64/rustpilot-linux-x86_64 release/
-          # Linux ARM64
-          cp artifacts/rustpilot-linux-arm64/rustpilot-linux-arm64 release/
-          # macOS x86_64
-          cp artifacts/rustpilot-macos-x86_64/rustpilot-macos-x86_64 release/
-          # macOS ARM64
-          cp artifacts/rustpilot-macos-arm64/rustpilot-macos-arm64 release/
-          # Windows x86_64
-          cp artifacts/rustpilot-windows-x86_64/rustpilot-windows-x86_64.exe release/
-          # List files
-          ls -la release/
-
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Linux x86_64
+          cp artifacts/rustpilot-x86_64-unknown-linux-gnu/rustpilot-x86_64-unknown-linux-gnu.tar.gz \
+            release/rustpilot-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          # Linux ARM64
+          cp artifacts/rustpilot-aarch64-unknown-linux-gnu/rustpilot-aarch64-unknown-linux-gnu.tar.gz \
+            release/rustpilot-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz
+          # macOS x86_64
+          cp artifacts/rustpilot-x86_64-apple-darwin/rustpilot-x86_64-apple-darwin.tar.gz \
+            release/rustpilot-v${VERSION}-x86_64-apple-darwin.tar.gz
+          # macOS ARM64
+          cp artifacts/rustpilot-aarch64-apple-darwin/rustpilot-aarch64-apple-darwin.tar.gz \
+            release/rustpilot-v${VERSION}-aarch64-apple-darwin.tar.gz
+          # Windows x86_64
+          cp artifacts/rustpilot-x86_64-pc-windows-msvc/rustpilot-x86_64-pc-windows-msvc.exe \
+            release/rustpilot-v${VERSION}-x86_64-pc-windows-msvc.exe
+          # List files
+          ls -la release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
