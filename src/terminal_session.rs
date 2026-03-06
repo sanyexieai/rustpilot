@@ -1,13 +1,17 @@
 use anyhow::Context;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_TERM_COLS: u16 = 120;
+const DEFAULT_TERM_ROWS: u16 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
@@ -59,14 +63,160 @@ impl TerminalCreateRequest {
     }
 }
 
+trait LiveTerminalBackend: Send {
+    fn write(&mut self, input: &[u8]) -> anyhow::Result<()>;
+    fn try_wait(&mut self) -> anyhow::Result<Option<i32>>;
+    fn kill(&mut self) -> anyhow::Result<()>;
+    #[allow(dead_code)]
+    fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()>;
+}
+
+struct PipeBackend {
+    child: Child,
+    stdin: ChildStdin,
+}
+
+impl PipeBackend {
+    fn spawn(
+        shell: &str,
+        cwd: &Path,
+        env: &[(String, String)],
+        output: Arc<Mutex<Vec<u8>>>,
+        log_path: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let mut command = shell_command(shell);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(cwd);
+
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn shell '{}'", shell))?;
+        let stdin = child.stdin.take().context("shell stdin missing")?;
+        let stdout = child.stdout.take().context("shell stdout missing")?;
+        let stderr = child.stderr.take().context("shell stderr missing")?;
+
+        spawn_reader(stdout, output.clone(), log_path.clone());
+        spawn_reader(stderr, output, log_path);
+
+        Ok(Self { child, stdin })
+    }
+}
+
+impl LiveTerminalBackend for PipeBackend {
+    fn write(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        self.stdin.write_all(input)?;
+        self.stdin.flush()?;
+        Ok(())
+    }
+
+    fn try_wait(&mut self) -> anyhow::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn kill(&mut self) -> anyhow::Result<()> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Ok(())
+    }
+
+    fn resize(&mut self, _cols: u16, _rows: u16) -> anyhow::Result<()> {
+        anyhow::bail!("resize is not supported by the pipe backend")
+    }
+}
+
+struct PtyBackend {
+    #[allow(dead_code)]
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    writer: Box<dyn Write + Send>,
+}
+
+impl PtyBackend {
+    fn spawn(
+        shell: &str,
+        cwd: &Path,
+        env: &[(String, String)],
+        output: Arc<Mutex<Vec<u8>>>,
+        log_path: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: DEFAULT_TERM_ROWS,
+                cols: DEFAULT_TERM_COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("failed to create pty")?;
+        let builder = pty_command(shell, cwd, env);
+        let child = pair
+            .slave
+            .spawn_command(builder)
+            .with_context(|| format!("failed to spawn shell '{}' in pty", shell))?;
+        let writer = pair.master.take_writer().context("pty writer missing")?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("pty reader missing")?;
+        spawn_reader(reader, output, log_path);
+
+        Ok(Self {
+            master: pair.master,
+            child,
+            writer,
+        })
+    }
+}
+
+impl LiveTerminalBackend for PtyBackend {
+    fn write(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        self.writer.write_all(input)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn try_wait(&mut self) -> anyhow::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX)))
+    }
+
+    fn kill(&mut self) -> anyhow::Result<()> {
+        self.child.kill().context("failed to kill pty child")?;
+        let _ = self.child.wait();
+        Ok(())
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("failed to resize pty")
+    }
+}
+
 struct SessionEntry {
     id: String,
     shell: String,
     cwd: PathBuf,
     log_path: PathBuf,
     created_at: u64,
-    child: Child,
-    stdin: ChildStdin,
+    backend: Box<dyn LiveTerminalBackend>,
     output: Arc<Mutex<Vec<u8>>>,
     state: SessionState,
 }
@@ -105,16 +255,6 @@ impl TerminalManager {
             .cwd
             .unwrap_or(std::env::current_dir().context("failed to resolve current dir")?);
         let shell = request.shell.unwrap_or_else(default_shell);
-        let mut command = shell_command(&shell);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(&cwd);
-
-        for (key, value) in request.env {
-            command.env(key, value);
-        }
 
         let id = self.next_session_id()?;
         fs::create_dir_all(&self.log_dir)
@@ -122,17 +262,8 @@ impl TerminalManager {
         let log_path = self.log_dir.join(format!("{}.log", id));
         fs::write(&log_path, [])?;
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("failed to spawn shell '{}'", shell))?;
-        let stdin = child.stdin.take().context("shell stdin missing")?;
-        let stdout = child.stdout.take().context("shell stdout missing")?;
-        let stderr = child.stderr.take().context("shell stderr missing")?;
         let output = Arc::new(Mutex::new(Vec::new()));
-
-        spawn_reader(stdout, output.clone(), log_path.clone());
-        spawn_reader(stderr, output.clone(), log_path.clone());
-
+        let backend = spawn_backend(&shell, &cwd, &request.env, output.clone(), log_path.clone())?;
         let created_at = now_secs();
         let info = TerminalSessionInfo {
             id: id.clone(),
@@ -152,8 +283,7 @@ impl TerminalManager {
             cwd,
             log_path,
             created_at,
-            child,
-            stdin,
+            backend,
             output,
             state: SessionState::Running,
         };
@@ -176,8 +306,7 @@ impl TerminalManager {
             if !matches!(entry.state, SessionState::Running) {
                 anyhow::bail!("session has exited: {}", session_id);
             }
-            entry.stdin.write_all(input.as_bytes())?;
-            entry.stdin.flush()?;
+            entry.backend.write(input.as_bytes())?;
             return Ok(());
         }
         drop(sessions);
@@ -252,14 +381,27 @@ impl TerminalManager {
             .ok_or_else(|| anyhow::anyhow!("unknown session: {}", session_id))?;
 
         if matches!(entry.state, SessionState::Running) {
-            let _ = entry.child.kill();
-            let _ = entry.child.wait();
+            let _ = entry.backend.kill();
             refresh_state(entry)?;
         }
 
         let info = build_info(entry)?;
         self.save_session_info(&info)?;
         Ok(info)
+    }
+
+    pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let mut sessions = self.sessions.lock().map_err(lock_error)?;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {}", session_id))?;
+
+        refresh_state(entry)?;
+        if !matches!(entry.state, SessionState::Running) {
+            anyhow::bail!("session has exited: {}", session_id);
+        }
+
+        entry.backend.resize(cols, rows)
     }
 
     fn next_session_id(&self) -> anyhow::Result<String> {
@@ -273,8 +415,7 @@ impl TerminalManager {
         let mut sessions = self.sessions.lock().map_err(lock_error)?;
         for entry in sessions.values_mut() {
             if matches!(entry.state, SessionState::Running) {
-                let _ = entry.child.kill();
-                let _ = entry.child.wait();
+                let _ = entry.backend.kill();
             }
         }
         sessions.clear();
@@ -291,8 +432,7 @@ impl TerminalManager {
         let mut sessions = self.sessions.lock().map_err(lock_error)?;
         for entry in sessions.values_mut() {
             if matches!(entry.state, SessionState::Running) {
-                let _ = entry.child.kill();
-                let _ = entry.child.wait();
+                let _ = entry.backend.kill();
             }
         }
         sessions.clear();
@@ -346,6 +486,21 @@ impl TerminalManager {
     }
 }
 
+fn spawn_backend(
+    shell: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    output: Arc<Mutex<Vec<u8>>>,
+    log_path: PathBuf,
+) -> anyhow::Result<Box<dyn LiveTerminalBackend>> {
+    match PtyBackend::spawn(shell, cwd, env, output.clone(), log_path.clone()) {
+        Ok(backend) => Ok(Box::new(backend)),
+        Err(_) => Ok(Box::new(PipeBackend::spawn(
+            shell, cwd, env, output, log_path,
+        )?)),
+    }
+}
+
 fn build_info(entry: &SessionEntry) -> anyhow::Result<TerminalSessionInfo> {
     let output_len = entry.output.lock().map_err(lock_error)?.len();
     Ok(TerminalSessionInfo {
@@ -377,8 +532,8 @@ fn upsert_session(items: &mut Vec<TerminalSessionInfo>, info: TerminalSessionInf
 
 fn refresh_state(entry: &mut SessionEntry) -> anyhow::Result<()> {
     if matches!(entry.state, SessionState::Running) {
-        if let Some(status) = entry.child.try_wait()? {
-            entry.state = SessionState::Exited(status.code().unwrap_or(-1));
+        if let Some(code) = entry.backend.try_wait()? {
+            entry.state = SessionState::Exited(code);
         }
     }
     Ok(())
@@ -407,7 +562,7 @@ where
     });
 }
 
-fn append_log_chunk(path: &PathBuf, chunk: &[u8]) -> anyhow::Result<()> {
+fn append_log_chunk(path: &Path, chunk: &[u8]) -> anyhow::Result<()> {
     let mut file = OpenOptions::new().append(true).create(true).open(path)?;
     file.write_all(chunk)?;
     file.flush()?;
@@ -464,6 +619,29 @@ fn shell_command(shell: &str) -> Command {
     let mut command = Command::new(shell);
     command.arg("-i");
     command
+}
+
+#[cfg(target_os = "windows")]
+fn pty_command(shell: &str, cwd: &Path, env: &[(String, String)]) -> CommandBuilder {
+    let mut builder = CommandBuilder::new(shell);
+    builder.arg("-NoLogo");
+    builder.arg("-NoProfile");
+    builder.cwd(cwd);
+    for (key, value) in env {
+        builder.env(key, value);
+    }
+    builder
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pty_command(shell: &str, cwd: &Path, env: &[(String, String)]) -> CommandBuilder {
+    let mut builder = CommandBuilder::new(shell);
+    builder.arg("-i");
+    builder.cwd(cwd);
+    for (key, value) in env {
+        builder.env(key, value);
+    }
+    builder
 }
 
 #[cfg(test)]
@@ -562,6 +740,22 @@ mod tests {
         let killed = manager.kill(&info.id).expect("kill");
         assert!(matches!(killed.state, SessionState::Exited(_)));
         manager.reset().expect("reset");
+    }
+
+    #[test]
+    fn pipe_backend_resize_is_explicitly_unsupported() {
+        let mut backend = PipeBackend::spawn(
+            &default_shell(),
+            &temp_dir("pipe_backend_resize"),
+            &[],
+            Arc::new(Mutex::new(Vec::new())),
+            temp_dir("pipe_backend_resize_logs").join("session.log"),
+        )
+        .expect("spawn pipe backend");
+
+        let error = backend.resize(80, 24).unwrap_err().to_string();
+        assert!(error.contains("not supported"));
+        let _ = backend.kill();
     }
 
     #[test]

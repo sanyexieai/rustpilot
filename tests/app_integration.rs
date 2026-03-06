@@ -112,6 +112,39 @@ fn wait_for_terminal_output(project: &ProjectContext, session_id: &str, needle: 
     panic!("timed out waiting for terminal output: {}", needle);
 }
 
+fn wait_for_terminal_quiet(project: &ProjectContext, session_id: &str, from: usize) -> usize {
+    let mut offset = from;
+    let mut stable_polls = 0;
+
+    for _ in 0..20 {
+        let output = handle_tool_call(
+            project,
+            &tool_call(
+                "terminal_read",
+                json!({ "session_id": session_id, "from": offset }),
+            ),
+        )
+        .expect("terminal_read quiet");
+        let parsed: Value = serde_json::from_str(&output).expect("parse terminal_read quiet");
+        let next_offset = parsed["next_offset"].as_u64().expect("next_offset quiet") as usize;
+        let data = parsed["data"].as_str().unwrap_or_default();
+
+        if next_offset == offset || data.is_empty() {
+            stable_polls += 1;
+            if stable_polls >= 3 {
+                return next_offset;
+            }
+        } else {
+            stable_polls = 0;
+            offset = next_offset;
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    offset
+}
+
 #[test]
 fn activity_state_renders_current_tool() {
     let progress = new_activity_handle();
@@ -275,6 +308,20 @@ fn terminal_tools_support_session_lifecycle() {
     .expect("terminal_write");
     assert!(write_output.contains("已写入会话"));
 
+    let resize_output = handle_tool_call(
+        &project,
+        &tool_call(
+            "terminal_resize",
+            json!({
+                "session_id": session_id.clone(),
+                "cols": 100,
+                "rows": 32
+            }),
+        ),
+    )
+    .expect("terminal_resize");
+    assert!(resize_output.contains("100x32"));
+
     let read = wait_for_terminal_output(&project, &session_id, "tool-session-ok");
     assert_eq!(read["session_id"].as_str(), Some(session_id.as_str()));
     assert!(
@@ -307,7 +354,10 @@ fn terminal_tools_support_session_lifecycle() {
 
     let status = handle_tool_call(
         &project,
-        &tool_call("terminal_status", json!({ "session_id": session_id })),
+        &tool_call(
+            "terminal_status",
+            json!({ "session_id": session_id.clone() }),
+        ),
     )
     .expect("terminal_status");
     let status: Value = serde_json::from_str(&status).expect("parse terminal_status");
@@ -420,6 +470,108 @@ fn terminal_tools_mark_restored_sessions_read_only() {
     assert!(persisted.contains("restored-tool-ok"));
 
     reset_terminal_manager().expect("reset terminal manager");
+}
+
+#[test]
+fn terminal_tools_support_multiple_round_trips_after_resize() {
+    let _guard = lock_global();
+    reset_terminal_manager().expect("reset terminal manager");
+    let temp = TestDir::new("terminal_tool_round_trips");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    let created = handle_tool_call(
+        &project,
+        &tool_call(
+            "terminal_create",
+            json!({
+                "cwd": temp.path().display().to_string()
+            }),
+        ),
+    )
+    .expect("terminal_create");
+    let created: Value = serde_json::from_str(&created).expect("parse terminal_create");
+    let session_id = created["id"].as_str().expect("session id").to_string();
+
+    let resize_output = handle_tool_call(
+        &project,
+        &tool_call(
+            "terminal_resize",
+            json!({
+                "session_id": session_id.clone(),
+                "cols": 90,
+                "rows": 28
+            }),
+        ),
+    )
+    .expect("terminal_resize");
+    assert!(resize_output.contains("90x28"));
+
+    #[cfg(target_os = "windows")]
+    let first_input = "Write-Output 'round-trip-one'\n";
+    #[cfg(not(target_os = "windows"))]
+    let first_input = "printf 'round-trip-one\\n'\n";
+
+    handle_tool_call(
+        &project,
+        &tool_call(
+            "terminal_write",
+            json!({
+                "session_id": session_id.clone(),
+                "input": first_input
+            }),
+        ),
+    )
+    .expect("terminal_write one");
+    let first_read = wait_for_terminal_output(&project, &session_id, "round-trip-one");
+    assert!(first_read["data"].as_str().unwrap_or_default().contains("round-trip-one"));
+    let next_offset = wait_for_terminal_quiet(
+        &project,
+        &session_id,
+        first_read["next_offset"].as_u64().expect("next_offset") as usize,
+    );
+
+    #[cfg(target_os = "windows")]
+    let second_input = "Write-Output 'round-trip-two'\n";
+    #[cfg(not(target_os = "windows"))]
+    let second_input = "printf 'round-trip-two\\n'\n";
+
+    handle_tool_call(
+        &project,
+        &tool_call(
+            "terminal_write",
+            json!({
+                "session_id": session_id.clone(),
+                "input": second_input
+            }),
+        ),
+    )
+    .expect("terminal_write two");
+
+    for _ in 0..40 {
+        let output = handle_tool_call(
+            &project,
+            &tool_call(
+                "terminal_read",
+                json!({ "session_id": session_id.clone(), "from": next_offset }),
+            ),
+        )
+        .expect("terminal_read two");
+        let parsed: Value = serde_json::from_str(&output).expect("parse terminal_read two");
+        let data = parsed["data"].as_str().unwrap_or_default();
+        if data.contains("round-trip-two") {
+            let _ = handle_tool_call(
+                &project,
+                &tool_call("terminal_kill", json!({ "session_id": session_id.clone() })),
+            )
+            .expect("terminal_kill");
+            reset_terminal_manager().expect("reset terminal manager");
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!("timed out waiting for second round-trip output");
 }
 
 #[test]

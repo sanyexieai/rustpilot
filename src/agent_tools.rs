@@ -74,6 +74,19 @@ pub fn builtin_tool_definitions() -> Vec<Tool> {
             }),
         ),
         tool(
+            "terminal_resize",
+            "调整指定终端会话的窗口大小。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "cols": { "type": "integer", "minimum": 1 },
+                    "rows": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["session_id", "cols", "rows"]
+            }),
+        ),
+        tool(
             "terminal_list",
             "列出当前所有终端会话。",
             json!({
@@ -185,6 +198,17 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
                 Ok(serde_json::to_string_pretty(
                     &terminal_manager().read(&args.session_id, args.from.unwrap_or(0))?,
                 )?)
+            })
+        })?,
+        "terminal_resize" => run_builtin_tool("terminal_resize", || {
+            let args: TerminalResizeArgs =
+                parse_tool_args("terminal_resize", &call.function.arguments)?;
+            run_with_classified_error("terminal_resize", BuiltinToolErrorKind::Session, || {
+                terminal_manager().resize(&args.session_id, args.cols, args.rows)?;
+                Ok(format!(
+                    "已调整会话 {} 的终端大小到 {}x{}",
+                    args.session_id, args.cols, args.rows
+                ))
             })
         })?,
         "terminal_list" => run_builtin_tool("terminal_list", || {
@@ -356,4 +380,11 @@ struct TerminalReadArgs {
     session_id: String,
     #[serde(default)]
     from: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalResizeArgs {
+    session_id: String,
+    cols: u16,
+    rows: u16,
 }
