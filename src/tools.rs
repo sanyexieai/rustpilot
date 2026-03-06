@@ -1,0 +1,148 @@
+use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+const MAX_OUTPUT_BYTES: usize = 50_000;
+
+#[derive(Debug, Deserialize)]
+pub struct BashArgs {
+    pub command: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReadFileArgs {
+    pub path: String,
+    #[serde(default)]
+    pub max_lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WriteFileArgs {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditFileArgs {
+    pub path: String,
+    pub old: String,
+    pub new: String,
+}
+
+pub struct BashTool;
+
+impl BashTool {
+    pub fn run(command: &str) -> anyhow::Result<String> {
+        let normalized = normalize_command(command);
+        let wrapped = wrap_powershell_command(&normalized);
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &wrapped])
+            .output()?;
+
+        let mut combined = String::new();
+        combined.push_str(&String::from_utf8_lossy(&output.stdout));
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+        if combined.trim().is_empty() {
+            combined = "(no output)".to_string();
+        }
+
+        Ok(truncate_output(combined))
+    }
+}
+
+pub fn read_file(args: &ReadFileArgs) -> anyhow::Result<String> {
+    let path = safe_path(&args.path)?;
+    let content = fs::read_to_string(&path)?;
+
+    let limited = if let Some(max_lines) = args.max_lines {
+        let mut lines: Vec<&str> = content.lines().collect();
+        if lines.len() > max_lines {
+            let omitted = lines.len() - max_lines;
+            lines.truncate(max_lines);
+            let mut out = lines.join("\n");
+            out.push_str(&format!("\n...（还有 {} 行）", omitted));
+            out
+        } else {
+            lines.join("\n")
+        }
+    } else {
+        content
+    };
+
+    Ok(truncate_output(limited))
+}
+
+pub fn write_file(args: &WriteFileArgs) -> anyhow::Result<String> {
+    let path = safe_path(&args.path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, &args.content)?;
+    Ok(format!("已写入 {} 字节到 {}", args.content.len(), path.display()))
+}
+
+pub fn edit_file(args: &EditFileArgs) -> anyhow::Result<String> {
+    let path = safe_path(&args.path)?;
+    let content = fs::read_to_string(&path)?;
+
+    if let Some(index) = content.find(&args.old) {
+        let mut updated = String::with_capacity(content.len() - args.old.len() + args.new.len());
+        updated.push_str(&content[..index]);
+        updated.push_str(&args.new);
+        updated.push_str(&content[index + args.old.len()..]);
+        fs::write(&path, updated)?;
+        Ok(format!("已更新 {}", path.display()))
+    } else {
+        anyhow::bail!("在 {} 中未找到目标文本", path.display());
+    }
+}
+
+fn safe_path(input: &str) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let raw = PathBuf::from(input);
+    let candidate = if raw.is_absolute() { raw } else { cwd.join(raw) };
+
+    match candidate.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(_) => Ok(candidate),
+    }
+}
+
+fn truncate_output(mut text: String) -> String {
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return text;
+    }
+    text.truncate(MAX_OUTPUT_BYTES);
+    text.push_str("\n...（输出已截断）");
+    text
+}
+
+fn normalize_command(command: &str) -> String {
+    let mut normalized = command.replace("2>/dev/null", "2>$null");
+    normalized = normalized.replace("ls -la", "Get-ChildItem -Force");
+    normalized = normalized.replace("&&", "; if (-not $?) { exit 1 };");
+
+    if let Some((left, right)) = normalized.split_once("||") {
+        let right = right.trim();
+        if let Some(message) = right.strip_prefix("echo ").map(str::trim) {
+            normalized = format!(
+                "{}; if (-not $?) {{ Write-Output {} }}",
+                left.trim_end(),
+                message
+            );
+        }
+    }
+
+    normalized
+}
+
+fn wrap_powershell_command(command: &str) -> String {
+    format!(
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); \
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); \
+$OutputEncoding = [Console]::OutputEncoding; {}",
+        command
+    )
+}

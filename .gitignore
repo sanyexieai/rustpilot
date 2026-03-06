@@ -1,0 +1,4 @@
+.env
+.worktrees/*
+.tasks/*
+target/*
