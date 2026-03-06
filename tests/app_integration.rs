@@ -20,7 +20,7 @@ struct TestDir {
 impl TestDir {
     fn new(name: &str) -> Self {
         let unique = format!("{}_{}_{}", name, std::process::id(), now_nanos());
-        let path = std::env::temp_dir().join("s12_tests").join(unique);
+        let path = std::env::temp_dir().join("tests").join(unique);
         fs::create_dir_all(&path).expect("create temp dir");
         Self { path }
     }

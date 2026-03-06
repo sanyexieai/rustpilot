@@ -135,7 +135,7 @@ LLM_API_KEY=your-api-key
 LLM_MODEL=MiniMax-M2.5
 
 # API 超时设置（秒）
-S12_LLM_TIMEOUT_SECS=120
+LLM_TIMEOUT_SECS=120
 ```
 
 ### 配置文件

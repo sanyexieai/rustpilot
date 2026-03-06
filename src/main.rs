@@ -5,18 +5,55 @@ use rustpilot::cli::{CliAction, handle_cli_command};
 use rustpilot::config::LlmConfig;
 use rustpilot::openai_compat::Message;
 use rustpilot::project_tools::ProjectContext;
-use rustpilot::runtime_env::{detect_repo_root, llm_timeout_secs};
+use rustpilot::runtime_env::{
+    detect_repo_root, ensure_env_guidance, llm_timeout_secs, prompt_and_store_llm_api_key,
+};
 use rustpilot::skills::SkillRegistry;
 use std::io::{self, Write};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-
     let cwd = std::env::current_dir()?;
+    let env_update = ensure_env_guidance(&cwd)?;
+    dotenvy::from_path(cwd.join(".env")).ok();
+
+    if env_update.created {
+        println!(
+            "已在 {} 生成 .env 引导模板，请先填写 LLM_API_KEY。",
+            cwd.display()
+        );
+    } else if !env_update.added_keys.is_empty() {
+        println!(
+            "已补齐 .env 缺失项: {}",
+            env_update.added_keys.join(", ")
+        );
+    }
+
     let repo_root = detect_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let llm = LlmConfig::from_env()?;
+    let llm = match LlmConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) if err.to_string().contains("LLM_API_KEY is required") => {
+            println!("未检测到有效的 LLM_API_KEY。");
+            println!("可直接在命令行补齐并写入 {}/.env。", cwd.display());
+
+            if !prompt_and_store_llm_api_key(&cwd)? {
+                println!("已取消输入，请补齐 .env 后重新运行。");
+                return Ok(());
+            }
+
+            dotenvy::from_path_override(cwd.join(".env")).ok();
+            match LlmConfig::from_env() {
+                Ok(cfg) => cfg,
+                Err(err) if err.to_string().contains("LLM_API_KEY is required") => {
+                    println!("LLM_API_KEY 仍无效，请检查 .env 后重新运行。");
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(err) => return Err(err),
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(llm_timeout_secs()))
         .build()?;
@@ -30,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
     let progress = new_activity_handle();
 
-    println!("s12 仓库根目录: {}", repo_root.display());
+    println!("仓库根目录: {}", repo_root.display());
     if !project.worktrees().git_available {
         println!("提示: 当前目录不是 git 仓库，worktree_* 工具会返回错误。");
     }

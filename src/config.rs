@@ -12,8 +12,12 @@ impl LlmConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "minimax".to_string());
 
-        let api_key =
+        let api_key_raw =
             env::var("LLM_API_KEY").map_err(|_| anyhow::anyhow!("LLM_API_KEY is required"))?;
+        let api_key = api_key_raw.trim().to_string();
+        if api_key.is_empty() || api_key == "your_api_key_here" {
+            return Err(anyhow::anyhow!("LLM_API_KEY is required"));
+        }
 
         let api_base_url = env::var("LLM_API_BASE_URL").unwrap_or_else(|_| {
             // Default to MiniMax OpenAI-compatible base URL (China).

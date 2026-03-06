@@ -5,3 +5,4 @@ target/*
 target-test/*
 .vscode/*
 .cargo/*
+.terminal_sessions/*
