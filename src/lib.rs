@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod agent_tools;
 pub mod config;
 pub mod openai_compat;

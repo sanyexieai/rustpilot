@@ -31,6 +31,10 @@ impl SkillRegistry {
         &self.skills
     }
 
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
     pub fn get(&self, name: &str) -> anyhow::Result<String> {
         let skill = self
             .skills
@@ -117,4 +121,69 @@ fn parse_frontmatter(content: &str, path: &Path) -> Option<SkillInfo> {
         description,
         path: path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = format!(
+                "{}_{}_{}",
+                name,
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("time")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join("rustpilot_skills_tests").join(unique);
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn load_and_get_skill_from_env_dir() {
+        let temp = TestDir::new("skill_registry");
+        let skill_dir = temp.path().join("demo");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: test skill\n---\nbody\n",
+        )
+        .expect("write skill");
+
+        unsafe {
+            std::env::set_var("SKILLS_DIR", temp.path());
+        }
+        let registry = SkillRegistry::load().expect("load registry");
+        unsafe {
+            std::env::remove_var("SKILLS_DIR");
+        }
+
+        assert_eq!(registry.base_dir(), temp.path());
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.list()[0].name, "demo");
+        assert_eq!(registry.list()[0].description, "test skill");
+
+        let content = registry.get("demo").expect("get skill");
+        assert!(content.contains("body"));
+    }
 }

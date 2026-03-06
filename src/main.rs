@@ -1,4 +1,7 @@
 ﻿use anyhow::Context;
+use rustpilot::activity::{
+    new_activity_handle, render_activity, set_activity, ActivityHandle, WaitHeartbeat,
+};
 use rustpilot::agent_tools::{
     builtin_tool_definitions, clear_terminal_manager_live_sessions, handle_builtin_tool_call,
     reset_terminal_manager,
@@ -8,19 +11,16 @@ use rustpilot::openai_compat::{
     ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice,
 };
 use rustpilot::project_tools::{
-    handle_project_tool_call, project_tool_definitions, EventBus, TaskManager, TaskRecord,
-    WorktreeManager,
+    handle_project_tool_call, project_tool_definitions, EventBus, ProjectContext, TaskManager,
+    TaskRecord, WorktreeManager,
 };
+use rustpilot::skills::SkillRegistry;
 use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
-};
-use std::thread;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -45,13 +45,12 @@ async fn main() -> anyhow::Result<()> {
         cwd.display()
     );
 
-    let tasks = TaskManager::new(repo_root.join(".tasks"))?;
-    let events = EventBus::new(repo_root.join(".worktrees").join("events.jsonl"))?;
-    let worktrees = WorktreeManager::new(repo_root.clone(), tasks.clone(), events.clone())?;
-    let progress = Arc::new(Mutex::new(ActivityState::idle()));
+    let project = ProjectContext::new(repo_root.clone())?;
+    let skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+    let progress = new_activity_handle();
 
     println!("s12 仓库根目录: {}", repo_root.display());
-    if !worktrees.git_available {
+    if !project.worktrees().git_available {
         println!("提示: 当前目录不是 git 仓库，worktree_* 工具会返回错误。");
     }
 
@@ -77,19 +76,41 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
         if trimmed == "/tasks" {
-            println!("{}", tasks.list_all()?);
+            println!("{}", project.tasks().list_all()?);
             continue;
         }
         if trimmed == "/worktrees" {
-            println!("{}", worktrees.list_all()?);
+            println!("{}", project.worktrees().list_all()?);
             continue;
         }
         if trimmed == "/events" {
-            println!("{}", events.list_recent(20)?);
+            println!("{}", project.events().list_recent(20)?);
             continue;
         }
         if trimmed == "/status" {
             println!("{}", render_activity(&progress));
+            continue;
+        }
+        if trimmed == "/skills" {
+            if skills.list().is_empty() {
+                println!("没有可用 skills。");
+            } else {
+                println!("skills dir: {}", skills.base_dir().display());
+                for skill in skills.list() {
+                    println!("- {}: {}", skill.name, skill.description);
+                }
+            }
+            continue;
+        }
+        if let Some(name) = trimmed.strip_prefix("/skill ").map(str::trim) {
+            if name.is_empty() {
+                println!("用法: /skill <name>");
+            } else {
+                match skills.get(name) {
+                    Ok(content) => println!("{}", content),
+                    Err(err) => println!("错误: {}", err),
+                }
+            }
             continue;
         }
         if trimmed.is_empty() {
@@ -103,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             tool_calls: None,
         });
 
-        run_agent_loop(&client, &llm, &repo_root, &mut messages, &tools, progress.clone()).await?;
+        run_agent_loop(&client, &llm, &project, &mut messages, &tools, progress.clone()).await?;
         println!();
     }
 
@@ -113,10 +134,10 @@ async fn main() -> anyhow::Result<()> {
 async fn run_agent_loop(
     client: &reqwest::Client,
     config: &LlmConfig,
-    repo_root: &Path,
+    project: &ProjectContext,
     messages: &mut Vec<Message>,
     tools: &[Tool],
-    progress: Arc<Mutex<ActivityState>>,
+    progress: ActivityHandle,
 ) -> anyhow::Result<()> {
     for turn in 0..MAX_AGENT_TURNS {
         set_activity(&progress, turn + 1, "等待模型响应", None);
@@ -173,7 +194,7 @@ async fn run_agent_loop(
                 Some(call.function.name.clone()),
             );
             println!("> [活动] 正在执行工具 {}", call.function.name);
-            let output = match handle_tool_call(repo_root, &call) {
+            let output = match handle_tool_call(project, &call) {
                 Ok(output) => output,
                 Err(err) => format!("错误: {}", err),
             };
@@ -226,11 +247,11 @@ fn tool_definitions() -> Vec<Tool> {
     tools
 }
 
-fn handle_tool_call(repo_root: &Path, call: &ToolCall) -> anyhow::Result<String> {
+fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Result<String> {
     if let Some(output) = handle_builtin_tool_call(call)? {
         return Ok(output);
     }
-    if let Some(output) = handle_project_tool_call(repo_root, call)? {
+    if let Some(output) = handle_project_tool_call(project, call)? {
         return Ok(output);
     }
     anyhow::bail!("unknown tool: {}", call.function.name)
@@ -251,105 +272,6 @@ fn detect_repo_root(cwd: &Path) -> Option<PathBuf> {
     }
     let path = PathBuf::from(text);
     path.exists().then_some(path)
-}
-
-fn now_secs_f64() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-#[derive(Debug, Clone)]
-struct ActivityState {
-    round: usize,
-    stage: String,
-    active_tool: Option<String>,
-    last_update: f64,
-}
-
-impl ActivityState {
-    fn idle() -> Self {
-        Self {
-            round: 0,
-            stage: "空闲".to_string(),
-            active_tool: None,
-            last_update: now_secs_f64(),
-        }
-    }
-}
-
-fn set_activity(
-    progress: &Arc<Mutex<ActivityState>>,
-    round: usize,
-    stage: &str,
-    active_tool: Option<String>,
-) {
-    if let Ok(mut state) = progress.lock() {
-        state.round = round;
-        state.stage = stage.to_string();
-        state.active_tool = active_tool;
-        state.last_update = now_secs_f64();
-    }
-}
-
-fn render_activity(progress: &Arc<Mutex<ActivityState>>) -> String {
-    match progress.lock() {
-        Ok(state) => {
-            let age = (now_secs_f64() - state.last_update).max(0.0);
-            let tool = state
-                .active_tool
-                .as_ref()
-                .map(|name| format!("\n当前工具: {}", name))
-                .unwrap_or_default();
-            format!(
-                "阶段: {}\n轮次: {}\n距上次更新秒数: {:.1}{}",
-                state.stage, state.round, age, tool
-            )
-        }
-        Err(_) => "阶段: 未知\n错误: 活动状态锁已损坏".to_string(),
-    }
-}
-
-struct WaitHeartbeat {
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl WaitHeartbeat {
-    fn start(progress: Arc<Mutex<ActivityState>>, label: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_flag = stop.clone();
-        let handle = thread::spawn(move || {
-            let started = now_secs_f64();
-            while !stop_flag.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(5));
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                let elapsed = (now_secs_f64() - started).max(0.0);
-                println!(
-                    "> [心跳] {} 仍在运行，已持续 {:.1}s\n{}",
-                    label,
-                    elapsed,
-                    render_activity(&progress)
-                );
-            }
-        });
-        Self {
-            stop,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for WaitHeartbeat {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 fn llm_timeout_secs() -> u64 {
@@ -441,14 +363,18 @@ mod tests {
         }
     }
 
+    fn project_context(repo_root: &Path) -> ProjectContext {
+        ProjectContext::new(repo_root.to_path_buf()).expect("project context")
+    }
+
     fn wait_for_terminal_output(
-        repo_root: &Path,
+        project: &ProjectContext,
         session_id: &str,
         needle: &str,
     ) -> serde_json::Value {
         for _ in 0..40 {
             let output = handle_tool_call(
-                repo_root,
+                project,
                 &tool_call(
                     "terminal_read",
                     json!({ "session_id": session_id, "from": 0 }),
@@ -486,7 +412,7 @@ mod tests {
 
     #[test]
     fn activity_state_renders_current_tool() {
-        let progress = Arc::new(Mutex::new(ActivityState::idle()));
+        let progress = new_activity_handle();
         set_activity(&progress, 3, "执行工具中", Some("worktree_create".to_string()));
         let rendered = render_activity(&progress);
         assert!(rendered.contains("阶段: 执行工具中"));
@@ -549,6 +475,7 @@ mod tests {
     fn tool_errors_are_returned_without_crashing_loop() {
         let temp = TestDir::new("tool_error");
         init_git_repo(temp.path());
+        let project = project_context(temp.path());
         let call = ToolCall {
             id: "call-1".to_string(),
             r#type: "function".to_string(),
@@ -557,7 +484,7 @@ mod tests {
                 arguments: serde_json::to_string(&json!({ "task_id": 999 })).expect("args"),
             },
         };
-        let output = handle_tool_call(temp.path(), &call).unwrap_err().to_string();
+        let output = handle_tool_call(&project, &call).unwrap_err().to_string();
         assert!(output.contains("任务 999 不存在"));
     }
 
@@ -567,9 +494,11 @@ mod tests {
         reset_terminal_manager().expect("reset terminal manager");
         let temp = TestDir::new("terminal_tool_lifecycle");
         init_git_repo(temp.path());
+        let project = project_context(temp.path());
+        assert_eq!(project.repo_root(), temp.path());
 
         let created = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call(
                 "terminal_create",
                 json!({
@@ -595,7 +524,7 @@ mod tests {
         let input = "printf 'tool-session-ok\\n'\n";
 
         let write_output = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call(
                 "terminal_write",
                 json!({
@@ -607,7 +536,7 @@ mod tests {
         .expect("terminal_write");
         assert!(write_output.contains("已写入会话"));
 
-        let read = wait_for_terminal_output(temp.path(), &session_id, "tool-session-ok");
+        let read = wait_for_terminal_output(&project, &session_id, "tool-session-ok");
         assert_eq!(read["session_id"].as_str(), Some(session_id.as_str()));
         assert!(
             read["data"]
@@ -618,7 +547,7 @@ mod tests {
         let persisted = fs::read_to_string(&log_path).expect("read terminal log");
         assert!(persisted.contains("tool-session-ok"));
 
-        let listed = handle_tool_call(temp.path(), &tool_call("terminal_list", json!({})))
+        let listed = handle_tool_call(&project, &tool_call("terminal_list", json!({})))
             .expect("terminal_list");
         let listed: Value = serde_json::from_str(&listed).expect("parse terminal_list");
         assert!(listed
@@ -636,7 +565,7 @@ mod tests {
         assert_eq!(listed_item["read_only"].as_bool(), Some(false));
 
         let status = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call("terminal_status", json!({ "session_id": session_id })),
         )
         .expect("terminal_status");
@@ -646,7 +575,7 @@ mod tests {
         assert_eq!(status["read_only"].as_bool(), Some(false));
 
         let killed = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call("terminal_kill", json!({ "session_id": session_id })),
         )
         .expect("terminal_kill");
@@ -662,9 +591,10 @@ mod tests {
         reset_terminal_manager().expect("reset terminal manager");
         let temp = TestDir::new("terminal_tool_restored");
         init_git_repo(temp.path());
+        let project = project_context(temp.path());
 
         let created = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call(
                 "terminal_create",
                 json!({
@@ -683,7 +613,7 @@ mod tests {
         let input = "printf 'restored-tool-ok\\n'\n";
 
         handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call(
                 "terminal_write",
                 json!({
@@ -693,16 +623,16 @@ mod tests {
             ),
         )
         .expect("terminal_write");
-        let _ = wait_for_terminal_output(temp.path(), &session_id, "restored-tool-ok");
+        let _ = wait_for_terminal_output(&project, &session_id, "restored-tool-ok");
         let _ = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call("terminal_kill", json!({ "session_id": session_id.clone() })),
         )
         .expect("terminal_kill");
 
         clear_terminal_manager_live_sessions().expect("clear live terminal sessions");
 
-        let listed = handle_tool_call(temp.path(), &tool_call("terminal_list", json!({})))
+        let listed = handle_tool_call(&project, &tool_call("terminal_list", json!({})))
             .expect("terminal_list");
         let listed: Value = serde_json::from_str(&listed).expect("parse terminal_list");
         let listed_item = listed
@@ -715,7 +645,7 @@ mod tests {
         assert_eq!(listed_item["read_only"].as_bool(), Some(true));
 
         let status = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call("terminal_status", json!({ "session_id": session_id.clone() })),
         )
         .expect("terminal_status");
@@ -724,7 +654,7 @@ mod tests {
         assert_eq!(status["read_only"].as_bool(), Some(true));
 
         let write_error = handle_tool_call(
-            temp.path(),
+            &project,
             &tool_call(
                 "terminal_write",
                 json!({

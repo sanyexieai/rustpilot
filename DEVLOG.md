@@ -34,6 +34,9 @@ This keeps the plan dynamic instead of locking the project into an outdated task
 - Added explicit live vs restored session semantics and read-only signaling.
 - Moved builtin tool wiring out of `main.rs` into a dedicated tool module.
 - Moved task/worktree tool wiring and manager implementations out of `main.rs` into a dedicated project tool module.
+- Replaced per-call project manager construction with a shared `ProjectContext` created once at startup.
+- Moved activity/progress rendering and heartbeat logic out of `main.rs` into a dedicated runtime module.
+- Activated the `skills` module with minimal CLI entrypoints and test coverage.
 
 ### Current Limitations
 
@@ -71,6 +74,9 @@ Changes made:
 - Added explicit `source` and `read_only` fields so callers can distinguish controllable sessions from historical records.
 - Extracted `bash`, file tools, and `terminal_*` tool definitions/dispatch into [src/agent_tools.rs](/d:/code/rustpilot/rustpilot/src/agent_tools.rs), reducing `main.rs` coupling.
 - Extracted `task_*` / `worktree_*` tool definitions, argument parsing, and manager implementations into [src/project_tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools.rs).
+- Added shared project state in [src/project_tools.rs](/d:/code/rustpilot/rustpilot/src/project_tools.rs) so CLI commands and tool dispatch reuse the same managers instead of recreating them per call.
+- Extracted activity state, rendering, and wait heartbeat into [src/activity.rs](/d:/code/rustpilot/rustpilot/src/activity.rs).
+- Added `/skills` and `/skill <name>` commands in [src/main.rs](/d:/code/rustpilot/rustpilot/src/main.rs) and covered `SkillRegistry` loading in [src/skills.rs](/d:/code/rustpilot/rustpilot/src/skills.rs).
 
 Adjustment:
 
@@ -79,3 +85,6 @@ Adjustment:
 - Prefer focused tests during development; temporary tests are acceptable, but stable regression coverage should be kept when it protects useful behavior.
 - The next useful step is likely session history filtering or better output/event modeling, not more raw lifecycle plumbing.
 - `main.rs` is now much closer to an orchestration entrypoint; the next coupling boundary is likely activity/progress rendering rather than tool plumbing.
+- The next worthwhile runtime improvement is deciding whether project state should stay file-backed-only or gain a bounded cache for hot paths.
+- The lingering `skills` warning is resolved; the next cleanup target is now functional rather than structural.
+- With runtime progress extracted, the next practical cleanup target is either the lingering `skills` warning or a bounded cache for task/worktree hot paths.
