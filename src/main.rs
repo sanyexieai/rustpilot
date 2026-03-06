@@ -3,13 +3,11 @@ use rustpilot::activity::new_activity_handle;
 use rustpilot::agent::{run_agent_loop, tool_definitions};
 use rustpilot::cli::{CliAction, handle_cli_command};
 use rustpilot::config::LlmConfig;
-use rustpilot::constants::LLM_TIMEOUT_SECS;
 use rustpilot::openai_compat::Message;
 use rustpilot::project_tools::ProjectContext;
+use rustpilot::runtime_env::{detect_repo_root, llm_timeout_secs};
 use rustpilot::skills::SkillRegistry;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 #[tokio::main]
@@ -86,84 +84,4 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn detect_repo_root(cwd: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(text);
-    path.exists().then_some(path)
-}
-
-fn llm_timeout_secs() -> u64 {
-    std::env::var("S12_LLM_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(LLM_TIMEOUT_SECS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    fn run(repo: &Path, program: &str, args: &[&str]) {
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("run command");
-        assert!(
-            output.status.success(),
-            "{} {:?} failed: {}{}",
-            program,
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn init_git_repo(path: &Path) {
-        run(path, "git", &["init"]);
-        run(path, "git", &["config", "user.name", "Codex"]);
-        run(path, "git", &["config", "user.email", "codex@example.com"]);
-        fs::write(path.join("README.md"), "hello\n").expect("write readme");
-        run(path, "git", &["add", "."]);
-        run(path, "git", &["commit", "-m", "init"]);
-    }
-
-    #[test]
-    fn detect_repo_root_finds_parent_repo() {
-        let temp = std::env::temp_dir()
-            .join("s12_tests")
-            .join(format!("detect_repo_root_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).expect("create temp dir");
-        init_git_repo(&temp);
-        let nested = temp.join("nested").join("child");
-        fs::create_dir_all(&nested).expect("create nested");
-
-        let root = detect_repo_root(&nested).expect("detect root");
-        assert_eq!(root, temp);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn llm_timeout_uses_default_when_env_missing() {
-        unsafe {
-            std::env::remove_var("S12_LLM_TIMEOUT_SECS");
-        }
-        assert_eq!(llm_timeout_secs(), LLM_TIMEOUT_SECS);
-    }
 }

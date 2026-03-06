@@ -524,7 +524,12 @@ fn terminal_tools_support_multiple_round_trips_after_resize() {
     )
     .expect("terminal_write one");
     let first_read = wait_for_terminal_output(&project, &session_id, "round-trip-one");
-    assert!(first_read["data"].as_str().unwrap_or_default().contains("round-trip-one"));
+    assert!(
+        first_read["data"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("round-trip-one")
+    );
     let next_offset = wait_for_terminal_quiet(
         &project,
         &session_id,
