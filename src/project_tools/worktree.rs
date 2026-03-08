@@ -89,14 +89,7 @@ impl WorktreeManager {
             None,
         )?;
 
-        if let Err(err) = self.run_git(&[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            path.to_string_lossy().as_ref(),
-            base_ref,
-        ]) {
+        if let Err(err) = self.add_worktree_with_branch_fallback(&path, &branch, base_ref) {
             self.events.emit(
                 "worktree.create.failed",
                 task_payload,
@@ -139,6 +132,69 @@ impl WorktreeManager {
             None,
         )?;
         Ok(serde_json::to_string_pretty(&record)?)
+    }
+
+    fn add_worktree_with_branch_fallback(
+        &self,
+        path: &PathBuf,
+        branch: &str,
+        base_ref: &str,
+    ) -> anyhow::Result<String> {
+        let first_try = self.run_git(&[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            path.to_string_lossy().as_ref(),
+            base_ref,
+        ]);
+        if let Ok(output) = first_try {
+            return Ok(output);
+        }
+        let first_err = first_try.unwrap_err();
+        let first_text = first_err.to_string();
+
+        if first_text.contains("already exists") || first_text.contains("已经存在") {
+            let second_try =
+                self.run_git(&["worktree", "add", path.to_string_lossy().as_ref(), branch]);
+            if let Ok(output) = second_try {
+                return Ok(output);
+            }
+            let second_err = second_try.unwrap_err();
+            let second_text = second_err.to_string();
+            if Self::is_missing_registered_worktree_error(&second_text) {
+                let _ = self.run_git(&["worktree", "prune"]);
+                return self.run_git(&[
+                    "worktree",
+                    "add",
+                    "-f",
+                    path.to_string_lossy().as_ref(),
+                    branch,
+                ]);
+            }
+            return Err(second_err);
+        }
+
+        if Self::is_missing_registered_worktree_error(&first_text) {
+            let _ = self.run_git(&["worktree", "prune"]);
+            return self.run_git(&[
+                "worktree",
+                "add",
+                "-f",
+                "-b",
+                branch,
+                path.to_string_lossy().as_ref(),
+                base_ref,
+            ]);
+        }
+
+        Err(first_err)
+    }
+
+    fn is_missing_registered_worktree_error(text: &str) -> bool {
+        (text.contains("丢失") && text.contains("注册的工作区"))
+            || text.contains("丢失但已经注册")
+            || text.contains("missing but already registered")
     }
 
     pub fn list_all(&self) -> anyhow::Result<String> {

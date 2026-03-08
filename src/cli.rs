@@ -10,6 +10,7 @@ pub enum CliAction {
     FocusTeam,
     FocusWorker { task_id: u64 },
     FocusStatus,
+    ReplyTask { task_id: u64, content: String },
     TeamRun { goal: String },
     TeamStart { max_parallel: usize },
     TeamStop,
@@ -52,6 +53,32 @@ pub fn handle_cli_command(
         }
         println!("用法: /focus lead | /focus team | /focus worker <task_id> | /focus status");
         return Ok(Some(CliAction::Continue));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/reply").map(str::trim) {
+        let mut parts = rest.splitn(2, ' ');
+        let Some(id_raw) = parts.next() else {
+            println!("用法: /reply <task_id> <补充信息>");
+            return Ok(Some(CliAction::Continue));
+        };
+        let Some(content) = parts.next().map(str::trim) else {
+            println!("用法: /reply <task_id> <补充信息>");
+            return Ok(Some(CliAction::Continue));
+        };
+        if content.is_empty() {
+            println!("用法: /reply <task_id> <补充信息>");
+            return Ok(Some(CliAction::Continue));
+        }
+        let task_id = match id_raw.parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                println!("task_id 必须是整数");
+                return Ok(Some(CliAction::Continue));
+            }
+        };
+        return Ok(Some(CliAction::ReplyTask {
+            task_id,
+            content: content.to_string(),
+        }));
     }
     if let Some(rest) = trimmed.strip_prefix("/team").map(str::trim) {
         if rest.is_empty() || rest == "status" {

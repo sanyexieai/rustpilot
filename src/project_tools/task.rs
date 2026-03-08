@@ -67,7 +67,10 @@ impl TaskManager {
         self.with_lock(|| {
             let mut task = self.load(task_id)?;
             if let Some(status) = status {
-                if !matches!(status, "pending" | "in_progress" | "completed" | "failed") {
+                if !matches!(
+                    status,
+                    "pending" | "in_progress" | "blocked" | "completed" | "failed"
+                ) {
                     anyhow::bail!("非法状态: {}", status);
                 }
                 task.status = status.to_string();
@@ -141,6 +144,7 @@ impl TaskManager {
             let marker = match task.status.as_str() {
                 "pending" => "[ ]",
                 "in_progress" => "[>]",
+                "blocked" => "[!]",
                 "completed" => "[x]",
                 _ => "[?]",
             };
@@ -169,6 +173,33 @@ impl TaskManager {
                 .into_iter()
                 .filter(|task| task.status == "pending")
                 .count())
+        })
+    }
+
+    pub fn append_user_reply(
+        &self,
+        task_id: u64,
+        reply: &str,
+        next_status: &str,
+    ) -> anyhow::Result<String> {
+        self.with_lock(|| {
+            let mut task = self.load(task_id)?;
+            let message = reply.trim();
+            if message.is_empty() {
+                anyhow::bail!("reply 不能为空");
+            }
+            if !matches!(next_status, "pending" | "in_progress" | "blocked") {
+                anyhow::bail!("非法状态: {}", next_status);
+            }
+            if !task.description.trim().is_empty() {
+                task.description.push_str("\n\n");
+            }
+            task.description
+                .push_str(&format!("[USER_REPLY @ {}]\n{}", now_secs_f64(), message));
+            task.status = next_status.to_string();
+            task.updated_at = now_secs_f64();
+            self.save(&task)?;
+            Ok(serde_json::to_string_pretty(&task)?)
         })
     }
 

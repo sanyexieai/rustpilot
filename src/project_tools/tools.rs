@@ -100,7 +100,7 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "integer" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed"] },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "blocked", "completed", "failed"] },
                     "owner": { "type": "string" }
                 },
                 "required": ["task_id"]

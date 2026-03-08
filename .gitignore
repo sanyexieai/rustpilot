@@ -6,3 +6,4 @@ target-test/*
 .vscode/*
 .cargo/*
 .terminal_sessions/*
+.team/*

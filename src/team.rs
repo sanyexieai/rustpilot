@@ -145,8 +145,24 @@ fn scheduler_loop(
                     Ok(Some(status)) => {
                         finished.push(*task_id);
                         if status.success() {
-                            let _ = project.tasks().update(*task_id, Some("completed"), None);
-                            completed.fetch_add(1, Ordering::Relaxed);
+                            let current = load_task_status(&project, *task_id)
+                                .unwrap_or_else(|_| "failed".to_string());
+                            match current.as_str() {
+                                "completed" => {
+                                    completed.fetch_add(1, Ordering::Relaxed);
+                                }
+                                "blocked" => {
+                                    // 等待用户补充信息，不自动改状态。
+                                }
+                                "failed" => {
+                                    failed.fetch_add(1, Ordering::Relaxed);
+                                }
+                                _ => {
+                                    let _ =
+                                        project.tasks().update(*task_id, Some("completed"), None);
+                                    completed.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         } else {
                             let _ = project.tasks().update(*task_id, Some("failed"), None);
                             failed.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +192,8 @@ fn scheduler_loop(
                     } else if status == "failed" {
                         failed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
+                    } else if status == "blocked" {
+                        finished.push(*task_id);
                     }
                 }
                 WorkerHandle::TerminalSession {
@@ -196,6 +214,8 @@ fn scheduler_loop(
                         finished.push(*task_id);
                     } else if status == "failed" {
                         failed.fetch_add(1, Ordering::Relaxed);
+                        finished.push(*task_id);
+                    } else if status == "blocked" {
                         finished.push(*task_id);
                     } else if let Ok(info) = terminal_manager.status(session_id) {
                         if !matches!(info.state, SessionState::Running) {
@@ -472,50 +492,149 @@ pub async fn run_teammate_once(
         task_id: Some(task_id),
         trace_id: Some(trace_id.clone()),
     };
-    let result = run_agent_loop(
-        &client,
-        &llm,
-        &project,
-        &mut messages,
-        &tools,
-        progress,
-        Some(&report),
-    )
-    .await;
-    match result {
-        Ok(()) => {
-            let _ = project
-                .tasks()
-                .update(task_id, Some("completed"), Some(&owner));
-            let _ = project.mailbox().send_typed(
-                &owner,
-                "lead",
-                "task.result",
-                &format!("任务 #{} 已完成：{}", task_id, task_subject),
-                Some(task_id),
-                Some(&trace_id),
-                true,
-                None,
-            );
-            Ok(())
-        }
-        Err(err) => {
-            let _ = project
-                .tasks()
-                .update(task_id, Some("failed"), Some(&owner));
-            let _ = project.mailbox().send_typed(
-                &owner,
-                "lead",
-                "task.failed",
-                &format!("任务 #{} 失败：{}", task_id, err),
-                Some(task_id),
-                Some(&trace_id),
-                true,
-                None,
-            );
-            Err(err)
+    let mut clarification_cursor = 0usize;
+    loop {
+        let result = run_agent_loop(
+            &client,
+            &llm,
+            &project,
+            &mut messages,
+            &tools,
+            progress.clone(),
+            Some(&report),
+        )
+        .await;
+        match result {
+            Ok(()) => {
+                if let Some(question) = detect_user_clarification_need(&messages) {
+                    let _ = project
+                        .tasks()
+                        .update(task_id, Some("blocked"), Some(&owner));
+                    let _ = project.mailbox().send_typed(
+                        &owner,
+                        "lead",
+                        "task.request_clarification",
+                        &question,
+                        Some(task_id),
+                        Some(&trace_id),
+                        true,
+                        None,
+                    );
+                    let clarification = wait_for_clarification(
+                        &project,
+                        &owner,
+                        task_id,
+                        &trace_id,
+                        &mut clarification_cursor,
+                    )
+                    .await?;
+                    let _ =
+                        project
+                            .tasks()
+                            .append_user_reply(task_id, &clarification, "in_progress");
+                    messages.push(Message {
+                        role: "user".to_string(),
+                        content: Some(format!("用户补充信息：{}\n请继续完成任务。", clarification)),
+                        tool_call_id: None,
+                        tool_calls: None,
+                    });
+                    continue;
+                }
+                let _ = project
+                    .tasks()
+                    .update(task_id, Some("completed"), Some(&owner));
+                let _ = project.mailbox().send_typed(
+                    &owner,
+                    "lead",
+                    "task.result",
+                    &format!("任务 #{} 已完成：{}", task_id, task_subject),
+                    Some(task_id),
+                    Some(&trace_id),
+                    true,
+                    None,
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                let _ = project
+                    .tasks()
+                    .update(task_id, Some("failed"), Some(&owner));
+                let _ = project.mailbox().send_typed(
+                    &owner,
+                    "lead",
+                    "task.failed",
+                    &format!("任务 #{} 失败：{}", task_id, err),
+                    Some(task_id),
+                    Some(&trace_id),
+                    true,
+                    None,
+                );
+                return Err(err);
+            }
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerMailPoll {
+    next_cursor: usize,
+    items: Vec<WorkerMailItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerMailItem {
+    msg_type: String,
+    trace_id: String,
+    message: String,
+    task_id: Option<u64>,
+}
+
+async fn wait_for_clarification(
+    project: &ProjectContext,
+    owner: &str,
+    task_id: u64,
+    trace_id: &str,
+    cursor: &mut usize,
+) -> anyhow::Result<String> {
+    loop {
+        let raw = project.mailbox().poll(owner, *cursor, 20)?;
+        let polled: WorkerMailPoll = serde_json::from_str(&raw)?;
+        *cursor = polled.next_cursor;
+        for item in polled.items {
+            if item.msg_type == "task.clarification"
+                && item.task_id == Some(task_id)
+                && item.trace_id == trace_id
+            {
+                return Ok(item.message);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn detect_user_clarification_need(messages: &[Message]) -> Option<String> {
+    let text = messages
+        .iter()
+        .rev()
+        .find(|item| item.role == "assistant")
+        .and_then(|item| item.content.as_ref())?
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let looks_like_question = text.contains('？') || text.contains('?');
+    let asks_input = lower.contains("please provide")
+        || text.contains("请提供")
+        || text.contains("请问")
+        || text.contains("用户名")
+        || text.contains("邮箱")
+        || text.contains("需要你提供");
+    if looks_like_question && asks_input {
+        return Some(text);
+    }
+    None
 }
 
 fn detect_timer_seconds(text: &str) -> Option<u64> {

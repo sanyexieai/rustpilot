@@ -144,6 +144,38 @@ async fn main() -> anyhow::Result<()> {
                 println!("当前交互焦点: {}", interaction_mode.label());
                 continue;
             }
+            Some(CliAction::ReplyTask { task_id, content }) => {
+                let worker_running = matches!(
+                    get_worker_endpoint(&repo_root, task_id)?,
+                    Some(endpoint) if endpoint.status == "running"
+                );
+                let updated = project.tasks().append_user_reply(
+                    task_id,
+                    &content,
+                    if worker_running {
+                        "in_progress"
+                    } else {
+                        "pending"
+                    },
+                )?;
+                let _ = project.mailbox().send_typed(
+                    "lead",
+                    &format!("teammate-{}", task_id),
+                    "task.clarification",
+                    &format!("用户补充信息: {}", content),
+                    Some(task_id),
+                    Some(&format!("task-{}", task_id)),
+                    false,
+                    None,
+                );
+                if worker_running {
+                    println!("已补充信息并发送给运行中的 worker:\n{}", updated);
+                } else {
+                    println!("已补充任务并重新排队:\n{}", updated);
+                    ensure_team_running(&repo_root, &mut team, AUTO_TEAM_MAX_PARALLEL);
+                }
+                continue;
+            }
             Some(CliAction::TeamRun { goal }) => {
                 let task = project.tasks().create(&goal, "由 /team run 创建")?;
                 println!("已创建团队任务:\n{}", task);
@@ -349,6 +381,15 @@ fn pump_lead_mailbox(
             "[mail][{}][{}][from={}] {}",
             item.cursor, item.msg_type, item.from, item.message
         );
+        if item.msg_type == "task.request_clarification"
+            && let Some(task_id) = item.task_id
+        {
+            let _ = project.tasks().update(task_id, Some("blocked"), None);
+            println!(
+                "[clarification] task {} 已阻塞，使用 /reply {} <补充信息> 继续",
+                task_id, task_id
+            );
+        }
         if item.requires_ack {
             let _ = project.mailbox().ack("lead", &item.msg_id, "收到，继续");
         }
@@ -394,6 +435,7 @@ struct MailItem {
     msg_type: String,
     from: String,
     message: String,
+    task_id: Option<u64>,
     #[serde(default)]
     requires_ack: bool,
 }
