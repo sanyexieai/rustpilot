@@ -94,6 +94,13 @@ src/
 - `task_update` - 更新任务状态
 - `task_bind_worktree` - 绑定任务到 Worktree
 
+团队通信工具：
+
+- `team_send` - 向指定成员发送 mailbox 消息
+- `team_inbox` - 读取指定成员的最近消息
+- `team_poll` - 按游标轮询某成员的新消息（适合持续消费）
+- `team_ack` - 对指定消息发送 ACK（生成 `task.ack` 回执）
+
 ### 3. Git Worktree 集成（参考 Claude Code `worktree_*` 工具）
 
 支持 Git Worktree 操作：
@@ -169,6 +176,15 @@ cargo run
 - `/worktrees` - 查看 Worktree 列表
 - `/events` - 查看最近事件
 - `/status` - 查看当前执行状态
+- `/ask <内容>` - 与主代理直接对话（不入团队任务队列）
+- `/focus lead` - 切换到主 agent 交互模式（自然输入直接对话）
+- `/focus team` - 切换到团队队列模式（自然输入自动入队任务）
+- `/focus worker <task_id>` - 切换到指定子 agent 交互模式（将输入路由到子会话）
+- `/focus status` - 查看当前交互焦点
+- `/team run <需求>` - 一键创建团队任务并自动调度执行
+- `/team start [max_parallel]` - 启动团队调度器（拉起临时 teammate 子进程）
+- `/team stop` - 停止团队调度器
+- `/team status` - 查看团队调度器状态
 - `/skills` - 列出技能
 - `/skill <name>` - 查看指定技能内容
 - `/skill-tool-init <name>` - 创建外部工具 skill 模板
@@ -177,6 +193,21 @@ cargo run
 ### 工具调用
 
 Agent 可以自动调用各种工具执行任务，也可以手动触发任务和 Worktree 操作。
+
+团队调度默认会自动起停：
+- 检测到有 `pending` 任务时自动启动调度器
+- 队列为空且无运行中的 teammate 时自动停止调度器
+- 普通自然语言输入会自动入队为团队任务（无需 `/team run`）
+- 子 agent 会自动向 `lead` 汇报 `task.started/task.result/task.failed`
+- 对 `task.result/task.failed` 会自动 ACK，并注入主 agent 会话上下文
+- 子 agent 在执行模型轮次与工具调用时会持续上报 `task.progress`
+- `/focus worker <task_id>` 依赖 `.team/agents.json` 映射（调度器自动维护）
+
+子 agent 窗口模式：
+- 默认 `RUSTPILOT_TEAM_SPAWN=auto`：优先 `tmux`，无 `tmux` 时回退为独立 terminal session（PTY）
+- `RUSTPILOT_TEAM_SPAWN=tmux`：强制 tmux 窗口
+- `RUSTPILOT_TEAM_SPAWN=terminal`：强制独立 terminal session
+- `RUSTPILOT_TEAM_SPAWN=inherit`：回退到主终端混合输出
 
 ### 外部工具加载
 

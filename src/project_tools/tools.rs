@@ -9,6 +9,62 @@ use super::ProjectContext;
 pub fn project_tool_definitions() -> Vec<Tool> {
     vec![
         tool(
+            "team_send",
+            "给团队成员发送 mailbox 消息。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "msg_type": { "type": "string" },
+                    "trace_id": { "type": "string" },
+                    "requires_ack": { "type": "boolean" },
+                    "in_reply_to": { "type": "string" },
+                    "message": { "type": "string" },
+                    "task_id": { "type": "integer" }
+                },
+                "required": ["to", "message"]
+            }),
+        ),
+        tool(
+            "team_ack",
+            "确认收到一条消息（会自动回复 task.ack 给发送方）。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "msg_id": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "required": ["owner", "msg_id"]
+            }),
+        ),
+        tool(
+            "team_poll",
+            "按游标轮询某个团队成员的新消息。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "after_cursor": { "type": "integer" },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["owner"]
+            }),
+        ),
+        tool(
+            "team_inbox",
+            "读取某个团队成员的 mailbox 消息。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string" },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["owner"]
+            }),
+        ),
+        tool(
             "task_create",
             "在共享任务板中创建任务。",
             json!({
@@ -44,7 +100,7 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "integer" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed"] },
                     "owner": { "type": "string" }
                 },
                 "required": ["task_id"]
@@ -144,9 +200,47 @@ pub fn handle_project_tool_call(
 ) -> anyhow::Result<Option<String>> {
     let tasks = context.tasks();
     let events = context.events();
+    let mailbox = context.mailbox();
     let worktrees = context.worktrees();
 
     let output = match call.function.name.as_str() {
+        "team_send" => {
+            let args: TeamSendArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid team_send arguments")?;
+            mailbox.send_typed(
+                args.from.as_deref().unwrap_or("lead"),
+                &args.to,
+                args.msg_type.as_deref().unwrap_or("message"),
+                &args.message,
+                args.task_id,
+                args.trace_id.as_deref(),
+                args.requires_ack.unwrap_or(false),
+                args.in_reply_to.as_deref(),
+            )?
+        }
+        "team_ack" => {
+            let args: TeamAckArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid team_ack arguments")?;
+            mailbox.ack(
+                &args.owner,
+                &args.msg_id,
+                args.note.as_deref().unwrap_or(""),
+            )?
+        }
+        "team_poll" => {
+            let args: TeamPollArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid team_poll arguments")?;
+            mailbox.poll(
+                &args.owner,
+                args.after_cursor.unwrap_or(0),
+                args.limit.unwrap_or(20),
+            )?
+        }
+        "team_inbox" => {
+            let args: TeamInboxArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid team_inbox arguments")?;
+            mailbox.inbox(&args.owner, args.limit.unwrap_or(20))?
+        }
         "task_create" => {
             let args: TaskCreateArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid task_create arguments")?;
@@ -233,6 +327,48 @@ struct TaskCreateArgs {
     subject: String,
     #[serde(default)]
     description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamSendArgs {
+    #[serde(default)]
+    from: Option<String>,
+    to: String,
+    #[serde(default)]
+    msg_type: Option<String>,
+    #[serde(default)]
+    trace_id: Option<String>,
+    #[serde(default)]
+    requires_ack: Option<bool>,
+    #[serde(default)]
+    in_reply_to: Option<String>,
+    message: String,
+    #[serde(default)]
+    task_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamAckArgs {
+    owner: String,
+    msg_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamPollArgs {
+    owner: String,
+    #[serde(default)]
+    after_cursor: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamInboxArgs {
+    owner: String,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

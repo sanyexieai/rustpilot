@@ -60,9 +60,12 @@ fn make_temp_dir(name: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let dir = std::env::temp_dir()
-        .join("tests")
-        .join(format!("{}_{}_{}", name, std::process::id(), nanos));
+    let dir = std::env::temp_dir().join("tests").join(format!(
+        "{}_{}_{}",
+        name,
+        std::process::id(),
+        nanos
+    ));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
@@ -85,7 +88,11 @@ fn ensure_env_guidance_creates_file_when_missing() {
 fn ensure_env_guidance_appends_missing_keys_without_overwrite() {
     let dir = make_temp_dir("ensure_env_appends");
     let env_path = dir.join(".env");
-    fs::write(&env_path, "LLM_API_KEY=custom_key\nLLM_MODEL=custom_model\n").expect("write .env");
+    fs::write(
+        &env_path,
+        "LLM_API_KEY=custom_key\nLLM_MODEL=custom_model\n",
+    )
+    .expect("write .env");
 
     let update = ensure_env_guidance(&dir).expect("ensure env guidance");
     let env_text = fs::read_to_string(&env_path).expect("read .env");

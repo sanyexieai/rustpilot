@@ -86,7 +86,10 @@ pub fn mcp_tool_definitions() -> Vec<Tool> {
                 r#type: "function".to_string(),
                 function: ToolFunction {
                     name: tool.config.name.clone(),
-                    description: format!("[mcp:{}] {}", tool.config.server.name, tool.config.description),
+                    description: format!(
+                        "[mcp:{}] {}",
+                        tool.config.server.name, tool.config.description
+                    ),
                     parameters: tool
                         .config
                         .parameters

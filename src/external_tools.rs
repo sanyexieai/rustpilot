@@ -87,7 +87,10 @@ pub fn external_tool_definitions() -> Vec<Tool> {
 
 pub fn handle_external_tool_call(call: &ToolCall) -> anyhow::Result<Option<String>> {
     with_loaded_tools(|tools| {
-        let Some(tool) = tools.iter().find(|item| item.config.name == call.function.name) else {
+        let Some(tool) = tools
+            .iter()
+            .find(|item| item.config.name == call.function.name)
+        else {
             return Ok(None);
         };
 
@@ -350,10 +353,7 @@ fn execute_external_tool(tool: &LoadedExternalTool, arguments: &str) -> anyhow::
 }
 
 fn run_tool_process(tool: &LoadedExternalTool, arguments: &str) -> anyhow::Result<Output> {
-    let mut command = Command::new(resolve_command_path(
-        &tool.skill_dir,
-        &tool.config.command,
-    ));
+    let mut command = Command::new(resolve_command_path(&tool.skill_dir, &tool.config.command));
     command.args(&tool.config.args);
     command.current_dir(&tool.skill_dir);
     command.stdin(Stdio::piped());

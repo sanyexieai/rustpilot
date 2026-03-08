@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::util::now_secs_f64;
 
@@ -30,20 +32,22 @@ impl TaskManager {
     }
 
     pub fn create(&self, subject: &str, description: &str) -> anyhow::Result<String> {
-        let now = now_secs_f64();
-        let task = TaskRecord {
-            id: self.max_id()? + 1,
-            subject: subject.to_string(),
-            description: description.to_string(),
-            status: "pending".to_string(),
-            owner: String::new(),
-            worktree: String::new(),
-            blocked_by: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
+        self.with_lock(|| {
+            let now = now_secs_f64();
+            let task = TaskRecord {
+                id: self.max_id()? + 1,
+                subject: subject.to_string(),
+                description: description.to_string(),
+                status: "pending".to_string(),
+                owner: String::new(),
+                worktree: String::new(),
+                blocked_by: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            };
+            self.save(&task)?;
+            Ok(serde_json::to_string_pretty(&task)?)
+        })
     }
 
     pub fn get(&self, task_id: u64) -> anyhow::Result<String> {
@@ -60,19 +64,38 @@ impl TaskManager {
         status: Option<&str>,
         owner: Option<&str>,
     ) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        if let Some(status) = status {
-            if !matches!(status, "pending" | "in_progress" | "completed") {
-                anyhow::bail!("非法状态: {}", status);
+        self.with_lock(|| {
+            let mut task = self.load(task_id)?;
+            if let Some(status) = status {
+                if !matches!(status, "pending" | "in_progress" | "completed" | "failed") {
+                    anyhow::bail!("非法状态: {}", status);
+                }
+                task.status = status.to_string();
             }
-            task.status = status.to_string();
-        }
-        if let Some(owner) = owner {
+            if let Some(owner) = owner {
+                task.owner = owner.to_string();
+            }
+            task.updated_at = now_secs_f64();
+            self.save(&task)?;
+            Ok(serde_json::to_string_pretty(&task)?)
+        })
+    }
+
+    pub fn claim_next_pending(&self, owner: &str) -> anyhow::Result<Option<TaskRecord>> {
+        self.with_lock(|| {
+            let mut tasks = self.load_all()?;
+            tasks.sort_by_key(|task| task.id);
+
+            let Some(mut task) = tasks.into_iter().find(|task| task.status == "pending") else {
+                return Ok(None);
+            };
+
+            task.status = "in_progress".to_string();
             task.owner = owner.to_string();
-        }
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
+            task.updated_at = now_secs_f64();
+            self.save(&task)?;
+            Ok(Some(task))
+        })
     }
 
     pub fn bind_worktree(
@@ -81,25 +104,29 @@ impl TaskManager {
         worktree: &str,
         owner: &str,
     ) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        task.worktree = worktree.to_string();
-        if !owner.is_empty() {
-            task.owner = owner.to_string();
-        }
-        if task.status == "pending" {
-            task.status = "in_progress".to_string();
-        }
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
+        self.with_lock(|| {
+            let mut task = self.load(task_id)?;
+            task.worktree = worktree.to_string();
+            if !owner.is_empty() {
+                task.owner = owner.to_string();
+            }
+            if task.status == "pending" {
+                task.status = "in_progress".to_string();
+            }
+            task.updated_at = now_secs_f64();
+            self.save(&task)?;
+            Ok(serde_json::to_string_pretty(&task)?)
+        })
     }
 
     pub fn unbind_worktree(&self, task_id: u64) -> anyhow::Result<String> {
-        let mut task = self.load(task_id)?;
-        task.worktree.clear();
-        task.updated_at = now_secs_f64();
-        self.save(&task)?;
-        Ok(serde_json::to_string_pretty(&task)?)
+        self.with_lock(|| {
+            let mut task = self.load(task_id)?;
+            task.worktree.clear();
+            task.updated_at = now_secs_f64();
+            self.save(&task)?;
+            Ok(serde_json::to_string_pretty(&task)?)
+        })
     }
 
     pub fn list_all(&self) -> anyhow::Result<String> {
@@ -133,6 +160,16 @@ impl TaskManager {
             ));
         }
         Ok(lines.join("\n"))
+    }
+
+    pub fn pending_count(&self) -> anyhow::Result<usize> {
+        self.with_lock(|| {
+            Ok(self
+                .load_all()?
+                .into_iter()
+                .filter(|task| task.status == "pending")
+                .count())
+        })
     }
 
     fn path(&self, task_id: u64) -> PathBuf {
@@ -192,5 +229,31 @@ impl TaskManager {
             tasks.push(serde_json::from_str(&content)?);
         }
         Ok(tasks)
+    }
+
+    fn with_lock<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let lock_path = self.dir.join(".lock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("获取任务锁超时: {}", lock_path.display());
+                    }
+                    thread::sleep(Duration::from_millis(30));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        let result = f();
+        let _ = fs::remove_file(lock_path);
+        result
     }
 }

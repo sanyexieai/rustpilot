@@ -3,11 +3,21 @@ use anyhow::Context;
 use crate::activity::{ActivityHandle, WaitHeartbeat, set_activity};
 use crate::agent_tools::{builtin_tool_definitions, handle_builtin_tool_call};
 use crate::config::LlmConfig;
-use crate::constants::{MAX_AGENT_TURNS, RETRY_MAX_ATTEMPTS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS};
+use crate::constants::{
+    MAX_AGENT_TURNS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_ATTEMPTS, RETRY_MAX_DELAY_MS,
+};
 use crate::external_tools::{external_tool_definitions, handle_external_tool_call};
 use crate::mcp::{handle_mcp_tool_call, mcp_tool_definitions};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
 use crate::project_tools::{ProjectContext, handle_project_tool_call, project_tool_definitions};
+
+#[derive(Debug, Clone)]
+pub struct AgentProgressReport {
+    pub from: String,
+    pub to: String,
+    pub task_id: Option<u64>,
+    pub trace_id: Option<String>,
+}
 
 /// 使用指数退避重试发送 LLM 请求
 async fn send_llm_request(
@@ -56,8 +66,10 @@ async fn send_llm_request(
         }
 
         // 打印重试信息
-        println!("> [重试] 请求失败 ({}), {}ms 后重试 ({}/{})...", 
-            status, delay_ms, attempt, RETRY_MAX_ATTEMPTS);
+        println!(
+            "> [重试] 请求失败 ({}), {}ms 后重试 ({}/{})...",
+            status, delay_ms, attempt, RETRY_MAX_ATTEMPTS
+        );
 
         // 指数退避 + 随机抖动
         let jitter = (rand_u32() % 500) as u64;
@@ -89,9 +101,16 @@ pub async fn run_agent_loop(
     messages: &mut Vec<Message>,
     tools: &[Tool],
     progress: ActivityHandle,
+    report: Option<&AgentProgressReport>,
 ) -> anyhow::Result<()> {
     for turn in 0..MAX_AGENT_TURNS {
         set_activity(&progress, turn + 1, "等待模型响应", None);
+        emit_progress(
+            project,
+            report,
+            "task.progress",
+            &format!("第 {} 轮：等待模型响应", turn + 1),
+        );
         let request = ChatRequest {
             model: config.model.clone(),
             messages: messages.clone(),
@@ -126,6 +145,12 @@ pub async fn run_agent_loop(
 
         if tool_calls.is_empty() {
             set_activity(&progress, turn + 1, "已完成", None);
+            emit_progress(
+                project,
+                report,
+                "task.progress",
+                &format!("第 {} 轮：模型返回最终结果", turn + 1),
+            );
             if let Some(content) = assistant.content {
                 println!("{}", content);
             }
@@ -138,6 +163,12 @@ pub async fn run_agent_loop(
                 turn + 1,
                 "执行工具中",
                 Some(call.function.name.clone()),
+            );
+            emit_progress(
+                project,
+                report,
+                "task.progress",
+                &format!("第 {} 轮：执行工具 {}", turn + 1, call.function.name),
             );
             println!("> [活动] 正在执行工具 {}", call.function.name);
             let output = match handle_tool_call(project, &call) {
@@ -157,6 +188,12 @@ pub async fn run_agent_loop(
                 "工具执行完成",
                 Some(call.function.name.clone()),
             );
+            emit_progress(
+                project,
+                report,
+                "task.progress",
+                &format!("第 {} 轮：工具 {} 执行完成", turn + 1, call.function.name),
+            );
         }
     }
 
@@ -165,6 +202,27 @@ pub async fn run_agent_loop(
         "代理循环超过 {} 轮，请停止当前请求或缩小提示范围",
         MAX_AGENT_TURNS
     )
+}
+
+fn emit_progress(
+    project: &ProjectContext,
+    report: Option<&AgentProgressReport>,
+    msg_type: &str,
+    message: &str,
+) {
+    let Some(report) = report else {
+        return;
+    };
+    let _ = project.mailbox().send_typed(
+        &report.from,
+        &report.to,
+        msg_type,
+        message,
+        report.task_id,
+        report.trace_id.as_deref(),
+        false,
+        None,
+    );
 }
 
 pub fn truncate_for_print(text: &str) -> String {

@@ -11,4 +11,5 @@ pub mod project_tools;
 pub mod runtime_env;
 pub mod shell_file_tools;
 pub mod skills;
+pub mod team;
 pub mod terminal_session;

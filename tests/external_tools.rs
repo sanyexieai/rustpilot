@@ -19,9 +19,12 @@ fn make_temp_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let dir = std::env::temp_dir()
-        .join("tests")
-        .join(format!("{}_{}_{}", name, std::process::id(), nanos));
+    let dir = std::env::temp_dir().join("tests").join(format!(
+        "{}_{}_{}",
+        name,
+        std::process::id(),
+        nanos
+    ));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
@@ -55,7 +58,11 @@ fn external_tool_with_tests_is_loaded_and_executable() {
         std::env::set_var("SKILLS_DIR", &dir);
     }
     let tools = external_tool_definitions();
-    assert!(tools.iter().any(|tool| tool.function.name == "echo_external"));
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.function.name == "echo_external")
+    );
 
     let call = ToolCall {
         id: "call-echo".to_string(),
@@ -86,7 +93,11 @@ fn external_tool_without_tests_is_skipped() {
         std::env::set_var("SKILLS_DIR", &dir);
     }
     let tools = external_tool_definitions();
-    assert!(!tools.iter().any(|tool| tool.function.name == "echo_external"));
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool.function.name == "echo_external")
+    );
 
     unsafe {
         std::env::remove_var("SKILLS_DIR");
@@ -105,12 +116,13 @@ fn external_tool_is_retested_and_unloaded_after_test_change() {
     }
 
     let tools_before = external_tool_definitions();
-    assert!(tools_before.iter().any(|tool| tool.function.name == "echo_external"));
+    assert!(
+        tools_before
+            .iter()
+            .any(|tool| tool.function.name == "echo_external")
+    );
 
-    let smoke_path = dir
-        .join("echo-tool")
-        .join("tests")
-        .join("smoke.json");
+    let smoke_path = dir.join("echo-tool").join("tests").join("smoke.json");
     fs::write(
         smoke_path,
         "{\n  \"name\": \"smoke\",\n  \"arguments\": { \"name\": \"smoke\" },\n  \"expect_status\": 0,\n  \"expect_stdout_contains\": \"NOT_MATCH\"\n}\n",
@@ -118,7 +130,11 @@ fn external_tool_is_retested_and_unloaded_after_test_change() {
     .expect("overwrite test");
 
     let tools_after = external_tool_definitions();
-    assert!(!tools_after.iter().any(|tool| tool.function.name == "echo_external"));
+    assert!(
+        !tools_after
+            .iter()
+            .any(|tool| tool.function.name == "echo_external")
+    );
 
     unsafe {
         std::env::remove_var("SKILLS_DIR");

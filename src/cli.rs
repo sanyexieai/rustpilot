@@ -6,6 +6,14 @@ use crate::skills::{SkillRegistry, init_tool_skill};
 pub enum CliAction {
     Continue,
     ReloadSkills,
+    FocusLead,
+    FocusTeam,
+    FocusWorker { task_id: u64 },
+    FocusStatus,
+    TeamRun { goal: String },
+    TeamStart { max_parallel: usize },
+    TeamStop,
+    TeamStatus,
     Exit,
 }
 
@@ -17,6 +25,60 @@ pub fn handle_cli_command(
 ) -> anyhow::Result<Option<CliAction>> {
     if matches!(trimmed, "q" | "quit" | "exit") {
         return Ok(Some(CliAction::Exit));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/focus").map(str::trim) {
+        if rest.is_empty() || rest == "status" {
+            return Ok(Some(CliAction::FocusStatus));
+        }
+        if rest == "lead" {
+            return Ok(Some(CliAction::FocusLead));
+        }
+        if rest == "team" {
+            return Ok(Some(CliAction::FocusTeam));
+        }
+        if let Some(arg) = rest.strip_prefix("worker").map(str::trim) {
+            if arg.is_empty() {
+                println!("用法: /focus worker <task_id>");
+                return Ok(Some(CliAction::Continue));
+            }
+            let task_id = match arg.parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    println!("task_id 必须是整数");
+                    return Ok(Some(CliAction::Continue));
+                }
+            };
+            return Ok(Some(CliAction::FocusWorker { task_id }));
+        }
+        println!("用法: /focus lead | /focus team | /focus worker <task_id> | /focus status");
+        return Ok(Some(CliAction::Continue));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/team").map(str::trim) {
+        if rest.is_empty() || rest == "status" {
+            return Ok(Some(CliAction::TeamStatus));
+        }
+        if let Some(goal) = rest.strip_prefix("run").map(str::trim) {
+            if goal.is_empty() {
+                println!("用法: /team run <需求>");
+                return Ok(Some(CliAction::Continue));
+            }
+            return Ok(Some(CliAction::TeamRun {
+                goal: goal.to_string(),
+            }));
+        }
+        if rest == "stop" {
+            return Ok(Some(CliAction::TeamStop));
+        }
+        if let Some(arg) = rest.strip_prefix("start").map(str::trim) {
+            let max_parallel = if arg.is_empty() {
+                2usize
+            } else {
+                arg.parse::<usize>().unwrap_or(2).max(1)
+            };
+            return Ok(Some(CliAction::TeamStart { max_parallel }));
+        }
+        println!("用法: /team run <需求> | /team start [max_parallel] | /team stop | /team status");
+        return Ok(Some(CliAction::Continue));
     }
     if trimmed == "/tasks" {
         println!("{}", project.tasks().list_all()?);
