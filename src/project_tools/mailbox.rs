@@ -198,6 +198,27 @@ impl Mailbox {
         )
     }
 
+    pub fn pending_count(&self, owner: &str) -> anyhow::Result<usize> {
+        let owner = normalize_actor(owner);
+        if owner.is_empty() {
+            anyhow::bail!("owner cannot be empty");
+        }
+        let path = self.path_for(&owner);
+        if !path.exists() {
+            return Ok(0);
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count())
+    }
+
+    pub fn backlog_count(&self, owner: &str, after_cursor: usize) -> anyhow::Result<usize> {
+        let total = self.pending_count(owner)?;
+        Ok(total.saturating_sub(after_cursor))
+    }
+
     fn find_message_for_owner(
         &self,
         owner: &str,

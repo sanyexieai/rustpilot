@@ -10,8 +10,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::agent::{AgentProgressReport, run_agent_loop, tool_definitions};
 use crate::config::LlmConfig;
+use crate::config::default_llm_user_agent;
 use crate::openai_compat::Message;
-use crate::project_tools::{ProjectContext, TaskRecord};
+use crate::openai_compat::Tool;
+use crate::project_tools::{
+    EnergyMode, ProjectContext, TaskRecord, classify_energy, task_priority_rank,
+};
 use crate::runtime_env::llm_timeout_secs;
 use crate::terminal_session::{SessionState, TerminalCreateRequest, TerminalManager};
 use serde::{Deserialize, Serialize};
@@ -127,6 +131,33 @@ fn scheduler_loop(
     let mut workers: HashMap<u64, WorkerHandle> = HashMap::new();
     let spawn_mode = choose_spawn_mode();
     let terminal_manager = TerminalManager::with_log_dir(repo_root.join(".team").join("sessions"));
+    if let Ok(project) = ProjectContext::new(repo_root.clone()) {
+        let _ = project.agents().ensure_profile(
+            "team-manager",
+            "scheduler",
+            "调度待处理任务并拉起对应 worker。",
+            &["领取任务", "启动和停止 worker", "维护并发"],
+            &["不要直接替代 worker 执行任务"],
+        );
+        let _ = project.agents().set_state(
+            "team-manager",
+            "running",
+            None,
+            Some("scheduler"),
+            Some("team-loop"),
+            Some("team 调度中"),
+        );
+        let _ = project
+            .budgets()
+            .ensure_ledger("team-manager", 90_000, 20_000, 8_000);
+        maybe_reflect_energy(
+            &project,
+            "team-manager",
+            "team.start",
+            None,
+            "team 调度器启动后检查预算状态。",
+        );
+    }
 
     while !stop.load(Ordering::Relaxed) {
         let project = match ProjectContext::new(repo_root.clone()) {
@@ -230,12 +261,25 @@ fn scheduler_loop(
         for task_id in finished {
             if let Some(worker) = workers.remove(&task_id) {
                 let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
+                let _ = project.agents().set_state(
+                    &worker_owner(&worker),
+                    "idle",
+                    None,
+                    None,
+                    None,
+                    Some("任务结束"),
+                );
                 cleanup_worker(worker, &terminal_manager);
             }
         }
 
-        while workers.len() < max_parallel {
-            let Some(task) = (match project.tasks().claim_next_pending("team-manager") {
+        let allowed_parallel = effective_parallel_for_team_manager(&project, max_parallel);
+        while workers.len() < allowed_parallel {
+            let min_priority = minimum_priority_for_team_manager(&project);
+            let Some(task) = (match project
+                .tasks()
+                .claim_next_pending_with_min_priority("team-manager", min_priority)
+            {
                 Ok(task) => task,
                 Err(err) => {
                     eprintln!("team scheduler: claim task failed: {err}");
@@ -244,6 +288,17 @@ fn scheduler_loop(
             }) else {
                 break;
             };
+            let _ = project.decisions().append(
+                "team-manager",
+                "task.assigned",
+                Some(task.id),
+                None,
+                &format!("assigned task {} to {}", task.id, task.role_hint),
+                &format!(
+                    "priority={} met scheduler threshold {} with allowed_parallel={}",
+                    task.priority, min_priority, allowed_parallel
+                ),
+            );
 
             let worktree_name = if task.worktree.is_empty() {
                 format!("team-{}", task.id)
@@ -284,11 +339,21 @@ fn scheduler_loop(
                 &repo_root,
                 task.id,
                 &owner,
+                &task.role_hint,
                 &spawn_mode,
                 &terminal_manager,
             ) {
                 Ok(worker) => {
                     let _ = register_worker_endpoint(&repo_root, &owner, &worker);
+                    let _ = register_worker_agent(&project, &owner, &task.role_hint, &worker);
+                    let _ = project.budgets().record_usage("team-manager", 25);
+                    maybe_reflect_energy(
+                        &project,
+                        "team-manager",
+                        "worker.spawn",
+                        Some(task.id),
+                        "拉起 worker 后检查调度器预算状态。",
+                    );
                     launched.fetch_add(1, Ordering::Relaxed);
                     workers.insert(task.id, worker);
                 }
@@ -309,7 +374,27 @@ fn scheduler_loop(
 
     for (_, worker) in workers {
         let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
+        if let Ok(project) = ProjectContext::new(repo_root.clone()) {
+            let _ = project.agents().set_state(
+                &worker_owner(&worker),
+                "idle",
+                None,
+                None,
+                None,
+                Some("team 停止"),
+            );
+        }
         cleanup_worker(worker, &terminal_manager);
+    }
+    if let Ok(project) = ProjectContext::new(repo_root) {
+        let _ = project.agents().set_state(
+            "team-manager",
+            "idle",
+            None,
+            Some("scheduler"),
+            Some("team-loop"),
+            Some("team 已停止"),
+        );
     }
 }
 
@@ -317,14 +402,15 @@ fn spawn_teammate_process(
     repo_root: &Path,
     task_id: u64,
     owner: &str,
+    role_hint: &str,
     spawn_mode: &SpawnMode,
     terminal_manager: &TerminalManager,
 ) -> anyhow::Result<WorkerHandle> {
     if matches!(spawn_mode, SpawnMode::Tmux) {
-        return spawn_teammate_in_tmux(repo_root, task_id, owner);
+        return spawn_teammate_in_tmux(repo_root, task_id, owner, role_hint);
     }
     if matches!(spawn_mode, SpawnMode::Terminal) {
-        return spawn_teammate_in_terminal(repo_root, task_id, owner, terminal_manager);
+        return spawn_teammate_in_terminal(repo_root, task_id, owner, role_hint, terminal_manager);
     }
 
     let exe = std::env::current_exe()?;
@@ -336,6 +422,8 @@ fn spawn_teammate_process(
         .arg(task_id.to_string())
         .arg("--owner")
         .arg(owner)
+        .arg("--role-hint")
+        .arg(role_hint)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;
@@ -346,17 +434,19 @@ fn spawn_teammate_in_tmux(
     repo_root: &Path,
     task_id: u64,
     owner: &str,
+    role_hint: &str,
 ) -> anyhow::Result<WorkerHandle> {
     ensure_tmux_session("rustpilot-team")?;
     let exe = std::env::current_exe()?;
     let window_name = format!("rustpilot-team:teammate-{}", task_id);
     let pane_name = format!("teammate-{}", task_id);
     let command = format!(
-        "{} teammate-run --repo-root {} --task-id {} --owner {}",
+        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}",
         shell_quote(exe.to_string_lossy().as_ref()),
         shell_quote(repo_root.to_string_lossy().as_ref()),
         task_id,
-        shell_quote(owner)
+        shell_quote(owner),
+        shell_quote(role_hint)
     );
     let output = Command::new("tmux")
         .args([
@@ -383,6 +473,7 @@ fn spawn_teammate_in_terminal(
     repo_root: &Path,
     task_id: u64,
     owner: &str,
+    role_hint: &str,
     terminal_manager: &TerminalManager,
 ) -> anyhow::Result<WorkerHandle> {
     let exe = std::env::current_exe()?;
@@ -392,11 +483,12 @@ fn spawn_teammate_in_terminal(
         env: Vec::new(),
     })?;
     let command = format!(
-        "{} teammate-run --repo-root {} --task-id {} --owner {}\n",
+        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}\n",
         shell_quote(exe.to_string_lossy().as_ref()),
         shell_quote(repo_root.to_string_lossy().as_ref()),
         task_id,
-        shell_quote(owner)
+        shell_quote(owner),
+        shell_quote(role_hint)
     );
     terminal_manager.write(&info.id, &command)?;
     println!(
@@ -413,11 +505,13 @@ pub async fn run_teammate_once(
     repo_root: PathBuf,
     task_id: u64,
     owner: String,
+    role_hint: String,
 ) -> anyhow::Result<()> {
     dotenvy::from_path(repo_root.join(".env")).ok();
-    let llm = LlmConfig::from_env()?;
+    let llm = LlmConfig::from_repo_root(&repo_root)?;
     let project = ProjectContext::new(repo_root.clone())?;
     let client = reqwest::Client::builder()
+        .user_agent(default_llm_user_agent())
         .timeout(Duration::from_secs(llm_timeout_secs()))
         .build()?;
 
@@ -443,9 +537,13 @@ pub async fn run_teammate_once(
         None,
     );
 
+    let config = worker_role_config(&role_hint);
     let system_prompt = format!(
-        "你是团队成员 {}。只完成当前任务并汇报结果；任务是控制面，worktree 是执行面。需要协作时使用 team_send 和 team_inbox。仓库: {}",
+        "你是团队成员 {}，role={}，task_priority={}。{} 只完成当前任务并汇报结果；任务是控制面，worktree 是执行面。需要协作时使用 team_send 和 team_inbox。仓库: {}",
         owner,
+        config.role,
+        task.priority,
+        config.prompt_focus,
         repo_root.display()
     );
     let task_prompt = if task.description.trim().is_empty() {
@@ -453,6 +551,17 @@ pub async fn run_teammate_once(
     } else {
         format!("{}\n\n{}", task_subject, task.description)
     };
+    let _ = project.budgets().record_usage(
+        &owner,
+        estimate_text_tokens(&task_prompt).saturating_add(60),
+    );
+    maybe_reflect_energy(
+        &project,
+        &owner,
+        "task.start",
+        Some(task_id),
+        "worker 接手任务后检查预算状态。",
+    );
 
     if let Some(seconds) = detect_timer_seconds(&task_prompt) {
         let _ = project.mailbox().send_typed(
@@ -484,7 +593,7 @@ pub async fn run_teammate_once(
         },
     ];
 
-    let tools = tool_definitions();
+    let tools = tools_for_role_and_priority(&role_hint, &task.priority);
     let progress = crate::activity::new_activity_handle();
     let report = AgentProgressReport {
         from: owner.clone(),
@@ -507,6 +616,32 @@ pub async fn run_teammate_once(
         match result {
             Ok(()) => {
                 if let Some(question) = detect_user_clarification_need(&messages) {
+                    let _ = project.budgets().record_usage(&owner, 30);
+                    let _ = project.reflections().append(
+                        &owner,
+                        "task.blocked",
+                        Some(task_id),
+                        "worker 需要用户澄清后才能继续。",
+                        &["当前信息不足", "任务进入 blocked 状态"],
+                        Some("等待用户补充信息后继续执行"),
+                        true,
+                    );
+                    let _ = project.proposals().create(
+                        &owner,
+                        "task.blocked",
+                        Some(task_id),
+                        "补充任务上下文以解除 blocked",
+                        "worker 需要用户澄清后才能继续。",
+                        &["当前信息不足", "任务进入 blocked 状态"],
+                        Some("等待用户补充信息后继续执行"),
+                    );
+                    maybe_reflect_energy(
+                        &project,
+                        &owner,
+                        "task.blocked",
+                        Some(task_id),
+                        "worker 进入 blocked 状态后检查预算状态。",
+                    );
                     let _ = project
                         .tasks()
                         .update(task_id, Some("blocked"), Some(&owner));
@@ -543,6 +678,23 @@ pub async fn run_teammate_once(
                 let _ = project
                     .tasks()
                     .update(task_id, Some("completed"), Some(&owner));
+                let _ = project.budgets().record_usage(&owner, 80);
+                let _ = project.reflections().append(
+                    &owner,
+                    "task.completed",
+                    Some(task_id),
+                    "worker 完成任务并回传结果。",
+                    &["任务已完成"],
+                    Some("回到 idle 并等待下一项工作"),
+                    false,
+                );
+                maybe_reflect_energy(
+                    &project,
+                    &owner,
+                    "task.completed",
+                    Some(task_id),
+                    "worker 完成任务后检查预算状态。",
+                );
                 let _ = project.mailbox().send_typed(
                     &owner,
                     "lead",
@@ -559,6 +711,32 @@ pub async fn run_teammate_once(
                 let _ = project
                     .tasks()
                     .update(task_id, Some("failed"), Some(&owner));
+                let _ = project.budgets().record_usage(&owner, 50);
+                let _ = project.reflections().append(
+                    &owner,
+                    "task.failed",
+                    Some(task_id),
+                    "worker 执行任务失败。",
+                    &["任务执行失败", "需要检查错误原因"],
+                    Some("分析失败原因并决定是否重试"),
+                    true,
+                );
+                let _ = project.proposals().create(
+                    &owner,
+                    "task.failed",
+                    Some(task_id),
+                    "分析失败原因并形成修复任务",
+                    "worker 执行任务失败。",
+                    &["任务执行失败", "需要检查错误原因"],
+                    Some("分析失败原因并决定是否重试"),
+                );
+                maybe_reflect_energy(
+                    &project,
+                    &owner,
+                    "task.failed",
+                    Some(task_id),
+                    "worker 失败后检查预算状态。",
+                );
                 let _ = project.mailbox().send_typed(
                     &owner,
                     "lead",
@@ -810,6 +988,61 @@ fn register_worker_endpoint(
     save_worker_endpoints(repo_root, &items)
 }
 
+fn register_worker_agent(
+    project: &ProjectContext,
+    owner: &str,
+    role_hint: &str,
+    worker: &WorkerHandle,
+) -> anyhow::Result<()> {
+    let config = worker_role_config(role_hint);
+    project.agents().ensure_profile(
+        owner,
+        config.role,
+        config.mission,
+        &["执行单个任务", "回报进度", "请求澄清"],
+        &["不要脱离当前任务范围自行扩张目标"],
+    )?;
+    project.budgets().ensure_ledger(
+        owner,
+        config.daily_limit,
+        config.period_limit,
+        config.task_soft_limit,
+    )?;
+    match worker {
+        WorkerHandle::Child { task_id, .. } => project.agents().set_state(
+            owner,
+            "running",
+            Some(*task_id),
+            Some("inherit"),
+            Some("stdout"),
+            Some("worker 运行中"),
+        )?,
+        WorkerHandle::TmuxWindow {
+            task_id,
+            window_name,
+        } => project.agents().set_state(
+            owner,
+            "running",
+            Some(*task_id),
+            Some("tmux"),
+            Some(window_name),
+            Some("worker 运行中"),
+        )?,
+        WorkerHandle::TerminalSession {
+            task_id,
+            session_id,
+        } => project.agents().set_state(
+            owner,
+            "running",
+            Some(*task_id),
+            Some("terminal"),
+            Some(session_id),
+            Some("worker 运行中"),
+        )?,
+    }
+    Ok(())
+}
+
 fn mark_worker_stopped(repo_root: &Path, task_id: u64) -> anyhow::Result<()> {
     let mut items = load_worker_endpoints(repo_root)?;
     for item in &mut items {
@@ -898,5 +1131,535 @@ fn upsert_worker_endpoint(items: &mut Vec<WorkerEndpoint>, endpoint: WorkerEndpo
         *existing = endpoint;
     } else {
         items.push(endpoint);
+    }
+}
+
+fn worker_owner(worker: &WorkerHandle) -> String {
+    match worker {
+        WorkerHandle::Child { task_id, .. } => format!("teammate-{task_id}"),
+        WorkerHandle::TmuxWindow { task_id, .. } => format!("teammate-{task_id}"),
+        WorkerHandle::TerminalSession { task_id, .. } => format!("teammate-{task_id}"),
+    }
+}
+
+fn estimate_text_tokens(text: &str) -> u32 {
+    let chars = text.chars().count() as u32;
+    chars.saturating_div(4).saturating_add(1)
+}
+
+struct WorkerRoleConfig {
+    role: &'static str,
+    mission: &'static str,
+    prompt_focus: &'static str,
+    daily_limit: u32,
+    period_limit: u32,
+    task_soft_limit: u32,
+}
+
+fn team_manager_parallel_for_mode(mode: Option<EnergyMode>, max_parallel: usize) -> usize {
+    match mode {
+        Some(EnergyMode::Healthy) | None => max_parallel,
+        Some(EnergyMode::Constrained) => max_parallel.max(1).div_ceil(2),
+        Some(EnergyMode::Low) => 1,
+        Some(EnergyMode::Exhausted) => 0,
+    }
+}
+
+fn team_manager_min_priority_for_mode(mode: Option<EnergyMode>) -> &'static str {
+    match mode {
+        Some(EnergyMode::Healthy) | None => "low",
+        Some(EnergyMode::Constrained) => "medium",
+        Some(EnergyMode::Low) => "high",
+        Some(EnergyMode::Exhausted) => "critical",
+    }
+}
+
+fn worker_role_config(role_hint: &str) -> WorkerRoleConfig {
+    match role_hint {
+        "critic" => WorkerRoleConfig {
+            role: "critic",
+            mission: "审阅、整理或分析任务信息，并产出结构化结论。",
+            prompt_focus: "优先做审阅、归纳、风险判断和结构化输出，避免直接扩散为实现任务。",
+            daily_limit: 90_000,
+            period_limit: 20_000,
+            task_soft_limit: 8_000,
+        },
+        "design" => WorkerRoleConfig {
+            role: "design",
+            mission: "处理页面、设计、样式和交互相关任务，并回报结果。",
+            prompt_focus: "优先关注界面、文案、交互和视觉一致性，避免进入无关实现细节。",
+            daily_limit: 120_000,
+            period_limit: 30_000,
+            task_soft_limit: 14_000,
+        },
+        _ => WorkerRoleConfig {
+            role: "developer",
+            mission: "根据调度器分配的任务执行实现、验证并汇报结果。",
+            prompt_focus: "优先关注实现、验证和最小改动完成任务，避免偏离需求做额外设计。",
+            daily_limit: 160_000,
+            period_limit: 40_000,
+            task_soft_limit: 20_000,
+        },
+    }
+}
+
+fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
+    let all = tool_definitions();
+    let allowed: Option<&[&str]> = match role_hint {
+        "critic" => Some(&[
+            "read_file",
+            "terminal_list",
+            "terminal_status",
+            "terminal_read",
+            "team_send",
+            "team_ack",
+            "team_poll",
+            "team_inbox",
+            "task_list",
+            "task_get",
+            "worktree_list",
+            "worktree_status",
+            "worktree_events",
+        ]),
+        "design" if priority == "low" => Some(&[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "team_send",
+            "team_ack",
+            "team_poll",
+            "team_inbox",
+            "task_list",
+            "task_get",
+            "task_update",
+            "worktree_list",
+            "worktree_status",
+            "worktree_events",
+        ]),
+        "design" => Some(&[
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "team_send",
+            "team_ack",
+            "team_poll",
+            "team_inbox",
+            "task_list",
+            "task_get",
+            "task_update",
+            "worktree_list",
+            "worktree_status",
+            "worktree_run",
+            "worktree_events",
+        ]),
+        "developer" if priority == "low" => Some(&[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "team_send",
+            "team_ack",
+            "team_poll",
+            "team_inbox",
+            "task_list",
+            "task_get",
+            "task_update",
+            "worktree_list",
+            "worktree_status",
+            "worktree_run",
+            "worktree_events",
+        ]),
+        "developer" if priority == "medium" => Some(&[
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "team_send",
+            "team_ack",
+            "team_poll",
+            "team_inbox",
+            "task_list",
+            "task_get",
+            "task_update",
+            "worktree_list",
+            "worktree_status",
+            "worktree_run",
+            "worktree_events",
+        ]),
+        _ => None,
+    };
+
+    let Some(allowed) = allowed else {
+        return all;
+    };
+
+    all.into_iter()
+        .filter(|tool| allowed.contains(&tool.function.name.as_str()))
+        .collect()
+}
+
+fn tool_names_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<String> {
+    tools_for_role_and_priority(role_hint, priority)
+        .into_iter()
+        .map(|tool| tool.function.name)
+        .collect()
+}
+
+pub fn render_policy_overview(project: &ProjectContext, max_parallel: usize) -> String {
+    let manager_budget = project.budgets().snapshot("team-manager").ok().flatten();
+    let manager_mode = manager_budget.as_ref().map(classify_energy);
+    let allowed_parallel = team_manager_parallel_for_mode(manager_mode, max_parallel);
+    let min_priority = team_manager_min_priority_for_mode(manager_mode);
+    let manager_energy = match manager_mode {
+        Some(mode) => format!("{mode:?}"),
+        None => "Unknown".to_string(),
+    };
+    let manager_budget_line = match manager_budget {
+        Some(item) => format!(
+            "budget={}/{} period_limit={} task_soft_limit={}",
+            item.used_today, item.daily_limit, item.period_limit, item.task_soft_limit
+        ),
+        None => "budget=unknown".to_string(),
+    };
+
+    let mut lines = vec![
+        "policy overview".to_string(),
+        format!(
+            "- dispatch: energy={} allowed_parallel={}/{} min_priority={} {}",
+            manager_energy, allowed_parallel, max_parallel, min_priority, manager_budget_line
+        ),
+        "- role budgets:".to_string(),
+    ];
+
+    for role_hint in ["developer", "design", "critic"] {
+        let config = worker_role_config(role_hint);
+        lines.push(format!(
+            "  {}: role={} daily={} period={} task_soft={} focus={}",
+            role_hint,
+            config.role,
+            config.daily_limit,
+            config.period_limit,
+            config.task_soft_limit,
+            config.prompt_focus
+        ));
+    }
+
+    lines.push("- tool access:".to_string());
+    lines.push(format!(
+        "  critic any: {}",
+        tool_names_for_role_and_priority("critic", "critical").join(", ")
+    ));
+    lines.push(format!(
+        "  design low: {}",
+        tool_names_for_role_and_priority("design", "low").join(", ")
+    ));
+    lines.push(format!(
+        "  design medium+: {}",
+        tool_names_for_role_and_priority("design", "medium").join(", ")
+    ));
+    lines.push(format!(
+        "  developer low: {}",
+        tool_names_for_role_and_priority("developer", "low").join(", ")
+    ));
+    lines.push(format!(
+        "  developer medium: {}",
+        tool_names_for_role_and_priority("developer", "medium").join(", ")
+    ));
+    lines.push(format!(
+        "  developer high+: {}",
+        tool_names_for_role_and_priority("developer", "high").join(", ")
+    ));
+
+    lines.join("\n")
+}
+
+pub fn render_task_policy(
+    project: &ProjectContext,
+    task_id: u64,
+    max_parallel: usize,
+) -> anyhow::Result<String> {
+    let task = project.tasks().get_record(task_id)?;
+    let manager_mode = project
+        .budgets()
+        .snapshot("team-manager")?
+        .map(|item| classify_energy(&item));
+    let min_priority = team_manager_min_priority_for_mode(manager_mode);
+    let can_dispatch_now = task.status == "pending"
+        && task_priority_rank(&task.priority) >= task_priority_rank(min_priority);
+    let dispatch_reason = if task.status != "pending" {
+        format!(
+            "status={} so it is not eligible for a new claim",
+            task.status
+        )
+    } else if can_dispatch_now {
+        format!(
+            "priority={} meets current scheduler threshold {}",
+            task.priority, min_priority
+        )
+    } else {
+        format!(
+            "priority={} is below current scheduler threshold {}",
+            task.priority, min_priority
+        )
+    };
+    let configured_tools = tool_names_for_role_and_priority(&task.role_hint, &task.priority);
+    let decisions = project
+        .decisions()
+        .list_related(Some(task.id), None, None, 3)?;
+    let recent_decisions = if decisions.is_empty() {
+        "none".to_string()
+    } else {
+        decisions
+            .into_iter()
+            .map(|item| format!("{}:{} ({})", item.agent_id, item.action, item.reason))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+
+    Ok([
+        format!("task policy #{}", task.id),
+        format!("- subject: {}", task.subject),
+        format!(
+            "- routing: role_hint={} priority={} status={} owner={}",
+            task.role_hint,
+            task.priority,
+            task.status,
+            if task.owner.is_empty() {
+                "unassigned"
+            } else {
+                &task.owner
+            }
+        ),
+        format!(
+            "- scheduler: allowed_parallel={}/{} min_priority={} decision={}",
+            team_manager_parallel_for_mode(manager_mode, max_parallel),
+            max_parallel,
+            min_priority,
+            dispatch_reason
+        ),
+        format!(
+            "- tools: {}",
+            if configured_tools.is_empty() {
+                "none".to_string()
+            } else {
+                configured_tools.join(", ")
+            }
+        ),
+        format!("- recent decisions: {}", recent_decisions),
+    ]
+    .join("\n"))
+}
+
+pub fn render_agent_policy(project: &ProjectContext, agent_id: &str) -> anyhow::Result<String> {
+    let profile = project.agents().profile(agent_id)?;
+    let state = project.agents().state(agent_id)?;
+    let budget = project.budgets().snapshot(agent_id)?;
+
+    let role = profile
+        .as_ref()
+        .map(|item| item.role.as_str())
+        .unwrap_or("unknown");
+    let mission = profile
+        .as_ref()
+        .map(|item| item.mission.as_str())
+        .unwrap_or("unknown");
+    let status = state
+        .as_ref()
+        .map(|item| item.status.as_str())
+        .unwrap_or("unknown");
+    let current_task_id = state.as_ref().and_then(|item| item.current_task_id);
+    let effective_role_hint = match role {
+        "design" => "design",
+        "critic" => "critic",
+        _ => "developer",
+    };
+    let task_priority = current_task_id
+        .and_then(|task_id| {
+            project
+                .tasks()
+                .get_record(task_id)
+                .ok()
+                .map(|task| task.priority)
+        })
+        .unwrap_or_else(|| "medium".to_string());
+    let configured_tools = tool_names_for_role_and_priority(effective_role_hint, &task_priority);
+    let decisions = project
+        .decisions()
+        .list_related(None, None, Some(agent_id), 3)?;
+    let recent_decisions = if decisions.is_empty() {
+        "none".to_string()
+    } else {
+        decisions
+            .into_iter()
+            .map(|item| {
+                let target = item
+                    .task_id
+                    .map(|id| format!("task={id}"))
+                    .or_else(|| item.proposal_id.map(|id| format!("proposal={id}")))
+                    .unwrap_or_else(|| "global".to_string());
+                format!("{} {} ({})", item.action, target, item.reason)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let budget_line = match budget {
+        Some(item) => format!(
+            "energy={:?} budget={}/{} period_limit={} task_soft_limit={}",
+            classify_energy(&item),
+            item.used_today,
+            item.daily_limit,
+            item.period_limit,
+            item.task_soft_limit
+        ),
+        None => "energy=Unknown budget=unknown".to_string(),
+    };
+    let scope = profile
+        .as_ref()
+        .map(|item| item.scope.join(", "))
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    let forbidden = profile
+        .as_ref()
+        .map(|item| item.forbidden.join(", "))
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+
+    Ok([
+        format!("agent policy {}", agent_id),
+        format!("- role={} status={} {}", role, status, budget_line),
+        format!("- mission: {}", mission),
+        format!("- scope: {}", scope),
+        format!("- forbidden: {}", forbidden),
+        format!(
+            "- task context: current_task={} effective_priority={}",
+            current_task_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            task_priority
+        ),
+        format!(
+            "- tools: {}",
+            if configured_tools.is_empty() {
+                "none".to_string()
+            } else {
+                configured_tools.join(", ")
+            }
+        ),
+        format!("- recent decisions: {}", recent_decisions),
+    ]
+    .join("\n"))
+}
+
+fn effective_parallel_for_team_manager(project: &ProjectContext, max_parallel: usize) -> usize {
+    match project.budgets().energy_mode("team-manager") {
+        Ok(Some(EnergyMode::Healthy)) | Ok(None) => {
+            let _ = project.agents().set_state(
+                "team-manager",
+                "running",
+                None,
+                Some("scheduler"),
+                Some("team-loop"),
+                Some("正常并发"),
+            );
+            team_manager_parallel_for_mode(Some(EnergyMode::Healthy), max_parallel)
+        }
+        Ok(Some(EnergyMode::Constrained)) => {
+            let limited =
+                team_manager_parallel_for_mode(Some(EnergyMode::Constrained), max_parallel);
+            let _ = project.agents().set_state(
+                "team-manager",
+                "running",
+                None,
+                Some("scheduler"),
+                Some("team-loop"),
+                Some(&format!("受限并发: {}", limited)),
+            );
+            limited
+        }
+        Ok(Some(EnergyMode::Low)) => {
+            let _ = project.agents().set_state(
+                "team-manager",
+                "running",
+                None,
+                Some("scheduler"),
+                Some("team-loop"),
+                Some("低预算: 仅允许单任务并发"),
+            );
+            team_manager_parallel_for_mode(Some(EnergyMode::Low), max_parallel)
+        }
+        Ok(Some(EnergyMode::Exhausted)) => {
+            let _ = project.agents().set_state(
+                "team-manager",
+                "cooldown",
+                None,
+                Some("scheduler"),
+                Some("team-loop"),
+                Some("预算耗尽: 暂停领取新任务"),
+            );
+            team_manager_parallel_for_mode(Some(EnergyMode::Exhausted), max_parallel)
+        }
+        Err(_) => max_parallel,
+    }
+}
+
+fn minimum_priority_for_team_manager(project: &ProjectContext) -> &'static str {
+    match project.budgets().energy_mode("team-manager") {
+        Ok(mode) => team_manager_min_priority_for_mode(mode),
+        Err(_) => "low",
+    }
+}
+
+fn maybe_reflect_energy(
+    project: &ProjectContext,
+    agent_id: &str,
+    trigger: &str,
+    task_id: Option<u64>,
+    summary: &str,
+) {
+    let Ok(mode) = project.budgets().energy_mode(agent_id) else {
+        return;
+    };
+    match mode {
+        Some(EnergyMode::Low) => {
+            let _ = project.reflections().append(
+                agent_id,
+                trigger,
+                task_id,
+                summary,
+                &["预算进入低水位", "应压缩后续执行范围"],
+                Some("减少探索、优先完成收尾动作"),
+                true,
+            );
+            let _ = project.proposals().create(
+                agent_id,
+                trigger,
+                task_id,
+                "压缩执行范围并优先收尾",
+                summary,
+                &["预算进入低水位", "应压缩后续执行范围"],
+                Some("减少探索、优先完成收尾动作"),
+            );
+        }
+        Some(EnergyMode::Exhausted) => {
+            let _ = project.reflections().append(
+                agent_id,
+                trigger,
+                task_id,
+                summary,
+                &["预算接近耗尽", "应暂停非关键动作"],
+                Some("只保留必要汇报并等待预算恢复"),
+                true,
+            );
+            let _ = project.proposals().create(
+                agent_id,
+                trigger,
+                task_id,
+                "暂停非关键动作并等待预算恢复",
+                summary,
+                &["预算接近耗尽", "应暂停非关键动作"],
+                Some("只保留必要汇报并等待预算恢复"),
+            );
+        }
+        _ => {}
     }
 }

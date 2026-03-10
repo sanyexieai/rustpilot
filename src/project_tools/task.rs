@@ -11,6 +11,10 @@ pub struct TaskRecord {
     pub id: u64,
     pub subject: String,
     pub description: String,
+    #[serde(default = "default_task_priority")]
+    pub priority: String,
+    #[serde(default = "default_task_role_hint")]
+    pub role_hint: String,
     pub status: String,
     pub owner: String,
     pub worktree: String,
@@ -32,12 +36,38 @@ impl TaskManager {
     }
 
     pub fn create(&self, subject: &str, description: &str) -> anyhow::Result<String> {
+        self.create_with_priority(subject, description, "medium")
+    }
+
+    pub fn create_with_priority(
+        &self,
+        subject: &str,
+        description: &str,
+        priority: &str,
+    ) -> anyhow::Result<String> {
+        self.create_with_priority_and_role(
+            subject,
+            description,
+            priority,
+            &infer_task_role_hint(subject, description),
+        )
+    }
+
+    pub fn create_with_priority_and_role(
+        &self,
+        subject: &str,
+        description: &str,
+        priority: &str,
+        role_hint: &str,
+    ) -> anyhow::Result<String> {
         self.with_lock(|| {
             let now = now_secs_f64();
             let task = TaskRecord {
                 id: self.max_id()? + 1,
                 subject: subject.to_string(),
                 description: description.to_string(),
+                priority: normalize_task_priority(priority),
+                role_hint: normalize_task_role_hint(role_hint),
                 status: "pending".to_string(),
                 owner: String::new(),
                 worktree: String::new(),
@@ -52,6 +82,10 @@ impl TaskManager {
 
     pub fn get(&self, task_id: u64) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(&self.load(task_id)?)?)
+    }
+
+    pub fn get_record(&self, task_id: u64) -> anyhow::Result<TaskRecord> {
+        self.load(task_id)
     }
 
     pub fn exists(&self, task_id: u64) -> bool {
@@ -85,11 +119,26 @@ impl TaskManager {
     }
 
     pub fn claim_next_pending(&self, owner: &str) -> anyhow::Result<Option<TaskRecord>> {
+        self.claim_next_pending_with_min_priority(owner, "low")
+    }
+
+    pub fn claim_next_pending_with_min_priority(
+        &self,
+        owner: &str,
+        min_priority: &str,
+    ) -> anyhow::Result<Option<TaskRecord>> {
         self.with_lock(|| {
             let mut tasks = self.load_all()?;
-            tasks.sort_by_key(|task| task.id);
+            tasks.sort_by(|a, b| {
+                task_priority_rank(&b.priority)
+                    .cmp(&task_priority_rank(&a.priority))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let min_rank = task_priority_rank(min_priority);
 
-            let Some(mut task) = tasks.into_iter().find(|task| task.status == "pending") else {
+            let Some(mut task) = tasks.into_iter().find(|task| {
+                task.status == "pending" && task_priority_rank(&task.priority) >= min_rank
+            }) else {
                 return Ok(None);
             };
 
@@ -158,12 +207,20 @@ impl TaskManager {
             } else {
                 format!(" wt={}", task.worktree)
             };
+            let priority = format!(" priority={}", task.priority);
+            let role = format!(" role={}", task.role_hint);
             lines.push(format!(
-                "{marker} #{}: {}{}{}",
-                task.id, task.subject, owner, worktree
+                "{marker} #{}: {}{}{}{}{}",
+                task.id, task.subject, priority, role, owner, worktree
             ));
         }
         Ok(lines.join("\n"))
+    }
+
+    pub fn list_records(&self) -> anyhow::Result<Vec<TaskRecord>> {
+        let mut tasks = self.load_all()?;
+        tasks.sort_by_key(|task| task.id);
+        Ok(tasks)
     }
 
     pub fn pending_count(&self) -> anyhow::Result<usize> {
@@ -200,6 +257,19 @@ impl TaskManager {
             task.updated_at = now_secs_f64();
             self.save(&task)?;
             Ok(serde_json::to_string_pretty(&task)?)
+        })
+    }
+
+    pub fn has_active_subject(&self, subject: &str) -> anyhow::Result<bool> {
+        let subject = subject.trim();
+        if subject.is_empty() {
+            return Ok(false);
+        }
+        self.with_lock(|| {
+            Ok(self.load_all()?.into_iter().any(|task| {
+                task.subject == subject
+                    && matches!(task.status.as_str(), "pending" | "in_progress" | "blocked")
+            }))
         })
     }
 
@@ -286,5 +356,62 @@ impl TaskManager {
         let result = f();
         let _ = fs::remove_file(lock_path);
         result
+    }
+}
+
+fn default_task_priority() -> String {
+    "medium".to_string()
+}
+
+fn default_task_role_hint() -> String {
+    "developer".to_string()
+}
+
+fn normalize_task_priority(priority: &str) -> String {
+    match priority.trim().to_lowercase().as_str() {
+        "critical" => "critical".to_string(),
+        "high" => "high".to_string(),
+        "low" => "low".to_string(),
+        _ => "medium".to_string(),
+    }
+}
+
+fn normalize_task_role_hint(role_hint: &str) -> String {
+    match role_hint.trim().to_lowercase().as_str() {
+        "critic" => "critic".to_string(),
+        "ui" => "ui".to_string(),
+        "design" => "design".to_string(),
+        _ => "developer".to_string(),
+    }
+}
+
+fn infer_task_role_hint(subject: &str, description: &str) -> String {
+    let text = format!("{} {}", subject, description).to_lowercase();
+    if text.contains("design")
+        || text.contains("ui")
+        || text.contains("ux")
+        || text.contains("页面")
+        || text.contains("样式")
+    {
+        return "design".to_string();
+    }
+    if text.contains("proposal")
+        || text.contains("reflect")
+        || text.contains("reflection")
+        || text.contains("review")
+        || text.contains("audit")
+    {
+        return "critic".to_string();
+    }
+    "developer".to_string()
+}
+
+pub fn task_priority_rank(priority: &str) -> u8 {
+    match priority {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 2,
     }
 }
