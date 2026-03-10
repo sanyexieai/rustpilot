@@ -12,6 +12,7 @@ pub struct SystemModel {
     pub alerts: Vec<SystemAlert>,
     pub protocols: Vec<SystemProtocol>,
     pub residents: Vec<SystemResident>,
+    pub recent_prompt_changes: Vec<SystemPromptChange>,
     pub tasks: Vec<SystemTask>,
     pub proposals: Vec<SystemProposal>,
     pub decisions: Vec<SystemDecision>,
@@ -86,6 +87,25 @@ pub struct SystemResident {
     pub budget_limit: u32,
     pub last_action: String,
     pub last_summary: String,
+    pub prompt_strategy: String,
+    pub prompt_trigger: String,
+    pub prompt_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemPromptChange {
+    pub recorded_at: f64,
+    pub agent_scope: String,
+    pub agent_id: String,
+    pub file_path: String,
+    pub strategy: String,
+    pub trigger: String,
+    pub summary: String,
+    pub diff_summary: String,
+    pub added_lines: Vec<String>,
+    pub removed_lines: Vec<String>,
+    pub before: String,
+    pub after: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +166,7 @@ impl SystemModelManager {
         let tasks = project.tasks().list_records()?;
         let proposals = project.proposals().list_open(8)?;
         let decisions = project.decisions().list_recent_records(12)?;
+        let prompt_changes = project.prompt_history().list_recent(8)?;
         let enabled_residents = project.residents().enabled_agents()?;
 
         let pending_tasks = tasks.iter().filter(|item| item.status == "pending").count();
@@ -187,6 +208,17 @@ impl SystemModelManager {
                     .latest_for_agent(&resident.agent_id)
                     .ok()
                     .flatten();
+                let prompt_recovery = if resident.role == "ui" {
+                    project.ui_surface().ui_prompt_recovery().ok().flatten()
+                } else if resident.behavior_mode == "ui_surface_planning" {
+                    project
+                        .ui_surface()
+                        .planner_prompt_recovery()
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
                 SystemResident {
                     agent_id: resident.agent_id,
                     role: resident.role,
@@ -228,6 +260,18 @@ impl SystemModelManager {
                         .as_ref()
                         .map(|item| item.summary.clone())
                         .unwrap_or_default(),
+                    prompt_strategy: prompt_recovery
+                        .as_ref()
+                        .map(|item| item.strategy.clone())
+                        .unwrap_or_default(),
+                    prompt_trigger: prompt_recovery
+                        .as_ref()
+                        .map(|item| item.trigger.clone())
+                        .unwrap_or_default(),
+                    prompt_note: prompt_recovery
+                        .as_ref()
+                        .map(|item| item.note.clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect::<Vec<_>>();
@@ -268,6 +312,25 @@ impl SystemModelManager {
                 reason: item.reason,
                 task_id: item.task_id,
                 proposal_id: item.proposal_id,
+            })
+            .collect::<Vec<_>>();
+
+        let prompt_change_feed = prompt_changes
+            .into_iter()
+            .rev()
+            .map(|item| SystemPromptChange {
+                recorded_at: item.recorded_at,
+                agent_scope: item.agent_scope,
+                agent_id: item.agent_id,
+                file_path: item.file_path,
+                strategy: item.strategy,
+                trigger: item.trigger,
+                summary: item.summary,
+                diff_summary: item.diff_summary,
+                added_lines: item.added_lines,
+                removed_lines: item.removed_lines,
+                before: item.before,
+                after: item.after,
             })
             .collect::<Vec<_>>();
 
@@ -352,6 +415,12 @@ impl SystemModelManager {
                             required: true,
                             field_type: "array".to_string(),
                             description: "resident agent runtime state".to_string(),
+                        },
+                        SystemProtocolField {
+                            name: "model.recent_prompt_changes".to_string(),
+                            required: false,
+                            field_type: "array".to_string(),
+                            description: "recent automatic prompt recovery changes".to_string(),
                         },
                         SystemProtocolField {
                             name: "model.tasks".to_string(),
@@ -447,6 +516,7 @@ impl SystemModelManager {
                 },
             ],
             residents,
+            recent_prompt_changes: prompt_change_feed,
             tasks: task_feed,
             proposals: proposal_feed,
             decisions: decision_feed,

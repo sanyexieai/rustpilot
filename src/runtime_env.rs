@@ -44,6 +44,16 @@ pub fn llm_timeout_secs() -> u64 {
         .unwrap_or(LLM_TIMEOUT_SECS)
 }
 
+pub fn llm_timeout_secs_for_provider(provider: &str) -> u64 {
+    std::env::var("LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| match provider {
+            "kimi-coding" => 300,
+            _ => LLM_TIMEOUT_SECS,
+        })
+}
+
 pub fn ensure_env_guidance(cwd: &Path) -> anyhow::Result<EnvGuideUpdate> {
     let env_path = cwd.join(".env");
     if !env_path.exists() {
@@ -110,7 +120,7 @@ fn required_env_entries() -> &'static [(&'static str, &'static str)] {
         ("ANTHROPIC_AUTH_TOKEN", "your_kimi_coding_key_here"),
         ("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/"),
         ("ANTHROPIC_MODEL", "kimi-for-coding"),
-        ("LLM_TIMEOUT_SECS", "120"),
+        ("LLM_TIMEOUT_SECS", "300"),
         ("LLM_USER_AGENT", "openclaw"),
     ]
 }

@@ -16,7 +16,8 @@ use crate::openai_compat::Tool;
 use crate::project_tools::{
     EnergyMode, ProjectContext, TaskRecord, classify_energy, task_priority_rank,
 };
-use crate::runtime_env::llm_timeout_secs;
+use crate::prompt_manager::{adapt_worker_prompt_detailed, render_worker_system_prompt};
+use crate::runtime_env::llm_timeout_secs_for_provider;
 use crate::terminal_session::{SessionState, TerminalCreateRequest, TerminalManager};
 use serde::{Deserialize, Serialize};
 
@@ -512,7 +513,9 @@ pub async fn run_teammate_once(
     let project = ProjectContext::new(repo_root.clone())?;
     let client = reqwest::Client::builder()
         .user_agent(default_llm_user_agent())
-        .timeout(Duration::from_secs(llm_timeout_secs()))
+        .timeout(Duration::from_secs(llm_timeout_secs_for_provider(
+            &llm.provider,
+        )))
         .build()?;
 
     let raw_task = project.tasks().get(task_id)?;
@@ -538,7 +541,7 @@ pub async fn run_teammate_once(
     );
 
     let config = worker_role_config(&role_hint);
-    let system_prompt = format!(
+    let _system_prompt = format!(
         "你是团队成员 {}，role={}，task_priority={}。{} 只完成当前任务并汇报结果；任务是控制面，worktree 是执行面。需要协作时使用 team_send 和 team_inbox。仓库: {}",
         owner,
         config.role,
@@ -546,6 +549,13 @@ pub async fn run_teammate_once(
         config.prompt_focus,
         repo_root.display()
     );
+    let system_prompt = render_worker_system_prompt(
+        &repo_root,
+        &owner,
+        config.role,
+        &task.priority,
+        config.prompt_focus,
+    )?;
     let task_prompt = if task.description.trim().is_empty() {
         task_subject.clone()
     } else {
@@ -708,6 +718,58 @@ pub async fn run_teammate_once(
                 return Ok(());
             }
             Err(err) => {
+                let error_text = format!("{err:#}");
+                let adaptation = adapt_worker_prompt_detailed(&repo_root, &error_text)
+                    .unwrap_or_else(|_| crate::prompt_manager::PromptAdaptation {
+                        changed: false,
+                        file_path: repo_root.join(".team").join("worker_agent_prompt.md"),
+                        before: String::new(),
+                        after: String::new(),
+                        recovery: None,
+                    });
+                if adaptation.changed {
+                    if let Some(recovery) = adaptation.recovery.as_ref() {
+                        let _ = project.prompt_history().append(
+                            "worker",
+                            &owner,
+                            &adaptation.file_path.display().to_string(),
+                            &recovery.strategy,
+                            &recovery.trigger,
+                            &adaptation.before,
+                            &adaptation.after,
+                        );
+                    }
+                    refresh_worker_system_prompt(
+                        &repo_root,
+                        &mut messages,
+                        &owner,
+                        config.role,
+                        &task.priority,
+                        config.prompt_focus,
+                    )?;
+                    if run_agent_loop(
+                        &client,
+                        &llm,
+                        &project,
+                        &mut messages,
+                        &tools,
+                        progress.clone(),
+                        Some(&report),
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        let _ = project.decisions().append(
+                            &owner,
+                            "task.recovered",
+                            Some(task_id),
+                            None,
+                            "worker recovered after auto-adjusting prompt",
+                            &error_text,
+                        );
+                        continue;
+                    }
+                }
                 let _ = project
                     .tasks()
                     .update(task_id, Some("failed"), Some(&owner));
@@ -751,6 +813,34 @@ pub async fn run_teammate_once(
             }
         }
     }
+}
+
+fn refresh_worker_system_prompt(
+    repo_root: &Path,
+    messages: &mut Vec<Message>,
+    owner: &str,
+    role: &str,
+    task_priority: &str,
+    prompt_focus: &str,
+) -> anyhow::Result<()> {
+    let prompt = render_worker_system_prompt(repo_root, owner, role, task_priority, prompt_focus)?;
+    if let Some(system) = messages
+        .first_mut()
+        .filter(|message| message.role == "system")
+    {
+        system.content = Some(prompt);
+        return Ok(());
+    }
+    messages.insert(
+        0,
+        Message {
+            role: "system".to_string(),
+            content: Some(prompt),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    );
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

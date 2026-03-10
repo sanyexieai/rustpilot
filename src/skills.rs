@@ -132,12 +132,12 @@ fn normalize_skill_name(input: &str) -> String {
 
 fn skill_md_template(name: &str) -> String {
     format!(
-        "---\nname: {name}\ndescription: external tool skill\ntool_language: bash\ntool_runtime: bash 5\ntool_command: bash\ntool_args_json: [\"./tool.sh\"]\n---\n\n# {name}\n\n该 skill 提供一个外部工具适配模板。\n"
+        "---\nname: {name}\ndescription: external tool skill\ntool_language: python\ntool_runtime: python 3\ntool_command: python\ntool_args_json: [\"./tool.py\"]\n---\n\n# {name}\n\nThis skill provides a minimal external tool template.\n"
     )
 }
 
 fn tool_script_template() -> &'static str {
-    "#!/usr/bin/env bash\nset -euo pipefail\ncat\n"
+    "#!/usr/bin/env python3\nimport sys\n\n\ndef main() -> int:\n    data = sys.stdin.read()\n    sys.stdout.write(data)\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"
 }
 
 fn test_case_template() -> &'static str {

@@ -35,9 +35,14 @@ fn write_skill(dir: &Path, with_tests: bool) {
 
     fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: echo_external\ndescription: echo input json\ntool_language: bash\ntool_runtime: bash 5\ntool_command: bash\ntool_args_json: [\"-lc\", \"cat\"]\n---\n",
+        "---\nname: echo_external\ndescription: echo input json\ntool_language: python\ntool_runtime: python 3\ntool_command: python\ntool_args_json: [\"./tool.py\"]\n---\n",
     )
     .expect("write skill");
+    fs::write(
+        skill_dir.join("tool.py"),
+        "#!/usr/bin/env python3\nimport sys\n\n\ndef main() -> int:\n    data = sys.stdin.read()\n    sys.stdout.write(data)\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n",
+    )
+    .expect("write tool");
 
     if with_tests {
         fs::write(

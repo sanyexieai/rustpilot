@@ -10,6 +10,7 @@ pub mod llm_profiles;
 pub mod mcp;
 pub mod openai_compat;
 pub mod project_tools;
+pub mod prompt_manager;
 pub mod resident_agents;
 pub mod runtime_env;
 pub mod shell_file_tools;

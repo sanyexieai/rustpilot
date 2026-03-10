@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    AgentManager, BudgetManager, DecisionManager, EventBus, Mailbox, ProposalManager,
-    ReflectionManager, ResidentConfigManager, ResidentRuntimeManager, SystemModelManager,
-    TaskManager, UiSchemaManager, UiSurfaceManager, WorktreeManager,
+    AgentManager, BudgetManager, DecisionManager, EventBus, Mailbox, PromptHistoryManager,
+    ProposalManager, ReflectionManager, ResidentConfigManager, ResidentRuntimeManager,
+    SystemModelManager, TaskManager, UiSchemaManager, UiSurfaceManager, WorktreeManager,
 };
 
 #[derive(Debug, Clone)]
@@ -20,6 +20,7 @@ pub struct ProjectContext {
     residents: Arc<ResidentConfigManager>,
     resident_runtime: Arc<ResidentRuntimeManager>,
     proposals: Arc<ProposalManager>,
+    prompt_history: Arc<PromptHistoryManager>,
     system_model: Arc<SystemModelManager>,
     ui_surface: Arc<UiSurfaceManager>,
     ui_schema: Arc<UiSchemaManager>,
@@ -40,6 +41,7 @@ impl ProjectContext {
         let residents = Arc::new(ResidentConfigManager::new(repo_root.join(".team"))?);
         let resident_runtime = Arc::new(ResidentRuntimeManager::new(repo_root.join(".team"))?);
         let proposals = Arc::new(ProposalManager::new(repo_root.join(".team"))?);
+        let prompt_history = Arc::new(PromptHistoryManager::new(repo_root.join(".team"))?);
         let system_model = Arc::new(SystemModelManager::new(repo_root.join(".team"))?);
         let ui_surface = Arc::new(UiSurfaceManager::new(repo_root.join(".team"))?);
         let ui_schema = Arc::new(UiSchemaManager::new(repo_root.join(".team"))?);
@@ -60,6 +62,7 @@ impl ProjectContext {
             residents,
             resident_runtime,
             proposals,
+            prompt_history,
             system_model,
             ui_surface,
             ui_schema,
@@ -117,6 +120,10 @@ impl ProjectContext {
 
     pub fn system_model(&self) -> &SystemModelManager {
         self.system_model.as_ref()
+    }
+
+    pub fn prompt_history(&self) -> &PromptHistoryManager {
+        self.prompt_history.as_ref()
     }
 
     pub fn ui_schema(&self) -> &UiSchemaManager {

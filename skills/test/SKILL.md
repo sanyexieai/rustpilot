@@ -1,12 +1,12 @@
 ---
 name: test
 description: external tool skill
-tool_language: bash
-tool_runtime: bash 5
-tool_command: bash
-tool_args_json: ["./tool.sh"]
+tool_language: python
+tool_runtime: python 3
+tool_command: python
+tool_args_json: ["./tool.py"]
 ---
 
 # test
 
-该 skill 提供一个外部工具适配模板。
+This skill provides a minimal external tool test template.

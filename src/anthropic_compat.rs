@@ -1,5 +1,5 @@
 use crate::openai_compat::{Message, Tool, ToolCall, ToolCallFunction, ToolChoice};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -52,20 +52,81 @@ pub struct AnthropicTool {
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicResponse {
+    #[serde(default)]
     pub content: Vec<AnthropicResponseBlock>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum AnthropicResponseBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
         input: Value,
     },
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for AnthropicResponseBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let Some(object) = value.as_object() else {
+            return Ok(Self::Unknown);
+        };
+        let block_type = object
+            .get("type")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+
+        match block_type {
+            "text" => Ok(Self::Text {
+                text: extract_text_field(&value),
+            }),
+            "tool_use" => Ok(Self::ToolUse {
+                id: object
+                    .get("id")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                name: object
+                    .get("name")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                input: object.get("input").cloned().unwrap_or_else(|| json!({})),
+            }),
+            _ => Ok(Self::Unknown),
+        }
+    }
+}
+
+fn extract_text_field(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return String::new();
+    };
+
+    if let Some(text) = object.get("text").and_then(|item| item.as_str()) {
+        return text.to_string();
+    }
+    if let Some(text) = object.get("content").and_then(|item| item.as_str()) {
+        return text.to_string();
+    }
+    if let Some(text) = object.get("thinking").and_then(|item| item.as_str()) {
+        return text.to_string();
+    }
+    if let Some(text) = object
+        .get("data")
+        .and_then(|item| item.get("text"))
+        .and_then(|item| item.as_str())
+    {
+        return text.to_string();
+    }
+    String::new()
 }
 
 pub fn build_request(
@@ -114,6 +175,7 @@ pub fn parse_response(response: AnthropicResponse) -> Message {
                     },
                 });
             }
+            AnthropicResponseBlock::Unknown => {}
         }
     }
 
@@ -211,5 +273,41 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Option<Value> {
         ToolChoice::Named { function, .. } => {
             Some(json!({ "type": "tool", "name": function.name }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnthropicResponse, parse_response};
+
+    #[test]
+    fn parse_response_ignores_unknown_blocks() {
+        let response: AnthropicResponse = serde_json::from_str(
+            r#"{
+                "content": [
+                    { "type": "thinking", "thinking": "internal" },
+                    { "type": "text", "text": "OK" }
+                ]
+            }"#,
+        )
+        .expect("deserialize anthropic response");
+
+        let message = parse_response(response);
+        assert_eq!(message.content.as_deref(), Some("OK"));
+    }
+
+    #[test]
+    fn parse_response_accepts_text_in_content_field() {
+        let response: AnthropicResponse = serde_json::from_str(
+            r#"{
+                "content": [
+                    { "type": "text", "content": "Compatible text payload" }
+                ]
+            }"#,
+        )
+        .expect("deserialize anthropic response");
+
+        let message = parse_response(response);
+        assert_eq!(message.content.as_deref(), Some("Compatible text payload"));
     }
 }

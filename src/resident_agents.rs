@@ -681,6 +681,71 @@ fn handle_ui_surface_planning_behavior(
             let _ = project.budgets().record_usage(&config.agent_id, 60);
         }
         Err(err) => {
+            let error_text = err.to_string();
+            let adaptation = project
+                .ui_surface()
+                .adapt_planner_prompt_for_error(&error_text)
+                .ok();
+            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed) {
+                if let Some(recovery) = adaptation.recovery.as_ref() {
+                    let _ = project.prompt_history().append(
+                        "ui-surface",
+                        &config.agent_id,
+                        &adaptation.file_path.display().to_string(),
+                        &recovery.strategy,
+                        &recovery.trigger,
+                        &adaptation.before,
+                        &adaptation.after,
+                    );
+                }
+            }
+            if adaptation.as_ref().is_some_and(|item| item.changed) {
+                let retried_prompt = project.ui_surface().planner_prompt_text()?;
+                match project
+                    .ui_surface()
+                    .generate_with_collector(&model, &retried_prompt)
+                {
+                    Ok(surface) => {
+                        let mut surface = surface;
+                        surface.source_fingerprint = fingerprint.clone();
+                        let _ = project.ui_surface().save(&surface);
+                        let _ = project.decisions().append(
+                            &config.agent_id,
+                            "ui.surface.recovered",
+                            None,
+                            None,
+                            "surface collector recovered after auto-adjusting planner prompt",
+                            &format!(
+                                "pages={} fingerprint={} prior_error={}",
+                                surface.pages.len(),
+                                surface.source_fingerprint,
+                                error_text
+                            ),
+                        );
+                        return Ok(());
+                    }
+                    Err(retry_err) => {
+                        let mut fallback = project.ui_surface().rebuild_from_model(&model)?;
+                        fallback.source_fingerprint = fingerprint.clone();
+                        let _ = project.ui_surface().save(&fallback);
+                        let _ = project.decisions().append(
+                            &config.agent_id,
+                            "ui.surface.fallback",
+                            None,
+                            None,
+                            "surface collector fell back after prompt auto-adjust and retry",
+                            &format!(
+                                "first_error={} retry_error={} pages={}",
+                                error_text,
+                                retry_err,
+                                fallback.pages.len()
+                            ),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
             let mut fallback = project.ui_surface().rebuild_from_model(&model)?;
             fallback.source_fingerprint = fingerprint.clone();
             let _ = project.ui_surface().save(&fallback);
@@ -690,7 +755,7 @@ fn handle_ui_surface_planning_behavior(
                 None,
                 None,
                 "surface collector fell back to model-derived ui surface spec",
-                &format!("error={} pages={}", err, fallback.pages.len()),
+                &format!("error={} pages={}", error_text, fallback.pages.len()),
             );
         }
     }
@@ -829,6 +894,67 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
             let _ = project.budgets().record_usage(&config.agent_id, 80);
         }
         Err(err) => {
+            let error_text = err.to_string();
+            let adaptation = project
+                .ui_surface()
+                .adapt_ui_prompt_for_error(&error_text)
+                .ok();
+            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed) {
+                if let Some(recovery) = adaptation.recovery.as_ref() {
+                    let _ = project.prompt_history().append(
+                        "ui-schema",
+                        &config.agent_id,
+                        &adaptation.file_path.display().to_string(),
+                        &recovery.strategy,
+                        &recovery.trigger,
+                        &adaptation.before,
+                        &adaptation.after,
+                    );
+                }
+            }
+            if adaptation.as_ref().is_some_and(|item| item.changed) {
+                let retried_prompt = project.ui_surface().prompt_text()?;
+                let retry_fingerprint = format!(
+                    "{}:{}",
+                    project.ui_surface().prompt_fingerprint()?,
+                    surface.source_fingerprint,
+                );
+                match project.ui_schema().generate_with_ui_agent(
+                    &model,
+                    &surface,
+                    &retried_prompt,
+                    &retry_fingerprint,
+                ) {
+                    Ok(_) => {
+                        let _ = project.decisions().append(
+                            &config.agent_id,
+                            "ui.schema.recovered",
+                            None,
+                            None,
+                            "ui schema generation recovered after auto-adjusting prompt",
+                            &format!("prior_error={}", error_text),
+                        );
+                        return Ok(());
+                    }
+                    Err(retry_err) => {
+                        let _ = project.ui_schema().generate_from_surface(
+                            &model,
+                            &surface,
+                            &retry_fingerprint,
+                        )?;
+                        let _ = project.decisions().append(
+                            &config.agent_id,
+                            "ui.schema.fallback",
+                            None,
+                            None,
+                            "ui schema generation fell back after prompt auto-adjust and retry",
+                            &format!("first_error={} retry_error={}", error_text, retry_err),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
             let _ = project
                 .ui_schema()
                 .generate_from_surface(&model, &surface, &fingerprint)?;
@@ -838,7 +964,7 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
                 None,
                 None,
                 "ui agent schema generation fell back to surface-based schema",
-                &err.to_string(),
+                &error_text,
             );
         }
     }

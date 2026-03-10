@@ -32,7 +32,7 @@ async fn send_llm_request(
     loop {
         attempt += 1;
 
-        let response = match config.api_kind {
+        let response = match match config.api_kind {
             LlmApiKind::OpenAiChatCompletions => {
                 let url = format!(
                     "{}/chat/completions",
@@ -72,8 +72,23 @@ async fn send_llm_request(
                     .send()
                     .await
             }
-        }
-        .context("LLM request failed")?;
+        } {
+            Ok(response) => response,
+            Err(err) => {
+                let should_retry = err.is_timeout() || err.is_connect() || err.is_request();
+                if !should_retry || attempt >= RETRY_MAX_ATTEMPTS {
+                    return Err(err).context("LLM request failed");
+                }
+                println!(
+                    "> [retry] transport error ({}), retrying in {}ms ({}/{})...",
+                    err, delay_ms, attempt, RETRY_MAX_ATTEMPTS
+                );
+                let jitter = (rand_u32() % 500) as u64;
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms + jitter)).await;
+                delay_ms = (delay_ms * 2).min(RETRY_MAX_DELAY_MS);
+                continue;
+            }
+        };
 
         let status = response.status();
         if status.is_success() {
@@ -305,4 +320,39 @@ pub fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Re
         return Ok(output);
     }
     anyhow::bail!("unknown tool: {}", call.function.name)
+}
+
+pub async fn diagnose_agent_failure(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let request = ChatRequest {
+        model: config.model.clone(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: Some(
+                    "You analyze runtime failures for a coding agent. Explain the likely cause, the exact checks to run next, and a minimal recovery plan. Keep the answer concise and actionable.".to_string(),
+                ),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: Some(prompt.trim().to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        tools: None,
+        tool_choice: None,
+        temperature: Some(0.1),
+    };
+
+    let response = send_llm_request(client, config, &request).await?;
+    let message = parse_llm_response(response, config.api_kind).await?;
+    Ok(message
+        .content
+        .unwrap_or_else(|| "No diagnostic content returned.".to_string()))
 }

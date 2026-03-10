@@ -12,6 +12,9 @@ use crate::config::{LlmConfig, default_llm_user_agent, is_model_unsupported_erro
 use crate::llm_profiles::LlmApiKind;
 use crate::openai_compat::{ChatRequest, ChatResponse, Message};
 use crate::project_tools::util::now_secs_f64;
+use crate::prompt_manager::{
+    PromptAdaptation, PromptRecoveryInfo, adapt_prompt_with_error, read_prompt_recovery,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSurface {
@@ -118,6 +121,37 @@ impl UiSurfaceManager {
 
     pub fn planner_prompt_fingerprint(&self) -> anyhow::Result<String> {
         hash_string(&self.planner_prompt_text()?)
+    }
+
+    pub fn adapt_ui_prompt_for_error(&self, error_text: &str) -> anyhow::Result<PromptAdaptation> {
+        adapt_prompt_with_error(
+            &self.ui_prompt_path,
+            default_ui_prompt(),
+            "ui-schema-recovery",
+            "ui schema",
+            error_text,
+        )
+    }
+
+    pub fn adapt_planner_prompt_for_error(
+        &self,
+        error_text: &str,
+    ) -> anyhow::Result<PromptAdaptation> {
+        adapt_prompt_with_error(
+            &self.planner_prompt_path,
+            default_planner_prompt(),
+            "ui-surface-recovery",
+            "ui surface",
+            error_text,
+        )
+    }
+
+    pub fn ui_prompt_recovery(&self) -> anyhow::Result<Option<PromptRecoveryInfo>> {
+        read_prompt_recovery(&self.ui_prompt_path)
+    }
+
+    pub fn planner_prompt_recovery(&self) -> anyhow::Result<Option<PromptRecoveryInfo>> {
+        read_prompt_recovery(&self.planner_prompt_path)
     }
 
     pub fn collection_fingerprint(&self, model: &SystemModel) -> anyhow::Result<String> {

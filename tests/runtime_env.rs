@@ -1,5 +1,7 @@
 use rustpilot::constants::LLM_TIMEOUT_SECS;
-use rustpilot::runtime_env::{detect_repo_root, ensure_env_guidance, llm_timeout_secs};
+use rustpilot::runtime_env::{
+    detect_repo_root, ensure_env_guidance, llm_timeout_secs, llm_timeout_secs_for_provider,
+};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -53,6 +55,8 @@ fn llm_timeout_uses_default_when_env_missing() {
         std::env::remove_var("LLM_TIMEOUT_SECS");
     }
     assert_eq!(llm_timeout_secs(), LLM_TIMEOUT_SECS);
+    assert_eq!(llm_timeout_secs_for_provider("minimax"), LLM_TIMEOUT_SECS);
+    assert_eq!(llm_timeout_secs_for_provider("kimi-coding"), 300);
 }
 
 fn make_temp_dir(name: &str) -> std::path::PathBuf {
@@ -79,7 +83,7 @@ fn ensure_env_guidance_creates_file_when_missing() {
     assert!(update.created);
     assert!(update.added_keys.iter().any(|key| key == "LLM_API_KEY"));
     assert!(env_text.contains("LLM_API_KEY=your_api_key_here"));
-    assert!(env_text.contains("LLM_TIMEOUT_SECS=120"));
+    assert!(env_text.contains("LLM_TIMEOUT_SECS=300"));
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -103,7 +107,7 @@ fn ensure_env_guidance_appends_missing_keys_without_overwrite() {
     assert!(env_text.contains("LLM_MODEL=custom_model"));
     assert!(env_text.contains("LLM_PROVIDER=minimax"));
     assert!(env_text.contains("LLM_API_BASE_URL=https://api.minimaxi.com/v1"));
-    assert!(env_text.contains("LLM_TIMEOUT_SECS=120"));
+    assert!(env_text.contains("LLM_TIMEOUT_SECS=300"));
 
     let _ = fs::remove_dir_all(dir);
 }

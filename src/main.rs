@@ -1,13 +1,17 @@
 use anyhow::Context;
 use rustpilot::activity::new_activity_handle;
-use rustpilot::agent::{run_agent_loop, tool_definitions};
+use rustpilot::agent::{diagnose_agent_failure, run_agent_loop, tool_definitions};
 use rustpilot::cli::{CliAction, handle_cli_command};
 use rustpilot::config::{LlmConfig, default_llm_user_agent};
 use rustpilot::openai_compat::Message;
 use rustpilot::project_tools::{EnergyMode, ProjectContext};
+use rustpilot::prompt_manager::{
+    adapt_lead_prompt_detailed, lead_prompt_recovery, render_lead_system_prompt,
+};
 use rustpilot::resident_agents::{AgentSupervisor, resident_listen_port, run_resident_agent};
 use rustpilot::runtime_env::{
-    detect_repo_root, ensure_env_guidance, llm_timeout_secs, prompt_and_store_llm_api_key,
+    detect_repo_root, ensure_env_guidance, llm_timeout_secs_for_provider,
+    prompt_and_store_llm_api_key,
 };
 use rustpilot::skills::SkillRegistry;
 use rustpilot::team::{
@@ -85,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let client = reqwest::Client::builder()
         .user_agent(default_llm_user_agent())
-        .timeout(Duration::from_secs(llm_timeout_secs()))
+        .timeout(Duration::from_secs(llm_timeout_secs_for_provider(
+            &llm.provider,
+        )))
         .build()?;
 
     let project = ProjectContext::new(repo_root.clone())?;
@@ -118,10 +124,7 @@ async fn main() -> anyhow::Result<()> {
     let progress = new_activity_handle();
     let mut lead_cursor = 0usize;
     let mut interaction_mode = InteractionMode::Lead;
-    let system_prompt = format!(
-        "You are the lead coding agent in {}. Use task_* and worktree_* for delegated work. Use team_send and team_inbox when coordinating with the team.",
-        repo_root.display()
-    );
+    let system_prompt = render_lead_system_prompt(&repo_root)?;
     let mut messages = vec![Message {
         role: "system".to_string(),
         content: Some(system_prompt),
@@ -279,13 +282,40 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             Some(CliAction::TeamStatus) => {
+                let latest_prompt_change = project
+                    .prompt_history()
+                    .list_recent(1)
+                    .ok()
+                    .and_then(|mut items| items.pop())
+                    .map(|item| {
+                        format!(
+                            " latest_prompt={}({}:{}; {})",
+                            item.agent_id,
+                            item.strategy,
+                            truncate_text(&item.trigger, 36),
+                            truncate_text(&item.diff_summary, 36)
+                        )
+                    })
+                    .unwrap_or_default();
                 let configured = project.residents().enabled_agents()?;
                 if configured.is_empty() {
                     println!(
-                        "team: no enabled resident agents pending={}",
-                        project.tasks().pending_count()?
+                        "team: no enabled resident agents pending={}{}",
+                        project.tasks().pending_count()?,
+                        latest_prompt_change
                     );
                 } else {
+                    let lead_recovery = lead_prompt_recovery(project.repo_root())
+                        .ok()
+                        .flatten()
+                        .map(|info| {
+                            format!(
+                                " strategy={} trigger={}",
+                                info.strategy,
+                                truncate_text(&info.trigger, 60)
+                            )
+                        })
+                        .unwrap_or_default();
                     let mut alerts = Vec::new();
                     let states = configured
                         .into_iter()
@@ -346,8 +376,28 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 String::new()
                             };
+                            let prompt_recovery = if item.role == "ui" {
+                                project.ui_surface().ui_prompt_recovery().ok().flatten()
+                            } else if item.behavior_mode == "ui_surface_planning" {
+                                project
+                                    .ui_surface()
+                                    .planner_prompt_recovery()
+                                    .ok()
+                                    .flatten()
+                            } else {
+                                None
+                            };
+                            let prompt_suffix = prompt_recovery
+                                .map(|info| {
+                                    format!(
+                                        " prompt={}({})",
+                                        info.strategy,
+                                        truncate_text(&info.trigger, 40)
+                                    )
+                                })
+                                .unwrap_or_default();
                             format!(
-                                "{}={} status={} backlog={} loop_ms={} note={}{} last={}",
+                                "{}={} status={} backlog={} loop_ms={} note={}{}{} last={}",
                                 item.agent_id,
                                 running,
                                 status,
@@ -355,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
                                 loop_ms,
                                 note,
                                 endpoint,
+                                prompt_suffix,
                                 last_action
                             )
                         })
@@ -362,16 +413,20 @@ async fn main() -> anyhow::Result<()> {
                         .join(" ");
                     if alerts.is_empty() {
                         println!(
-                            "team: {} pending={} alerts=none",
+                            "team: lead{} {} pending={} alerts=none{}",
+                            lead_recovery,
                             states,
-                            project.tasks().pending_count()?
+                            project.tasks().pending_count()?,
+                            latest_prompt_change
                         );
                     } else {
                         println!(
-                            "team: {} pending={} alerts={}",
+                            "team: lead{} {} pending={} alerts={}{}",
+                            lead_recovery,
                             states,
                             project.tasks().pending_count()?,
-                            alerts.join(" | ")
+                            alerts.join(" | "),
+                            latest_prompt_change
                         );
                     }
                 }
@@ -427,8 +482,31 @@ async fn main() -> anyhow::Result<()> {
                                 .and_then(|state| state.note.as_deref())
                                 .unwrap_or("none");
                             let port = resident_listen_port(&item);
+                            let prompt_recovery = if item.role == "ui" {
+                                project
+                                    .ui_surface()
+                                    .ui_prompt_recovery()
+                                    .ok()
+                                    .flatten()
+                            } else if item.behavior_mode == "ui_surface_planning" {
+                                project
+                                    .ui_surface()
+                                    .planner_prompt_recovery()
+                                    .ok()
+                                    .flatten()
+                            } else {
+                                None
+                            };
+                            let prompt_strategy = prompt_recovery
+                                .as_ref()
+                                .map(|info| info.strategy.as_str())
+                                .unwrap_or("-");
+                            let prompt_trigger = prompt_recovery
+                                .as_ref()
+                                .map(|info| truncate_text(&info.trigger, 80))
+                                .unwrap_or_else(|| "-".to_string());
                             format!(
-                                "- {} role={} mode={} behavior={} enabled={} running={} status={} backlog={} loop_ms={} port={} last_msg={} last_error={} note={} last={}",
+                                "- {} role={} mode={} behavior={} enabled={} running={} status={} backlog={} loop_ms={} port={} prompt={} trigger={} last_msg={} last_error={} note={} last={}",
                                 item.agent_id,
                                 item.role,
                                 item.runtime_mode,
@@ -439,6 +517,8 @@ async fn main() -> anyhow::Result<()> {
                                 backlog,
                                 loop_ms,
                                 if port > 0 { port.to_string() } else { "-".to_string() },
+                                prompt_strategy,
+                                prompt_trigger,
                                 last_msg,
                                 last_error,
                                 note,
@@ -515,7 +595,7 @@ async fn main() -> anyhow::Result<()> {
                 .budgets()
                 .record_usage("lead", estimate_text_tokens(prompt).saturating_add(40));
             maybe_reflect_energy(&project, "lead", "user.ask", None, "processed /ask input");
-            run_lead_turn(
+            run_lead_turn_with_recovery(
                 &client,
                 &llm,
                 &project,
@@ -523,6 +603,8 @@ async fn main() -> anyhow::Result<()> {
                 &progress,
                 &mut supervisor,
                 &mut lead_cursor,
+                &interaction_mode,
+                prompt,
             )
             .await?;
             continue;
@@ -548,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
                             tool_call_id: None,
                             tool_calls: None,
                         });
-                        run_lead_turn(
+                        run_lead_turn_with_recovery(
                             &client,
                             &llm,
                             &project,
@@ -556,6 +638,8 @@ async fn main() -> anyhow::Result<()> {
                             &progress,
                             &mut supervisor,
                             &mut lead_cursor,
+                            &interaction_mode,
+                            trimmed,
                         )
                         .await?;
                         continue;
@@ -610,7 +694,7 @@ async fn main() -> anyhow::Result<()> {
                         tool_call_id: None,
                         tool_calls: None,
                     });
-                    run_lead_turn(
+                    run_lead_turn_with_recovery(
                         &client,
                         &llm,
                         &project,
@@ -618,6 +702,8 @@ async fn main() -> anyhow::Result<()> {
                         &progress,
                         &mut supervisor,
                         &mut lead_cursor,
+                        &interaction_mode,
+                        trimmed,
                     )
                     .await?;
                 }
@@ -641,7 +727,7 @@ async fn main() -> anyhow::Result<()> {
             .budgets()
             .record_usage("lead", estimate_text_tokens(trimmed).saturating_add(30));
         maybe_reflect_energy(&project, "lead", "command", None, "processed command");
-        run_lead_turn(
+        run_lead_turn_with_recovery(
             &client,
             &llm,
             &project,
@@ -649,6 +735,8 @@ async fn main() -> anyhow::Result<()> {
             &progress,
             &mut supervisor,
             &mut lead_cursor,
+            &interaction_mode,
+            trimmed,
         )
         .await?;
     }
@@ -687,6 +775,306 @@ async fn run_lead_turn(
     pump_lead_mailbox(project, lead_cursor, messages)?;
     println!();
     Ok(())
+}
+
+async fn run_lead_turn_with_recovery(
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    project: &ProjectContext,
+    messages: &mut Vec<Message>,
+    progress: &rustpilot::activity::ActivityHandle,
+    supervisor: &mut AgentSupervisor,
+    lead_cursor: &mut usize,
+    interaction_mode: &InteractionMode,
+    user_input: &str,
+) -> anyhow::Result<()> {
+    match run_lead_turn(
+        client,
+        llm,
+        project,
+        messages,
+        progress,
+        supervisor,
+        lead_cursor,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let error_text = format_error_chain(&err);
+            let adaptation = adapt_lead_prompt_detailed(project.repo_root(), &error_text)
+                .unwrap_or_else(|_| rustpilot::prompt_manager::PromptAdaptation {
+                    changed: false,
+                    file_path: project
+                        .repo_root()
+                        .join(".team")
+                        .join("lead_agent_prompt.md"),
+                    before: String::new(),
+                    after: String::new(),
+                    recovery: None,
+                });
+            if adaptation.changed {
+                if let Some(recovery) = adaptation.recovery.as_ref() {
+                    let _ = project.prompt_history().append(
+                        "lead",
+                        "lead",
+                        &adaptation.file_path.display().to_string(),
+                        &recovery.strategy,
+                        &recovery.trigger,
+                        &adaptation.before,
+                        &adaptation.after,
+                    );
+                }
+                refresh_lead_system_prompt(project.repo_root(), messages)?;
+                if run_lead_turn(
+                    client,
+                    llm,
+                    project,
+                    messages,
+                    progress,
+                    supervisor,
+                    lead_cursor,
+                )
+                .await
+                .is_ok()
+                {
+                    let _ = project.decisions().append(
+                        "lead",
+                        "lead.recovered",
+                        None,
+                        None,
+                        "lead turn recovered after auto-adjusting prompt",
+                        &error_text,
+                    );
+                    return Ok(());
+                }
+            }
+            handle_lead_turn_error(
+                client,
+                llm,
+                project,
+                messages,
+                progress,
+                interaction_mode,
+                user_input,
+                &err,
+            )
+            .await;
+            Ok(())
+        }
+    }
+}
+
+fn refresh_lead_system_prompt(
+    repo_root: &std::path::Path,
+    messages: &mut Vec<Message>,
+) -> anyhow::Result<()> {
+    let prompt = render_lead_system_prompt(repo_root)?;
+    if let Some(system) = messages
+        .first_mut()
+        .filter(|message| message.role == "system")
+    {
+        system.content = Some(prompt);
+        return Ok(());
+    }
+    messages.insert(
+        0,
+        Message {
+            role: "system".to_string(),
+            content: Some(prompt),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    );
+    Ok(())
+}
+
+async fn handle_lead_turn_error(
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    project: &ProjectContext,
+    messages: &mut Vec<Message>,
+    progress: &rustpilot::activity::ActivityHandle,
+    interaction_mode: &InteractionMode,
+    user_input: &str,
+    err: &anyhow::Error,
+) {
+    let error_text = format_error_chain(err);
+    let issues = vec![
+        "lead turn failed".to_string(),
+        format!("provider={}", llm.provider),
+        format!("model={}", llm.model),
+        truncate_text(&error_text, 240),
+    ];
+    let issue_refs = issues.iter().map(|item| item.as_str()).collect::<Vec<_>>();
+    let summary = format!(
+        "lead turn failed while handling input '{}'",
+        truncate_text(user_input.trim(), 120)
+    );
+
+    let _ = project.events().emit(
+        "lead.error",
+        serde_json::json!({
+            "agent": "lead",
+            "input": user_input,
+            "focus": interaction_mode.label(),
+            "provider": llm.provider,
+            "model": llm.model,
+        }),
+        serde_json::json!({}),
+        Some(error_text.clone()),
+    );
+    let _ = project
+        .decisions()
+        .append("lead", "lead.error", None, None, &summary, &error_text);
+    let _ = project.reflections().append(
+        "lead",
+        "lead.error",
+        None,
+        &summary,
+        &issue_refs,
+        Some("inspect the diagnostic proposal and retry with the smallest possible prompt"),
+        true,
+    );
+
+    let diagnostic_prompt =
+        build_lead_error_prompt(llm, messages, interaction_mode, user_input, &error_text);
+    let diagnosis = match diagnose_agent_failure(client, llm, &diagnostic_prompt).await {
+        Ok(text) => text,
+        Err(diag_err) => format!(
+            "Automatic diagnosis failed.\nRoot error:\n{}\n\nFallback:\n1. Retry the same request.\n2. Check network and provider credentials.\n3. Lower prompt size or wait and retry.\n\nDiagnostic error:\n{}",
+            error_text,
+            format_error_chain(&diag_err)
+        ),
+    };
+
+    let _ = project.proposals().create(
+        "lead",
+        "lead.error",
+        None,
+        "investigate lead runtime failure",
+        &diagnosis,
+        &issue_refs,
+        Some("apply the suggested checks, then retry the command"),
+    );
+    let _ = project.mailbox().send_typed(
+        "lead",
+        "reviewer",
+        "proposal.request",
+        &format!("Lead runtime failure detected.\n\n{}", diagnosis),
+        None,
+        None,
+        false,
+        None,
+    );
+    let _ = project.budgets().record_usage("lead", 40);
+    maybe_reflect_energy(project, "lead", "lead.error", None, &summary);
+
+    println!();
+    println!("agent error recorded");
+    println!("{}", error_text);
+    println!();
+    println!("recovery analysis:");
+    println!("{}", diagnosis);
+    println!();
+
+    messages.push(Message {
+        role: "assistant".to_string(),
+        content: Some(format!(
+            "[recovery-analysis]\nThe previous turn failed.\n\nError:\n{}\n\nSuggested recovery:\n{}",
+            error_text, diagnosis
+        )),
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    let _ = project.agents().set_state(
+        "lead",
+        "idle",
+        None,
+        Some("cli"),
+        Some("main"),
+        Some("last turn failed; recovery advice generated"),
+    );
+    let _ = project.events().emit(
+        "lead.recovery",
+        serde_json::json!({"agent": "lead"}),
+        serde_json::json!({}),
+        None,
+    );
+    rustpilot::activity::set_activity(progress, 0, "error handled", None);
+}
+
+fn build_lead_error_prompt(
+    llm: &LlmConfig,
+    messages: &[Message],
+    interaction_mode: &InteractionMode,
+    user_input: &str,
+    error_text: &str,
+) -> String {
+    let recent_context = messages
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            format!(
+                "- role={}: {}",
+                message.role,
+                truncate_text(message.content.as_deref().unwrap_or(""), 180)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "Runtime failure in rustpilot lead agent.\n\
+Provider: {}\n\
+Model: {}\n\
+Focus: {}\n\
+User input: {}\n\
+\n\
+Error chain:\n{}\n\
+\n\
+Recent conversation context:\n{}\n\
+\n\
+Give:\n\
+1. most likely cause\n\
+2. exact checks to run next\n\
+3. minimal workaround to keep the session moving",
+        llm.provider,
+        llm.model,
+        interaction_mode.label(),
+        truncate_text(user_input.trim(), 240),
+        error_text,
+        if recent_context.is_empty() {
+            "- none".to_string()
+        } else {
+            recent_context
+        }
+    )
+}
+
+fn format_error_chain(err: &anyhow::Error) -> String {
+    err.chain()
+        .enumerate()
+        .map(|(idx, cause)| format!("{idx}: {cause}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let end = text
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|idx| *idx < max)
+        .last()
+        .unwrap_or(0);
+    format!("{}...", &text[..end])
 }
 
 fn estimate_text_tokens(text: &str) -> u32 {
