@@ -1,3 +1,6 @@
+pub mod app;
+mod app_commands;
+mod app_support;
 pub mod activity;
 pub mod agent;
 pub mod agent_tools;
@@ -12,9 +15,11 @@ pub mod openai_compat;
 pub mod project_tools;
 pub mod prompt_manager;
 pub mod resident_agents;
+mod runtime;
 pub mod runtime_env;
 pub mod shell_file_tools;
 pub mod skills;
 pub mod team;
 pub mod terminal_session;
 pub mod ui_server;
+pub mod wire;

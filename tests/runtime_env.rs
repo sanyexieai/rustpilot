@@ -105,8 +105,10 @@ fn ensure_env_guidance_appends_missing_keys_without_overwrite() {
     assert!(update.added_keys.iter().any(|key| key == "LLM_PROVIDER"));
     assert!(env_text.contains("LLM_API_KEY=custom_key"));
     assert!(env_text.contains("LLM_MODEL=custom_model"));
-    assert!(env_text.contains("LLM_PROVIDER=minimax"));
-    assert!(env_text.contains("LLM_API_BASE_URL=https://api.minimaxi.com/v1"));
+    assert!(env_text.contains("LLM_PROVIDER=kimi-coding"));
+    assert!(env_text.contains("ANTHROPIC_AUTH_TOKEN=your_kimi_coding_key_here"));
+    assert!(env_text.contains("ANTHROPIC_BASE_URL=https://api.kimi.com/coding/"));
+    assert!(env_text.contains("ANTHROPIC_MODEL=kimi-for-coding"));
     assert!(env_text.contains("LLM_TIMEOUT_SECS=300"));
 
     let _ = fs::remove_dir_all(dir);
