@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
@@ -37,6 +37,7 @@ impl ProposalManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         source_agent: &str,

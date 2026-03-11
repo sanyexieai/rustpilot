@@ -96,8 +96,8 @@ impl LlmProfileManager {
         self.resolve(
             &requested_provider,
             requested_profile.as_deref(),
-            raw_base_url.as_deref(),
-            raw_model.as_deref(),
+            raw_base_url,
+            raw_model,
         )
     }
 
@@ -132,10 +132,10 @@ impl LlmProfileManager {
 
         let ordered = ordered_profiles_for_provider(&store, &provider);
         for profile_id in ordered {
-            if let Some(profile) = store.profiles.get(&profile_id) {
-                if profile.enabled {
-                    return Ok(resolve_profile(profile, spec, base_url_hint, model_hint));
-                }
+            if let Some(profile) = store.profiles.get(&profile_id)
+                && profile.enabled
+            {
+                return Ok(resolve_profile(profile, spec, base_url_hint, model_hint));
             }
         }
 
@@ -185,12 +185,10 @@ impl LlmProfileManager {
         let _guard = FileLock::acquire(self.path.clone())?;
         let mut store = self.load_store_unlocked()?;
         let now = now_secs_f64();
-        let normalized_base_url = normalize_base_url(&provider, raw_base_url.as_deref());
+        let normalized_base_url = normalize_base_url(&provider, raw_base_url);
         let normalized_model = normalize_model(
             &provider,
-            raw_model
-                .as_deref()
-                .unwrap_or(provider_spec(&provider).default_model),
+            raw_model.unwrap_or(provider_spec(&provider).default_model),
         );
 
         if let Some(existing) = store.profiles.get_mut(&profile_id) {

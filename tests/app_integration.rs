@@ -88,6 +88,17 @@ fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
+fn raw_tool_call(name: &str, arguments_json: &str) -> ToolCall {
+    ToolCall {
+        id: format!("call-{}", name),
+        r#type: "function".to_string(),
+        function: ToolCallFunction {
+            name: name.to_string(),
+            arguments: arguments_json.to_string(),
+        },
+    }
+}
+
 fn project_context(repo_root: &Path) -> ProjectContext {
     ProjectContext::new(repo_root.to_path_buf()).expect("project context")
 }
@@ -265,6 +276,104 @@ fn builtin_tool_filesystem_errors_are_classified() {
 
     assert!(error.contains("builtin tool 'edit_file' failed [filesystem]"));
     assert!(error.contains("未找到目标文本"));
+}
+
+#[test]
+fn manual_approval_mode_blocks_model_shell_tools() {
+    let temp = TestDir::new("approval_manual_shell");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+    project
+        .approval()
+        .set_mode(rustpilot::project_tools::ApprovalMode::Manual)
+        .expect("set approval mode");
+
+    let bash_error = handle_tool_call(&project, &tool_call("bash", json!({ "command": "pwd" })))
+        .unwrap_err()
+        .to_string();
+    assert!(bash_error.contains("approval mode=manual"));
+    let policy = project.approval().get_policy().expect("approval policy");
+    let last_block = policy.last_block.expect("last block");
+    assert_eq!(last_block.reason_code, "manual");
+    assert_eq!(last_block.actor_id, "lead");
+    assert_eq!(last_block.tool_name, "bash");
+    assert_eq!(last_block.command, "pwd");
+
+    let worktree_error = handle_tool_call(
+        &project,
+        &tool_call(
+            "worktree_run",
+            json!({ "name": "missing", "command": "pwd" }),
+        ),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(worktree_error.contains("approval mode=manual"));
+}
+
+#[test]
+fn dangerous_bash_command_is_rejected() {
+    let temp = TestDir::new("dangerous_bash");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    let error = handle_tool_call(
+        &project,
+        &raw_tool_call("bash", r#"{"command":"Remove-Item -Recurse -Force ."}"#),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("classified as dangerous"));
+    let policy = project.approval().get_policy().expect("approval policy");
+    let last_block = policy.last_block.expect("last block");
+    assert_eq!(last_block.reason_code, "dangerous");
+    assert_eq!(last_block.actor_id, "lead");
+}
+
+#[test]
+fn read_only_approval_mode_allows_read_but_blocks_write_shell_tools() {
+    let temp = TestDir::new("approval_read_only");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+    project
+        .approval()
+        .set_mode(rustpilot::project_tools::ApprovalMode::ReadOnly)
+        .expect("set approval mode");
+
+    let ok = handle_tool_call(
+        &project,
+        &tool_call("bash", json!({ "command": "git status" })),
+    )
+    .expect("read-only git status should pass");
+    assert!(!ok.is_empty());
+
+    let blocked = handle_tool_call(
+        &project,
+        &tool_call("bash", json!({ "command": "git add README.md" })),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(blocked.contains("approval mode=read_only"));
+    let policy = project.approval().get_policy().expect("approval policy");
+    let last_block = policy.last_block.expect("last block");
+    assert_eq!(last_block.reason_code, "read_only");
+    assert_eq!(last_block.actor_id, "lead");
+    assert_eq!(last_block.command, "git add README.md");
+    let history = project
+        .approval()
+        .list_recent_blocks(5, None)
+        .expect("approval history");
+    assert!(!history.is_empty());
+    assert_eq!(
+        history.last().map(|item| item.reason_code.as_str()),
+        Some("read_only")
+    );
+    let filtered = project
+        .approval()
+        .list_recent_blocks(5, Some("read_only"))
+        .expect("approval filtered history");
+    assert!(!filtered.is_empty());
+    assert!(filtered.iter().all(|item| item.reason_code == "read_only"));
 }
 
 #[test]

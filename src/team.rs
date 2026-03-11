@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -249,12 +249,12 @@ fn scheduler_loop(
                         finished.push(*task_id);
                     } else if status == "blocked" {
                         finished.push(*task_id);
-                    } else if let Ok(info) = terminal_manager.status(session_id) {
-                        if !matches!(info.state, SessionState::Running) {
-                            let _ = project.tasks().update(*task_id, Some("failed"), None);
-                            failed.fetch_add(1, Ordering::Relaxed);
-                            finished.push(*task_id);
-                        }
+                    } else if let Ok(info) = terminal_manager.status(session_id)
+                        && !matches!(info.state, SessionState::Running)
+                    {
+                        let _ = project.tasks().update(*task_id, Some("failed"), None);
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        finished.push(*task_id);
                     }
                 }
             }
@@ -621,6 +621,7 @@ pub async fn run_teammate_once(
             &tools,
             progress.clone(),
             Some(&report),
+            None,
         )
         .await;
         match result {
@@ -755,6 +756,7 @@ pub async fn run_teammate_once(
                         &tools,
                         progress.clone(),
                         Some(&report),
+                        None,
                     )
                     .await
                     .is_ok()

@@ -3,15 +3,18 @@ use crate::project_tools::ProjectContext;
 use crate::resident_agents::AgentSupervisor;
 use crate::runtime::lead::maybe_reflect_energy;
 use crate::team::get_worker_endpoint;
-use std::path::PathBuf;
+use std::path::Path;
 
-pub(crate) fn focus_lead(
-    project: &ProjectContext,
-    interaction_mode: &mut InteractionMode,
-) {
+pub(crate) fn focus_lead(project: &ProjectContext, interaction_mode: &mut InteractionMode) {
     *interaction_mode = InteractionMode::Lead;
     let _ = project.budgets().record_usage("lead", 10);
-    maybe_reflect_energy(project, "lead", "focus.lead", None, "switched focus to lead");
+    maybe_reflect_energy(
+        project,
+        "lead",
+        "focus.lead",
+        None,
+        "switched focus to lead",
+    );
     let _ = project.agents().set_state(
         "lead",
         "active",
@@ -22,13 +25,36 @@ pub(crate) fn focus_lead(
     );
 }
 
-pub(crate) fn focus_team(
-    project: &ProjectContext,
-    interaction_mode: &mut InteractionMode,
-) {
+pub(crate) fn focus_shell(project: &ProjectContext, interaction_mode: &mut InteractionMode) {
+    *interaction_mode = InteractionMode::Shell;
+    let _ = project.budgets().record_usage("lead", 5);
+    maybe_reflect_energy(
+        project,
+        "lead",
+        "focus.shell",
+        None,
+        "switched focus to shell",
+    );
+    let _ = project.agents().set_state(
+        "lead",
+        "active",
+        None,
+        Some("cli"),
+        Some("main"),
+        Some("shell focus"),
+    );
+}
+
+pub(crate) fn focus_team(project: &ProjectContext, interaction_mode: &mut InteractionMode) {
     *interaction_mode = InteractionMode::TeamQueue;
     let _ = project.budgets().record_usage("lead", 5);
-    maybe_reflect_energy(project, "lead", "focus.team", None, "switched focus to team");
+    maybe_reflect_energy(
+        project,
+        "lead",
+        "focus.team",
+        None,
+        "switched focus to team",
+    );
     let _ = project.agents().set_state(
         "lead",
         "idle",
@@ -40,7 +66,7 @@ pub(crate) fn focus_team(
 }
 
 pub(crate) fn focus_worker(
-    repo_root: &PathBuf,
+    repo_root: &Path,
     project: &ProjectContext,
     interaction_mode: &mut InteractionMode,
     task_id: u64,
@@ -67,7 +93,7 @@ pub(crate) fn focus_worker(
 }
 
 pub(crate) fn reply_task(
-    repo_root: &PathBuf,
+    repo_root: &Path,
     project: &ProjectContext,
     supervisor: &mut AgentSupervisor,
     task_id: u64,
@@ -80,23 +106,36 @@ pub(crate) fn reply_task(
     let updated = project.tasks().append_user_reply(
         task_id,
         content,
-        if worker_running { "in_progress" } else { "pending" },
+        if worker_running {
+            "in_progress"
+        } else {
+            "pending"
+        },
     )?;
+    let trace_id = format!("task-{}", task_id);
+    let target = format!("teammate-{}", task_id);
+    let message = format!("user clarification: {}", content);
     let _ = project.mailbox().send_typed(
         "lead",
-        &format!("teammate-{}", task_id),
+        &target,
         "task.clarification",
-        &format!("user clarification: {}", content),
+        &message,
         Some(task_id),
-        Some(&format!("task-{}", task_id)),
+        Some(&trace_id),
         false,
         None,
     );
     if worker_running {
-        Ok(format!("clarification sent to running worker:\n{}", updated))
+        Ok(format!(
+            "clarification sent to running worker:\n{}",
+            updated
+        ))
     } else {
         let _ = supervisor.ensure_running("scheduler");
-        Ok(format!("clarification appended and task re-queued:\n{}", updated))
+        Ok(format!(
+            "clarification appended and task re-queued:\n{}",
+            updated
+        ))
     }
 }
 
@@ -132,9 +171,9 @@ pub(crate) fn resident_send(
     msg_type: &str,
     content: &str,
 ) -> anyhow::Result<String> {
-    let _ = project.mailbox().send_typed(
-        "lead", agent_id, msg_type, content, None, None, false, None,
-    )?;
+    let _ = project
+        .mailbox()
+        .send_typed("lead", agent_id, msg_type, content, None, None, false, None)?;
     let _ = project.decisions().append(
         "lead",
         "resident.message.sent",
@@ -144,5 +183,8 @@ pub(crate) fn resident_send(
         "manual resident dispatch from cli",
     );
     let _ = supervisor.ensure_running(agent_id);
-    Ok(format!("resident message sent: {} -> {}", msg_type, agent_id))
+    Ok(format!(
+        "resident message sent: {} -> {}",
+        msg_type, agent_id
+    ))
 }

@@ -39,19 +39,10 @@ struct LoadedExternalTool {
     skill_dir: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ExternalToolCache {
     fingerprint: u64,
     tools: Vec<LoadedExternalTool>,
-}
-
-impl Default for ExternalToolCache {
-    fn default() -> Self {
-        Self {
-            fingerprint: 0,
-            tools: Vec::new(),
-        }
-    }
 }
 
 fn cache() -> &'static Mutex<ExternalToolCache> {
@@ -148,11 +139,11 @@ fn compute_skills_fingerprint(skills_dir: &Path) -> anyhow::Result<u64> {
         file.hash(&mut hasher);
         let meta = fs::metadata(skills_dir.join(&file))?;
         meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified() {
-            if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                duration.as_secs().hash(&mut hasher);
-                duration.subsec_nanos().hash(&mut hasher);
-            }
+        if let Ok(modified) = meta.modified()
+            && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
+        {
+            duration.as_secs().hash(&mut hasher);
+            duration.subsec_nanos().hash(&mut hasher);
         }
     }
     Ok(hasher.finish())

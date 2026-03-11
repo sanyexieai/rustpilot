@@ -464,8 +464,9 @@ impl SystemModelManager {
                     transport: "http".to_string(),
                     method: "POST".to_string(),
                     path: "/api/wire".to_string(),
-                    purpose: "dispatch a wire request from the control surface into the agent system"
-                        .to_string(),
+                    purpose:
+                        "dispatch a wire request from the control surface into the agent system"
+                            .to_string(),
                     readonly: false,
                     requires_confirmation: false,
                     targets: vec![
@@ -477,7 +478,9 @@ impl SystemModelManager {
                         SystemProtocolField {
                             name: "type".to_string(),
                             required: true,
-                            field_type: "enum(chat_send|chat_abort|session_create|session_list|tool_call)".to_string(),
+                            field_type:
+                                "enum(chat_send|chat_abort|session_create|session_list|tool_call)"
+                                    .to_string(),
                             description: "wire request type".to_string(),
                         },
                         SystemProtocolField {
@@ -509,10 +512,7 @@ impl SystemModelManager {
                     ],
                     supported_sections: vec!["composer".to_string()],
                     supported_sources: vec!["composer".to_string()],
-                    event_types: vec![
-                        "wire.response".to_string(),
-                        "wire.error".to_string(),
-                    ],
+                    event_types: vec!["wire.response".to_string(), "wire.error".to_string()],
                 },
             ],
             residents,

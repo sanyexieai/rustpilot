@@ -99,6 +99,23 @@ impl BudgetManager {
         Ok(self.snapshot(agent_id)?.map(|item| classify_energy(&item)))
     }
 
+    pub fn list_all(&self) -> anyhow::Result<Vec<BudgetLedger>> {
+        let mut items = self.load_all()?;
+        let today = epoch_day();
+        let mut changed = false;
+        for item in &mut items {
+            let before = item.last_reset_day;
+            reset_if_needed(item, today);
+            if item.last_reset_day != before {
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_all(&items)?;
+        }
+        Ok(items)
+    }
+
     fn load_all(&self) -> anyhow::Result<Vec<BudgetLedger>> {
         if !self.path.exists() {
             return Ok(Vec::new());

@@ -1,11 +1,13 @@
 use crate::openai_compat::Message;
 use crate::project_tools::ProjectContext;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InteractionMode {
     TeamQueue,
     Lead,
+    Shell,
     Worker { task_id: u64 },
 }
 
@@ -14,9 +16,42 @@ impl InteractionMode {
         match self {
             Self::TeamQueue => "team".to_string(),
             Self::Lead => "lead".to_string(),
+            Self::Shell => "shell".to_string(),
             Self::Worker { task_id } => format!("worker({})", task_id),
         }
     }
+}
+
+pub(crate) fn parse_interaction_mode_label(raw: &str) -> anyhow::Result<InteractionMode> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("focus cannot be empty");
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    match normalized.as_str() {
+        "lead" => return Ok(InteractionMode::Lead),
+        "shell" => return Ok(InteractionMode::Shell),
+        "team" | "team_queue" => return Ok(InteractionMode::TeamQueue),
+        _ => {}
+    }
+
+    if let Some(task_id) = parse_worker_task_id(trimmed) {
+        return Ok(InteractionMode::Worker { task_id });
+    }
+
+    anyhow::bail!("unsupported focus: {}", raw)
+}
+
+fn parse_worker_task_id(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    let candidate = trimmed
+        .strip_prefix("worker(")
+        .and_then(|value| value.strip_suffix(')'))
+        .or_else(|| trimmed.strip_prefix("worker:"))
+        .or_else(|| trimmed.strip_prefix("worker "))
+        .map(str::trim)?;
+    candidate.parse::<u64>().ok()
 }
 
 pub(crate) struct TeammateArgs {
@@ -51,7 +86,7 @@ struct MailItem {
     requires_ack: bool,
 }
 
-pub(crate) fn load_repo_env(repo_root: &PathBuf) {
+pub(crate) fn load_repo_env(repo_root: &Path) {
     dotenvy::from_path_override(repo_root.join(".env")).ok();
 }
 
@@ -169,10 +204,10 @@ pub(crate) fn parse_teammate_args(args: &[String]) -> anyhow::Result<TeammateArg
         match args[idx].as_str() {
             "--repo-root" => {
                 idx += 1;
-                repo_root = Some(PathBuf::from(
-                    args.get(idx)
-                        .ok_or_else(|| anyhow::anyhow!("missing --repo-root value"))?,
-                ));
+                repo_root =
+                    Some(PathBuf::from(args.get(idx).ok_or_else(|| {
+                        anyhow::anyhow!("missing --repo-root value")
+                    })?));
             }
             "--task-id" => {
                 idx += 1;
@@ -225,10 +260,10 @@ pub(crate) fn parse_resident_args(
         match args[idx].as_str() {
             "--repo-root" => {
                 idx += 1;
-                repo_root = Some(PathBuf::from(
-                    args.get(idx)
-                        .ok_or_else(|| anyhow::anyhow!("missing --repo-root value"))?,
-                ));
+                repo_root =
+                    Some(PathBuf::from(args.get(idx).ok_or_else(|| {
+                        anyhow::anyhow!("missing --repo-root value")
+                    })?));
             }
             "--agent-id" => {
                 idx += 1;

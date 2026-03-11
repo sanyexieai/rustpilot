@@ -2,21 +2,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    AgentManager, BudgetManager, DecisionManager, EventBus, Mailbox, PromptHistoryManager,
-    ProposalManager, ReflectionManager, ResidentConfigManager, ResidentRuntimeManager,
-    SystemModelManager, TaskManager, UiSchemaManager, UiSurfaceManager, WorktreeManager,
+    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, Mailbox,
+    PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
+    ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiSchemaManager,
+    UiSurfaceManager, WorktreeManager,
 };
 
 #[derive(Debug, Clone)]
 pub struct ProjectContext {
     repo_root: PathBuf,
     tasks: Arc<TaskManager>,
+    approval: Arc<ApprovalManager>,
     events: Arc<EventBus>,
     mailbox: Arc<Mailbox>,
     agents: Arc<AgentManager>,
     budgets: Arc<BudgetManager>,
     decisions: Arc<DecisionManager>,
     reflections: Arc<ReflectionManager>,
+    sessions: Arc<SessionManager>,
     residents: Arc<ResidentConfigManager>,
     resident_runtime: Arc<ResidentRuntimeManager>,
     proposals: Arc<ProposalManager>,
@@ -30,6 +33,7 @@ pub struct ProjectContext {
 impl ProjectContext {
     pub fn new(repo_root: PathBuf) -> anyhow::Result<Self> {
         let tasks = Arc::new(TaskManager::new(repo_root.join(".tasks"))?);
+        let approval = Arc::new(ApprovalManager::new(repo_root.join(".team"))?);
         let events = Arc::new(EventBus::new(
             repo_root.join(".worktrees").join("events.jsonl"),
         )?);
@@ -38,6 +42,7 @@ impl ProjectContext {
         let budgets = Arc::new(BudgetManager::new(repo_root.join(".team"))?);
         let decisions = Arc::new(DecisionManager::new(repo_root.join(".team"))?);
         let reflections = Arc::new(ReflectionManager::new(repo_root.join(".team"))?);
+        let sessions = Arc::new(SessionManager::new(repo_root.join(".team"))?);
         let residents = Arc::new(ResidentConfigManager::new(repo_root.join(".team"))?);
         let resident_runtime = Arc::new(ResidentRuntimeManager::new(repo_root.join(".team"))?);
         let proposals = Arc::new(ProposalManager::new(repo_root.join(".team"))?);
@@ -53,12 +58,14 @@ impl ProjectContext {
         Ok(Self {
             repo_root,
             tasks,
+            approval,
             events,
             mailbox,
             agents,
             budgets,
             decisions,
             reflections,
+            sessions,
             residents,
             resident_runtime,
             proposals,
@@ -76,6 +83,10 @@ impl ProjectContext {
 
     pub fn tasks(&self) -> &TaskManager {
         self.tasks.as_ref()
+    }
+
+    pub fn approval(&self) -> &ApprovalManager {
+        self.approval.as_ref()
     }
 
     pub fn events(&self) -> &EventBus {
@@ -100,6 +111,10 @@ impl ProjectContext {
 
     pub fn reflections(&self) -> &ReflectionManager {
         self.reflections.as_ref()
+    }
+
+    pub fn sessions(&self) -> &SessionManager {
+        self.sessions.as_ref()
     }
 
     pub fn decisions(&self) -> &DecisionManager {

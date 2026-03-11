@@ -16,8 +16,20 @@ pub enum WireRequest {
     ChatAbort,
     SessionCreate {
         label: Option<String>,
+        focus: Option<String>,
+    },
+    SessionUse {
+        session_id: String,
     },
     SessionList,
+    ApprovalStatus,
+    ApprovalHistory {
+        limit: Option<usize>,
+        reason: Option<String>,
+    },
+    ApprovalSet {
+        mode: String,
+    },
     ToolList,
     ToolCall {
         name: String,
@@ -34,9 +46,19 @@ pub enum WireResponse {
     SessionCreated {
         session_id: String,
         label: Option<String>,
+        session: Option<WireSessionSummary>,
     },
     SessionList {
         sessions: Vec<WireSessionSummary>,
+    },
+    ApprovalStatus {
+        mode: String,
+        summary: String,
+        allowed_tools: Vec<String>,
+        last_block: Option<WireApprovalBlock>,
+    },
+    ApprovalHistory {
+        items: Vec<WireApprovalBlock>,
     },
     ToolList {
         tools: Vec<WireToolSummary>,
@@ -72,6 +94,7 @@ pub enum WireEvent {
     SessionUpdated {
         focus: String,
         status: String,
+        abortable: Option<bool>,
     },
     Error {
         message: String,
@@ -84,6 +107,7 @@ pub struct WireSessionSummary {
     pub label: Option<String>,
     pub focus: Option<String>,
     pub status: Option<String>,
+    pub abortable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -95,10 +119,24 @@ pub struct WireToolSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireApprovalBlock {
+    pub ts: u64,
+    pub actor_id: String,
+    pub tool_name: String,
+    pub command: String,
+    pub reason_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum WireFrame {
-    Response { response: WireEnvelope<WireResponse> },
-    Event { event: WireEnvelope<WireEvent> },
+    Response {
+        response: WireEnvelope<WireResponse>,
+    },
+    Event {
+        event: WireEnvelope<WireEvent>,
+    },
 }
 
 impl<T> WireEnvelope<T> {
@@ -134,12 +172,21 @@ impl WireFrame {
     }
 
     pub fn session_updated(focus: impl Into<String>, status: impl Into<String>) -> Self {
+        Self::session_updated_with_abortable(focus, status, None)
+    }
+
+    pub fn session_updated_with_abortable(
+        focus: impl Into<String>,
+        status: impl Into<String>,
+        abortable: Option<bool>,
+    ) -> Self {
         Self::Event {
             event: WireEnvelope::new(
                 "event",
                 WireEvent::SessionUpdated {
                     focus: focus.into(),
                     status: status.into(),
+                    abortable,
                 },
             ),
         }
@@ -166,6 +213,7 @@ mod tests {
         let event = WireEvent::SessionUpdated {
             focus: "lead".to_string(),
             status: "idle".to_string(),
+            abortable: None,
         };
         let envelope = WireEnvelope::new("event", event);
         let text = serde_json::to_string(&envelope).expect("serialize envelope");

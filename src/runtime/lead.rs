@@ -1,13 +1,19 @@
+use crate::abort_control::begin_session_request;
 use crate::activity::{ActivityHandle, set_activity};
 use crate::agent::{diagnose_agent_failure, run_agent_loop, tool_definitions};
+use crate::app_commands::AppRuntime;
 use crate::app_support::{InteractionMode, pump_lead_mailbox, trim_messages};
 use crate::config::LlmConfig;
 use crate::openai_compat::Message;
 use crate::project_tools::{EnergyMode, ProjectContext};
-use crate::prompt_manager::{PromptAdaptation, adapt_lead_prompt_detailed, render_lead_system_prompt};
+use crate::prompt_manager::{
+    PromptAdaptation, adapt_lead_prompt_detailed, render_lead_system_prompt,
+};
 use crate::resident_agents::AgentSupervisor;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_lead_turn(
+    session_id: &str,
     client: &reqwest::Client,
     llm: &LlmConfig,
     project: &ProjectContext,
@@ -18,6 +24,7 @@ pub(crate) async fn run_lead_turn(
 ) -> anyhow::Result<()> {
     let tools = tool_definitions();
     let mut lead_messages = prepare_messages_for_lead(project, messages);
+    let abort = begin_session_request(session_id);
     run_agent_loop(
         client,
         llm,
@@ -26,6 +33,7 @@ pub(crate) async fn run_lead_turn(
         &tools,
         progress.clone(),
         None,
+        Some(&abort),
     )
     .await?;
     *messages = lead_messages;
@@ -36,64 +44,77 @@ pub(crate) async fn run_lead_turn(
 }
 
 pub(crate) async fn run_lead_turn_with_recovery(
-    client: &reqwest::Client,
-    llm: &LlmConfig,
-    project: &ProjectContext,
-    messages: &mut Vec<Message>,
-    progress: &ActivityHandle,
-    supervisor: &mut AgentSupervisor,
-    lead_cursor: &mut usize,
-    interaction_mode: &InteractionMode,
     user_input: &str,
+    runtime: AppRuntime<'_>,
 ) -> anyhow::Result<()> {
     match run_lead_turn(
-        client,
-        llm,
-        project,
-        messages,
-        progress,
-        supervisor,
-        lead_cursor,
+        runtime.session_id,
+        runtime.client,
+        runtime.llm,
+        runtime.project,
+        runtime.messages,
+        runtime.progress,
+        runtime.supervisor,
+        runtime.lead_cursor,
     )
     .await
     {
         Ok(()) => Ok(()),
         Err(err) => {
+            if err.to_string().contains("request aborted") {
+                set_activity(runtime.progress, 0, "aborted", None);
+                let _ = runtime.project.agents().set_state(
+                    "lead",
+                    "idle",
+                    None,
+                    Some("cli"),
+                    Some("main"),
+                    Some("request aborted"),
+                );
+                println!("request aborted");
+                return Ok(());
+            }
             let error_text = format_error_chain(&err);
-            let adaptation = adapt_lead_prompt_detailed(project.repo_root(), &error_text)
+            let adaptation = adapt_lead_prompt_detailed(runtime.project.repo_root(), &error_text)
                 .unwrap_or_else(|_| PromptAdaptation {
                     changed: false,
-                    file_path: project.repo_root().join(".team").join("lead_agent_prompt.md"),
+                    file_path: runtime
+                        .project
+                        .repo_root()
+                        .join(".team")
+                        .join("lead_agent_prompt.md"),
                     before: String::new(),
                     after: String::new(),
                     recovery: None,
                 });
             if adaptation.changed {
                 if let Some(recovery) = adaptation.recovery.as_ref() {
-                    let _ = project.prompt_history().append(
+                    let file_path = adaptation.file_path.display().to_string();
+                    let _ = runtime.project.prompt_history().append(
                         "lead",
                         "lead",
-                        &adaptation.file_path.display().to_string(),
+                        &file_path,
                         &recovery.strategy,
                         &recovery.trigger,
                         &adaptation.before,
                         &adaptation.after,
                     );
                 }
-                refresh_lead_system_prompt(project.repo_root(), messages)?;
+                refresh_lead_system_prompt(runtime.project.repo_root(), runtime.messages)?;
                 if run_lead_turn(
-                    client,
-                    llm,
-                    project,
-                    messages,
-                    progress,
-                    supervisor,
-                    lead_cursor,
+                    runtime.session_id,
+                    runtime.client,
+                    runtime.llm,
+                    runtime.project,
+                    runtime.messages,
+                    runtime.progress,
+                    runtime.supervisor,
+                    runtime.lead_cursor,
                 )
                 .await
                 .is_ok()
                 {
-                    let _ = project.decisions().append(
+                    let _ = runtime.project.decisions().append(
                         "lead",
                         "lead.recovered",
                         None,
@@ -105,12 +126,12 @@ pub(crate) async fn run_lead_turn_with_recovery(
                 }
             }
             handle_lead_turn_error(
-                client,
-                llm,
-                project,
-                messages,
-                progress,
-                interaction_mode,
+                runtime.client,
+                runtime.llm,
+                runtime.project,
+                runtime.messages,
+                runtime.progress,
+                runtime.interaction_mode,
                 user_input,
                 &err,
             )
@@ -127,7 +148,7 @@ pub(crate) fn estimate_text_tokens(text: &str) -> u32 {
 
 pub(crate) fn looks_like_question(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.contains('?') || trimmed.contains('锛') {
+    if trimmed.contains('?') || trimmed.contains('？') {
         return true;
     }
     let lower = trimmed.to_lowercase();
@@ -141,15 +162,14 @@ pub(crate) fn looks_like_question(text: &str) -> bool {
         "can you",
         "could you",
         "would you",
-        "浠€涔",
-        "涓哄暐",
-        "涓轰粈涔",
-        "鎬庝箞",
-        "濡備綍",
-        "鑳戒笉鑳",
-        "鍙笉鍙互",
-        "鏄惁",
-        "鏈夋病鏈",
+        "什么",
+        "为什么",
+        "如何",
+        "怎么",
+        "能不能",
+        "可不可以",
+        "是否",
+        "有没有",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
@@ -243,6 +263,7 @@ fn refresh_lead_system_prompt(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_lead_turn_error(
     client: &reqwest::Client,
     llm: &LlmConfig,
@@ -254,7 +275,7 @@ async fn handle_lead_turn_error(
     err: &anyhow::Error,
 ) {
     let error_text = format_error_chain(err);
-    let issues = vec![
+    let issues = [
         "lead turn failed".to_string(),
         format!("provider={}", llm.provider),
         format!("model={}", llm.model),
@@ -311,11 +332,12 @@ async fn handle_lead_turn_error(
         &issue_refs,
         Some("apply the suggested checks, then retry the command"),
     );
+    let reviewer_message = format!("Lead runtime failure detected.\n\n{}", diagnosis);
     let _ = project.mailbox().send_typed(
         "lead",
         "reviewer",
         "proposal.request",
-        &format!("Lead runtime failure detected.\n\n{}", diagnosis),
+        &reviewer_message,
         None,
         None,
         false,

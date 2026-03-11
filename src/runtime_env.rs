@@ -48,7 +48,7 @@ pub fn llm_timeout_secs_for_provider(provider: &str) -> u64 {
     std::env::var("LLM_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or_else(|| match provider {
+        .unwrap_or(match provider {
             "kimi-coding" => 300,
             _ => LLM_TIMEOUT_SECS,
         })
@@ -166,14 +166,13 @@ fn upsert_env_var(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
 
     for line in existing.lines() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with('#') {
-            if let Some((candidate, _)) = line.split_once('=') {
-                if candidate.trim() == key {
-                    output.push_str(&format!("{}={}\n", key, value));
-                    replaced = true;
-                    continue;
-                }
-            }
+        if !trimmed.starts_with('#')
+            && let Some((candidate, _)) = line.split_once('=')
+            && candidate.trim() == key
+        {
+            output.push_str(&format!("{}={}\n", key, value));
+            replaced = true;
+            continue;
         }
         output.push_str(line);
         output.push('\n');

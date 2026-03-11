@@ -1,10 +1,11 @@
-pub mod app;
-mod app_commands;
-mod app_support;
+pub mod abort_control;
 pub mod activity;
 pub mod agent;
 pub mod agent_tools;
 pub mod anthropic_compat;
+pub mod app;
+mod app_commands;
+mod app_support;
 pub mod cli;
 pub mod config;
 pub mod constants;

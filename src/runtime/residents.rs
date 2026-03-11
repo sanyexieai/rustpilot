@@ -1,5 +1,5 @@
-use crate::prompt_manager::lead_prompt_recovery;
 use crate::project_tools::ProjectContext;
+use crate::prompt_manager::lead_prompt_recovery;
 use crate::resident_agents::{AgentSupervisor, resident_listen_port};
 use crate::runtime::lead::truncate_text;
 
@@ -105,7 +105,11 @@ pub(crate) fn render_team_status(
             let prompt_recovery = if item.role == "ui" {
                 project.ui_surface().ui_prompt_recovery().ok().flatten()
             } else if item.behavior_mode == "ui_surface_planning" {
-                project.ui_surface().planner_prompt_recovery().ok().flatten()
+                project
+                    .ui_surface()
+                    .planner_prompt_recovery()
+                    .ok()
+                    .flatten()
             } else {
                 None
             };
@@ -120,7 +124,15 @@ pub(crate) fn render_team_status(
                 .unwrap_or_default();
             format!(
                 "{}={} status={} backlog={} loop_ms={} note={}{}{} last={}",
-                item.agent_id, running, status, backlog, loop_ms, note, endpoint, prompt_suffix, last_action
+                item.agent_id,
+                running,
+                status,
+                backlog,
+                loop_ms,
+                note,
+                endpoint,
+                prompt_suffix,
+                last_action
             )
         })
         .collect::<Vec<_>>()

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tokio::time::{self, Duration};
 
 use crate::project_tools::ProjectContext;
+use crate::runtime::approval::{approval_mode_name, approval_mode_summary};
 use crate::wire::{WireRequest, WireResponse};
 use crate::wire_exec::execute_ui_wire_request;
 
@@ -89,7 +90,7 @@ async fn api_request_compat(
         &state.agent_id,
         "ui.http.request.received",
     )
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(compat_response_payload(response)))
 }
 
@@ -103,7 +104,7 @@ async fn api_wire_request(
         &state.agent_id,
         "ui.http.wire_request.received",
     )
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(response))
 }
 
@@ -121,7 +122,7 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
         .and_then(|value| serialize_ws_event("system.snapshot", value))
     {
         last_snapshot = snapshot.clone();
-        if sender.send(Message::Text(snapshot.into())).await.is_err() {
+        if sender.send(Message::Text(snapshot)).await.is_err() {
             return;
         }
     }
@@ -149,10 +150,10 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                                 },
                                 Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
                             };
-                            if let Ok(event) = event {
-                                if sender.send(Message::Text(event.into())).await.is_err() {
-                                    break;
-                                }
+                            if let Ok(event) = event
+                                && sender.send(Message::Text(event)).await.is_err()
+                            {
+                                break;
                             }
                         }
                         Ok(message) if message.msg_type == "wire_request" => {
@@ -168,24 +169,24 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                                 },
                                 Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
                             };
-                            if let Ok(event) = event {
-                                if sender.send(Message::Text(event.into())).await.is_err() {
-                                    break;
-                                }
+                            if let Ok(event) = event
+                                && sender.send(Message::Text(event)).await.is_err()
+                            {
+                                break;
                             }
                         }
                         Ok(_) => {
-                            if let Ok(event) = serialize_ws_event("error", json!({ "error": "unsupported client message type" })) {
-                                if sender.send(Message::Text(event.into())).await.is_err() {
-                                    break;
-                                }
+                            if let Ok(event) = serialize_ws_event("error", json!({ "error": "unsupported client message type" }))
+                                && sender.send(Message::Text(event)).await.is_err()
+                            {
+                                break;
                             }
                         }
                         Err(err) => {
-                            if let Ok(event) = serialize_ws_event("error", json!({ "error": err.to_string() })) {
-                                if sender.send(Message::Text(event.into())).await.is_err() {
-                                    break;
-                                }
+                            if let Ok(event) = serialize_ws_event("error", json!({ "error": err.to_string() }))
+                                && sender.send(Message::Text(event)).await.is_err()
+                            {
+                                break;
                             }
                         }
                     }
@@ -203,12 +204,11 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                 if let Ok(snapshot) = build_status_payload(&state)
                     .and_then(stable_snapshot_payload)
                     .and_then(|value| serialize_ws_event("system.snapshot", value))
+                    && snapshot != last_snapshot
                 {
-                    if snapshot != last_snapshot {
-                        last_snapshot = snapshot.clone();
-                        if sender.send(Message::Text(snapshot.into())).await.is_err() {
-                            break;
-                        }
+                    last_snapshot = snapshot.clone();
+                    if sender.send(Message::Text(snapshot)).await.is_err() {
+                        break;
                     }
                 }
             }
@@ -259,10 +259,53 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
                 .generate_from_surface(&model, &surface, &fingerprint)?
         }
     };
+    let approval = project.approval().get_policy()?;
+    let sessions = project
+        .sessions()
+        .list()?
+        .into_iter()
+        .take(8)
+        .map(|item| {
+            json!({
+                "session_id": item.session_id,
+                "label": item.label,
+                "focus": item.focus,
+                "status": item.status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let approval_history = project
+        .approval()
+        .list_recent_blocks(5, None)?
+        .into_iter()
+        .map(|item| {
+            json!({
+                "ts": item.ts,
+                "actor_id": item.actor_id,
+                "tool_name": item.tool_name,
+                "command": item.command,
+                "reason_code": item.reason_code,
+                "message": item.message,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(json!({
         "agent_id": state.agent_id,
         "port": state.port,
+        "approval_mode": approval_mode_name(approval.mode),
+        "approval_summary": approval_mode_summary(approval.mode),
+        "approval_allowed_tools": crate::runtime::approval::approval_allowed_tools(approval.mode),
+        "approval_last_block": approval.last_block.as_ref().map(|block| json!({
+            "ts": block.ts,
+            "actor_id": block.actor_id,
+            "tool_name": block.tool_name,
+            "command": block.command,
+            "reason_code": block.reason_code,
+            "message": block.message,
+        })),
+        "approval_history": approval_history,
+        "sessions": sessions,
         "schema": schema,
         "model": model,
     }))

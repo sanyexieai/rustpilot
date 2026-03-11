@@ -34,6 +34,9 @@ pub struct BashTool;
 
 impl BashTool {
     pub fn run(command: &str) -> anyhow::Result<String> {
+        if is_dangerous_command(command) {
+            anyhow::bail!("refused dangerous shell command");
+        }
         run_shell_command(command, None)
     }
 }
@@ -54,6 +57,48 @@ pub fn is_dangerous_command(command: &str) -> bool {
         .chain(UNIX_TOKENS.iter())
         .chain(WINDOWS_TOKENS.iter())
         .any(|token| command.contains(token))
+}
+
+pub fn is_read_only_command(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.contains("&&")
+        || normalized.contains("||")
+        || normalized.contains(';')
+        || normalized.contains('|')
+        || normalized.contains('>')
+        || normalized.contains(">>")
+    {
+        return false;
+    }
+
+    const PREFIXES: &[&str] = &[
+        "pwd",
+        "cd ",
+        "ls",
+        "dir",
+        "find ",
+        "rg ",
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "git rev-parse",
+        "git remote -v",
+        "cat ",
+        "type ",
+        "get-content ",
+        "echo ",
+        "which ",
+        "where ",
+    ];
+
+    PREFIXES.iter().any(|prefix| {
+        normalized == *prefix || normalized.starts_with(&format!("{} ", prefix.trim_end()))
+    })
 }
 
 pub fn read_file(args: &ReadFileArgs) -> anyhow::Result<String> {
@@ -201,4 +246,24 @@ fn wrap_powershell_command(command: &str) -> String {
 $OutputEncoding = [Console]::OutputEncoding; {}",
         command
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_read_only_command;
+
+    #[test]
+    fn read_only_command_detection_accepts_common_queries() {
+        assert!(is_read_only_command("pwd"));
+        assert!(is_read_only_command("git status"));
+        assert!(is_read_only_command("rg todo src"));
+        assert!(is_read_only_command("Get-Content README.md"));
+    }
+
+    #[test]
+    fn read_only_command_detection_rejects_writes_and_chaining() {
+        assert!(!is_read_only_command("git add README.md"));
+        assert!(!is_read_only_command("echo hi > out.txt"));
+        assert!(!is_read_only_command("pwd && git status"));
+    }
 }

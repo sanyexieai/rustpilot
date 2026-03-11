@@ -63,6 +63,12 @@ impl TerminalCreateRequest {
     }
 }
 
+impl Default for TerminalCreateRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 trait LiveTerminalBackend: Send {
     fn write(&mut self, input: &[u8]) -> anyhow::Result<()>;
     fn try_wait(&mut self) -> anyhow::Result<Option<i32>>;
@@ -531,10 +537,10 @@ fn upsert_session(items: &mut Vec<TerminalSessionInfo>, info: TerminalSessionInf
 }
 
 fn refresh_state(entry: &mut SessionEntry) -> anyhow::Result<()> {
-    if matches!(entry.state, SessionState::Running) {
-        if let Some(code) = entry.backend.try_wait()? {
-            entry.state = SessionState::Exited(code);
-        }
+    if matches!(entry.state, SessionState::Running)
+        && let Some(code) = entry.backend.try_wait()?
+    {
+        entry.state = SessionState::Exited(code);
     }
     Ok(())
 }

@@ -390,8 +390,8 @@ fn infer_task_role_hint(subject: &str, description: &str) -> String {
     if text.contains("design")
         || text.contains("ui")
         || text.contains("ux")
-        || text.contains("页面")
-        || text.contains("样式")
+        || text.contains("椤甸潰")
+        || text.contains("鏍峰紡")
     {
         return "design".to_string();
     }

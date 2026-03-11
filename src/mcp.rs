@@ -52,19 +52,10 @@ struct LoadedMcpTool {
     dir: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct McpCache {
     fingerprint: u64,
     tools: Vec<LoadedMcpTool>,
-}
-
-impl Default for McpCache {
-    fn default() -> Self {
-        Self {
-            fingerprint: 0,
-            tools: Vec::new(),
-        }
-    }
 }
 
 fn cache() -> &'static Mutex<McpCache> {
@@ -241,11 +232,11 @@ fn compute_dir_fingerprint(base: &Path) -> anyhow::Result<u64> {
         relative.hash(&mut hasher);
         let meta = fs::metadata(base.join(&relative))?;
         meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified() {
-            if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                duration.as_secs().hash(&mut hasher);
-                duration.subsec_nanos().hash(&mut hasher);
-            }
+        if let Ok(modified) = meta.modified()
+            && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
+        {
+            duration.as_secs().hash(&mut hasher);
+            duration.subsec_nanos().hash(&mut hasher);
         }
     }
     Ok(hasher.finish())

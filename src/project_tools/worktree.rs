@@ -71,10 +71,10 @@ impl WorktreeManager {
         if self.find(name)?.is_some() {
             anyhow::bail!("索引中已存在 worktree '{}'", name);
         }
-        if let Some(task_id) = task_id {
-            if !self.tasks.exists(task_id) {
-                anyhow::bail!("任务 {} 不存在", task_id);
-            }
+        if let Some(task_id) = task_id
+            && !self.tasks.exists(task_id)
+        {
+            anyhow::bail!("任务 {} 不存在", task_id);
         }
 
         let path = self.dir.join(name);
@@ -136,7 +136,7 @@ impl WorktreeManager {
 
     fn add_worktree_with_branch_fallback(
         &self,
-        path: &PathBuf,
+        path: &std::path::Path,
         branch: &str,
         base_ref: &str,
     ) -> anyhow::Result<String> {
@@ -289,22 +289,20 @@ impl WorktreeManager {
             return Err(err);
         }
 
-        if complete_task {
-            if let Some(task_id) = wt.task_id {
-                let before: TaskRecord = serde_json::from_str(&self.tasks.get(task_id)?)?;
-                self.tasks.update(task_id, Some("completed"), None)?;
-                self.tasks.unbind_worktree(task_id)?;
-                self.events.emit(
-                    "task.completed",
-                    json!({
-                        "id": task_id,
-                        "subject": before.subject,
-                        "status": "completed",
-                    }),
-                    json!({ "name": wt.name }),
-                    None,
-                )?;
-            }
+        if complete_task && let Some(task_id) = wt.task_id {
+            let before: TaskRecord = serde_json::from_str(&self.tasks.get(task_id)?)?;
+            self.tasks.update(task_id, Some("completed"), None)?;
+            self.tasks.unbind_worktree(task_id)?;
+            self.events.emit(
+                "task.completed",
+                json!({
+                    "id": task_id,
+                    "subject": before.subject,
+                    "status": "completed",
+                }),
+                json!({ "name": wt.name }),
+                None,
+            )?;
         }
 
         let mut index = self.load_index()?;

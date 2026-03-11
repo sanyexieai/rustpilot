@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -686,18 +686,18 @@ fn handle_ui_surface_planning_behavior(
                 .ui_surface()
                 .adapt_planner_prompt_for_error(&error_text)
                 .ok();
-            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed) {
-                if let Some(recovery) = adaptation.recovery.as_ref() {
-                    let _ = project.prompt_history().append(
-                        "ui-surface",
-                        &config.agent_id,
-                        &adaptation.file_path.display().to_string(),
-                        &recovery.strategy,
-                        &recovery.trigger,
-                        &adaptation.before,
-                        &adaptation.after,
-                    );
-                }
+            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed)
+                && let Some(recovery) = adaptation.recovery.as_ref()
+            {
+                let _ = project.prompt_history().append(
+                    "ui-surface",
+                    &config.agent_id,
+                    &adaptation.file_path.display().to_string(),
+                    &recovery.strategy,
+                    &recovery.trigger,
+                    &adaptation.before,
+                    &adaptation.after,
+                );
             }
             if adaptation.as_ref().is_some_and(|item| item.changed) {
                 let retried_prompt = project.ui_surface().planner_prompt_text()?;
@@ -899,18 +899,18 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
                 .ui_surface()
                 .adapt_ui_prompt_for_error(&error_text)
                 .ok();
-            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed) {
-                if let Some(recovery) = adaptation.recovery.as_ref() {
-                    let _ = project.prompt_history().append(
-                        "ui-schema",
-                        &config.agent_id,
-                        &adaptation.file_path.display().to_string(),
-                        &recovery.strategy,
-                        &recovery.trigger,
-                        &adaptation.before,
-                        &adaptation.after,
-                    );
-                }
+            if let Some(adaptation) = adaptation.as_ref().filter(|item| item.changed)
+                && let Some(recovery) = adaptation.recovery.as_ref()
+            {
+                let _ = project.prompt_history().append(
+                    "ui-schema",
+                    &config.agent_id,
+                    &adaptation.file_path.display().to_string(),
+                    &recovery.strategy,
+                    &recovery.trigger,
+                    &adaptation.before,
+                    &adaptation.after,
+                );
             }
             if adaptation.as_ref().is_some_and(|item| item.changed) {
                 let retried_prompt = project.ui_surface().prompt_text()?;

@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+﻿use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -35,6 +35,7 @@ impl PromptHistoryManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn append(
         &self,
         agent_scope: &str,

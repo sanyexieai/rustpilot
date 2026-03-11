@@ -1,3 +1,4 @@
+use crate::abort_control::SessionAbortLease;
 use anyhow::Context;
 
 use crate::activity::{ActivityHandle, WaitHeartbeat, set_activity};
@@ -11,8 +12,12 @@ use crate::external_tools::{external_tool_definitions, handle_external_tool_call
 use crate::llm_profiles::LlmApiKind;
 use crate::mcp::{handle_mcp_tool_call, mcp_tool_definitions};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
-use crate::project_tools::{ProjectContext, handle_project_tool_call, project_tool_definitions};
+use crate::project_tools::{
+    ApprovalMode, ProjectContext, handle_project_tool_call, project_tool_definitions,
+};
+use crate::shell_file_tools::{is_dangerous_command, is_read_only_command};
 use crate::wire::WireToolSummary;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct AgentProgressReport {
@@ -26,6 +31,7 @@ async fn send_llm_request(
     client: &reqwest::Client,
     config: &LlmConfig,
     request: &ChatRequest,
+    abort: Option<&SessionAbortLease>,
 ) -> anyhow::Result<reqwest::Response> {
     let mut attempt = 0;
     let mut delay_ms = RETRY_INITIAL_DELAY_MS;
@@ -33,49 +39,57 @@ async fn send_llm_request(
     loop {
         attempt += 1;
 
-        let response = match match config.api_kind {
-            LlmApiKind::OpenAiChatCompletions => {
-                let url = format!(
-                    "{}/chat/completions",
-                    config.api_base_url.trim_end_matches('/')
-                );
-                client
-                    .post(&url)
-                    .bearer_auth(&config.api_key)
-                    .json(request)
-                    .send()
-                    .await
+        if abort.as_ref().is_some_and(|lease| lease.is_cancelled()) {
+            anyhow::bail!("request aborted");
+        }
+
+        let request_future = async {
+            match config.api_kind {
+                LlmApiKind::OpenAiChatCompletions => {
+                    let url = format!(
+                        "{}/chat/completions",
+                        config.api_base_url.trim_end_matches('/')
+                    );
+                    client
+                        .post(&url)
+                        .bearer_auth(&config.api_key)
+                        .json(request)
+                        .send()
+                        .await
+                }
+                LlmApiKind::AnthropicMessages => {
+                    let url = format!(
+                        "{}/messages?beta=true",
+                        config.api_base_url.trim_end_matches('/')
+                    );
+                    let anthropic_request = anthropic_compat::build_request(
+                        &config.model,
+                        &request.messages,
+                        request.tools.as_deref(),
+                        request.tool_choice.as_ref(),
+                        request.temperature,
+                    );
+                    client
+                        .post(&url)
+                        .bearer_auth(&config.api_key)
+                        .header("x-api-key", &config.api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header(
+                            "anthropic-beta",
+                            "claude-code-20250219,interleaved-thinking-2025-05-14",
+                        )
+                        .header("anthropic-dangerous-direct-browser-access", "true")
+                        .header("x-app", "cli")
+                        .json(&anthropic_request)
+                        .send()
+                        .await
+                }
             }
-            LlmApiKind::AnthropicMessages => {
-                let url = format!(
-                    "{}/messages?beta=true",
-                    config.api_base_url.trim_end_matches('/')
-                );
-                let anthropic_request = anthropic_compat::build_request(
-                    &config.model,
-                    &request.messages,
-                    request.tools.as_deref(),
-                    request.tool_choice.as_ref(),
-                    request.temperature,
-                );
-                client
-                    .post(&url)
-                    .bearer_auth(&config.api_key)
-                    .header("x-api-key", &config.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header(
-                        "anthropic-beta",
-                        "claude-code-20250219,interleaved-thinking-2025-05-14",
-                    )
-                    .header("anthropic-dangerous-direct-browser-access", "true")
-                    .header("x-app", "cli")
-                    .json(&anthropic_request)
-                    .send()
-                    .await
-            }
-        } {
-            Ok(response) => response,
-            Err(err) => {
+        };
+
+        let response = match await_with_abort(request_future, abort).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
                 let should_retry = err.is_timeout() || err.is_connect() || err.is_request();
                 if !should_retry || attempt >= RETRY_MAX_ATTEMPTS {
                     return Err(err).context("LLM request failed");
@@ -85,10 +99,12 @@ async fn send_llm_request(
                     err, delay_ms, attempt, RETRY_MAX_ATTEMPTS
                 );
                 let jitter = (rand_u32() % 500) as u64;
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms + jitter)).await;
+                sleep_with_abort(tokio::time::Duration::from_millis(delay_ms + jitter), abort)
+                    .await?;
                 delay_ms = (delay_ms * 2).min(RETRY_MAX_DELAY_MS);
                 continue;
             }
+            Err(err) => return Err(err),
         };
 
         let status = response.status();
@@ -118,9 +134,31 @@ async fn send_llm_request(
         );
 
         let jitter = (rand_u32() % 500) as u64;
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms + jitter)).await;
+        sleep_with_abort(tokio::time::Duration::from_millis(delay_ms + jitter), abort).await?;
         delay_ms = (delay_ms * 2).min(RETRY_MAX_DELAY_MS);
     }
+}
+
+async fn await_with_abort<T>(
+    future: impl std::future::Future<Output = T>,
+    abort: Option<&SessionAbortLease>,
+) -> anyhow::Result<T> {
+    if let Some(lease) = abort {
+        tokio::select! {
+            output = future => Ok(output),
+            _ = lease.cancelled() => anyhow::bail!("request aborted"),
+        }
+    } else {
+        Ok(future.await)
+    }
+}
+
+async fn sleep_with_abort(
+    duration: tokio::time::Duration,
+    abort: Option<&SessionAbortLease>,
+) -> anyhow::Result<()> {
+    await_with_abort(tokio::time::sleep(duration), abort).await?;
+    Ok(())
 }
 
 async fn parse_llm_response(
@@ -162,6 +200,7 @@ fn rand_u32() -> u32 {
     (nanos.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT)) % MOD
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -170,8 +209,12 @@ pub async fn run_agent_loop(
     tools: &[Tool],
     progress: ActivityHandle,
     report: Option<&AgentProgressReport>,
+    abort: Option<&SessionAbortLease>,
 ) -> anyhow::Result<()> {
     for turn in 0..MAX_AGENT_TURNS {
+        if abort.as_ref().is_some_and(|lease| lease.is_cancelled()) {
+            anyhow::bail!("request aborted");
+        }
         set_activity(&progress, turn + 1, "waiting for model response", None);
         emit_progress(
             project,
@@ -190,7 +233,7 @@ pub async fn run_agent_loop(
 
         println!("> [model] turn {}", turn + 1);
         let heartbeat = WaitHeartbeat::start(progress.clone(), format!("model turn {}", turn + 1));
-        let response = send_llm_request(client, config, &request).await?;
+        let response = send_llm_request(client, config, &request, abort).await?;
         drop(heartbeat);
 
         let assistant = parse_llm_response(response, config.api_kind).await?;
@@ -327,6 +370,7 @@ fn append_tool_summaries(into: &mut Vec<WireToolSummary>, source: &str, tools: V
 }
 
 pub fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Result<String> {
+    guard_tool_policy(project, call)?;
     if let Some(output) = handle_builtin_tool_call(call)? {
         return Ok(output);
     }
@@ -340,6 +384,75 @@ pub fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Re
         return Ok(output);
     }
     anyhow::bail!("unknown tool: {}", call.function.name)
+}
+
+fn guard_tool_policy(project: &ProjectContext, call: &ToolCall) -> anyhow::Result<()> {
+    let policy = project.approval().get_policy()?;
+    let actor_id = approval_actor_id();
+    if !matches!(call.function.name.as_str(), "bash" | "worktree_run") {
+        return Ok(());
+    }
+    let command =
+        extract_command(&call.function.arguments).unwrap_or_else(|| "<unknown>".to_string());
+    if is_dangerous_command(&command) {
+        let message = format!(
+            "tool '{}' is blocked because the command is classified as dangerous: {}",
+            call.function.name, command
+        );
+        let _ = project.approval().record_block(
+            &actor_id,
+            &call.function.name,
+            &command,
+            "dangerous",
+            &message,
+        );
+        anyhow::bail!("{}", message);
+    }
+    if policy.mode == ApprovalMode::ReadOnly && !is_read_only_command(&command) {
+        let message = format!(
+            "tool '{}' is blocked by approval mode=read_only. Only clearly read-only shell commands are allowed; use /shell for manual execution: {}",
+            call.function.name, command
+        );
+        let _ = project.approval().record_block(
+            &actor_id,
+            &call.function.name,
+            &command,
+            "read_only",
+            &message,
+        );
+        anyhow::bail!("{}", message);
+    }
+    if policy.mode == ApprovalMode::Manual {
+        let message = format!(
+            "tool '{}' is blocked by approval mode=manual. Run it explicitly with /shell if you want to execute: {}",
+            call.function.name, command
+        );
+        let _ = project.approval().record_block(
+            &actor_id,
+            &call.function.name,
+            &command,
+            "manual",
+            &message,
+        );
+        anyhow::bail!("{}", message);
+    }
+    Ok(())
+}
+
+fn extract_command(arguments: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(arguments).ok()?;
+    parsed
+        .get("command")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn approval_actor_id() -> String {
+    std::env::var("RUSTPILOT_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "lead".to_string())
 }
 
 pub async fn diagnose_agent_failure(
@@ -370,7 +483,7 @@ pub async fn diagnose_agent_failure(
         temperature: Some(0.1),
     };
 
-    let response = send_llm_request(client, config, &request).await?;
+    let response = send_llm_request(client, config, &request, None).await?;
     let message = parse_llm_response(response, config.api_kind).await?;
     Ok(message
         .content

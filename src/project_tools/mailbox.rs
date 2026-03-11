@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -51,6 +51,7 @@ impl Mailbox {
         self.send_typed(from, to, "message", message, task_id, None, false, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn send_typed(
         &self,
         from: &str,

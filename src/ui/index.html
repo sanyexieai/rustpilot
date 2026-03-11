@@ -33,6 +33,10 @@
     .hero-actions { display: flex; align-items: center; gap: 10px; }
     .hero-actions button { width: auto; min-width: 110px; }
     .hero-actions .meta { margin-top: 0; font-size: 12px; }
+    .hero-actions input, .hero-actions select {
+      border-radius: 12px; border: 1px solid var(--line); padding: 8px 10px;
+      background: rgba(255,255,255,0.92); color: var(--ink); font: inherit;
+    }
     .stack { display: grid; gap: 16px; }
     .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
     .pill, .card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--line); box-shadow: 0 12px 32px rgba(23,32,37,0.07); }
@@ -79,6 +83,8 @@
     .session-list small { display: block; color: var(--muted); margin-top: 4px; }
     .tool-form { display: grid; grid-template-columns: 180px 1fr 120px; gap: 10px; margin-bottom: 10px; }
     .tool-form[hidden] { display: none; }
+    .inline-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+    .inline-actions button { width: auto; min-width: 0; padding: 8px 12px; }
     .ok { color: var(--accent-2); min-height: 20px; font-size: 13px; margin-top: 6px; }
     @media (max-width: 980px) { .stats { grid-template-columns: repeat(3, 1fr); } .row { grid-template-columns: 1fr; } .kv { grid-template-columns: 1fr; } }
     @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
@@ -90,11 +96,27 @@
       <div class="hero-bar">
         <h1 id="title">Rustpilot 控制台</h1>
         <div class="hero-actions">
+          <input id="session-label" placeholder="new session label" />
+          <button id="create-session" type="button">新建会话</button>
+          <select id="approval-mode">
+            <option value="auto">approval:auto</option>
+            <option value="read_only">approval:read_only</option>
+            <option value="manual">approval:manual</option>
+          </select>
+          <button id="approval-history" type="button">审批历史</button>
+          <span class="meta" id="approval-hint">审批策略加载中...</span>
           <button id="reconnect" type="button">重新连接</button>
           <span class="meta" id="refresh-state">实时通道连接中...</span>
         </div>
       </div>
       <p id="subtitle">加载中...</p>
+      <div class="inline-actions">
+        <button class="secondary" data-approval-filter="all" type="button">all</button>
+        <button class="secondary" data-approval-filter="dangerous" type="button">dangerous</button>
+        <button class="secondary" data-approval-filter="read_only" type="button">read_only</button>
+        <button class="secondary" data-approval-filter="manual" type="button">manual</button>
+      </div>
+      <ul class="session-list" id="approval-results"></ul>
     </section>
     <section id="sections" class="stack"></section>
   </div>
@@ -433,17 +455,21 @@
       if (sessionResults && sessionResults.dataset.bound !== '1') {
         sessionResults.dataset.bound = '1';
         sessionResults.addEventListener('click', (event) => {
-          const button = event.target.closest('[data-session-focus]');
-          if (!button || !targetSelect) return;
-          const focus = button.dataset.sessionFocus || '';
-          if (!focus) return;
-          const option = Array.from(targetSelect.options).find((item) => item.value === focus);
-          if (option) {
-            targetSelect.value = focus;
-            document.getElementById('result').textContent = `focus set to ${option.text}`;
-          } else {
-            document.getElementById('result').textContent = `unknown focus: ${focus}`;
+          const button = event.target.closest('[data-session-id]');
+          if (!button) return;
+          const sessionId = button.dataset.sessionId || '';
+          if (!sessionId) return;
+          if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) {
+            document.getElementById('result').textContent = labels.error_request || '????????';
+            return;
           }
+          window.uiSocket.send(JSON.stringify({
+            type: 'wire_request',
+            payload: {
+              type: 'session_use',
+              session_id: sessionId
+            }
+          }));
         });
       }
     }
@@ -480,7 +506,7 @@
       }
       root.innerHTML = sessions.map((item) => `
         <li>
-          <button type="button" data-session-focus="${item.focus || ''}">
+          <button type="button" data-session-id="${item.session_id || ''}">
             <strong>${item.label || item.session_id}</strong>
             <small>id: ${item.session_id}</small>
             <small>focus: ${item.focus || '-'}</small>
@@ -494,8 +520,46 @@
       if (root) root.innerHTML = '';
     }
 
+    function renderApprovalHistory(items) {
+      const root = document.getElementById('approval-results');
+      if (!root) return;
+      if (!items || !items.length) {
+        root.innerHTML = '<li><strong>approval history</strong><small>no blocked commands yet</small></li>';
+        return;
+      }
+      root.innerHTML = items.map((item) => `
+        <li>
+          <button type="button">
+            <strong>${item.reason_code || 'unknown'} · ${item.actor_id || '-'} · ${item.tool_name || '-'}</strong>
+            <small>${formatTimestamp(item.ts)}</small>
+            <small>${item.command || '-'}</small>
+            <small>${item.message || '-'}</small>
+          </button>
+        </li>`).join('');
+    }
+
+    function requestApprovalHistory() {
+      if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) return;
+      window.uiSocket.send(JSON.stringify({
+        type: 'wire_request',
+        payload: {
+          type: 'approval_history',
+          limit: 10,
+          reason: approvalFilter.value === 'all' ? null : approvalFilter.value
+        }
+      }));
+    }
+
     const pendingSnapshot = { value: null };
     const currentSnapshot = { value: null };
+    const approvalFilter = { value: 'all' };
+
+    function formatTimestamp(ts) {
+      if (!ts) return '-';
+      const date = new Date(ts * 1000);
+      if (Number.isNaN(date.getTime())) return String(ts);
+      return date.toLocaleString();
+    }
 
     function ensureSectionShells(schema) {
       const root = document.getElementById('sections');
@@ -557,6 +621,24 @@
       patchSections(data.schema || {}, data.model || {});
       currentSnapshot.value = data;
       bindComposer(data.schema || {});
+      const approval = document.getElementById('approval-mode');
+      const approvalHint = document.getElementById('approval-hint');
+      if (approval && data.approval_mode) {
+        approval.value = data.approval_mode;
+      }
+      if (approvalHint) {
+        const tools = Array.isArray(data.approval_allowed_tools) ? data.approval_allowed_tools.join(', ') : '-';
+        const lastBlock = data.approval_last_block
+          ? ` | last block: ${data.approval_last_block.reason_code} ${data.approval_last_block.actor_id} ${data.approval_last_block.tool_name} ${data.approval_last_block.command}`
+          : '';
+        approvalHint.textContent = `${data.approval_summary || '审批策略未知'} | allowed: ${tools}${lastBlock}`;
+      }
+      if (Array.isArray(data.approval_history)) {
+        renderApprovalHistory(data.approval_history);
+      }
+      if (Array.isArray(data.sessions)) {
+        renderSessionList(data.sessions);
+      }
       const message = document.getElementById('message');
       const priority = document.getElementById('priority');
       const target = document.getElementById('target');
@@ -624,6 +706,25 @@
             }]);
             return;
           }
+          if (payload.type === 'approval_status') {
+            document.getElementById('result').textContent =
+              `approval: ${payload.mode || '-'} | ${payload.summary || '-'} | allowed: ${(payload.allowed_tools || []).join(', ') || '-'}${payload.last_block ? ` | last block: ${payload.last_block.reason_code} ${payload.last_block.actor_id} ${payload.last_block.tool_name} ${payload.last_block.command}` : ''}`;
+            const approval = document.getElementById('approval-mode');
+            const approvalHint = document.getElementById('approval-hint');
+            if (approval && payload.mode) {
+              approval.value = payload.mode;
+            }
+            if (approvalHint) {
+              approvalHint.textContent =
+                `${payload.summary || '审批策略未知'} | allowed: ${(payload.allowed_tools || []).join(', ') || '-'}${payload.last_block ? ` | last block: ${payload.last_block.reason_code} ${payload.last_block.actor_id} ${payload.last_block.tool_name} ${payload.last_block.command}` : ''}`;
+            }
+            return;
+          }
+          if (payload.type === 'approval_history') {
+            renderApprovalHistory(payload.items || []);
+            document.getElementById('result').textContent = `approval history: ${(payload.items || []).length}`;
+            return;
+          }
           if (payload.type === 'error') {
             document.getElementById('result').textContent = payload.message || '请求失败';
             return;
@@ -649,6 +750,40 @@
         window.uiSocket.close();
       }
       connectSocket();
+    });
+
+    document.getElementById('create-session').addEventListener('click', () => {
+      if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) return;
+      const label = document.getElementById('session-label').value.trim();
+      window.uiSocket.send(JSON.stringify({
+        type: 'wire_request',
+        payload: {
+          type: 'session_create',
+          label: label || null
+        }
+      }));
+    });
+
+    document.getElementById('approval-mode').addEventListener('change', (event) => {
+      if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) return;
+      window.uiSocket.send(JSON.stringify({
+        type: 'wire_request',
+        payload: {
+          type: 'approval_set',
+          mode: event.target.value
+        }
+      }));
+    });
+
+    document.getElementById('approval-history').addEventListener('click', () => {
+      requestApprovalHistory();
+    });
+
+    document.querySelectorAll('[data-approval-filter]').forEach((button) => {
+      button.addEventListener('click', () => {
+        approvalFilter.value = button.dataset.approvalFilter || 'all';
+        requestApprovalHistory();
+      });
     });
 
     connectSocket();

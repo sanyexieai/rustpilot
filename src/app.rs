@@ -1,9 +1,8 @@
-use crate::app_commands::{LoopDirective, process_cli_action};
+use crate::activity::new_activity_handle;
+use crate::app_commands::{CliRuntime, LoopDirective, process_cli_action};
 use crate::app_support::{
     InteractionMode, load_repo_env, parse_resident_args, parse_teammate_args, pump_lead_mailbox,
 };
-use anyhow::Context;
-use crate::activity::new_activity_handle;
 use crate::cli::handle_cli_command;
 use crate::config::{LlmConfig, default_llm_user_agent};
 use crate::openai_compat::Message;
@@ -17,13 +16,17 @@ use crate::runtime_env::{
 use crate::skills::SkillRegistry;
 use crate::team::run_teammate_once;
 use crate::wire::{WireEvent, WireFrame, WireResponse};
-use crate::wire_exec::execute_wire_request;
+use crate::wire_exec::{WireRuntime, execute_wire_request};
+use anyhow::Context;
 use std::io::{self, Write};
 use std::time::Duration;
 
 const AUTO_TEAM_MAX_PARALLEL: usize = 2;
 
 pub async fn run() -> anyhow::Result<()> {
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|value| value == "teammate-run") {
         let teammate = parse_teammate_args(&args[2..])?;
@@ -122,15 +125,28 @@ pub async fn run() -> anyhow::Result<()> {
     let mut lead_cursor = 0usize;
     let mut interaction_mode = InteractionMode::Lead;
     let system_prompt = render_lead_system_prompt(&repo_root)?;
-    let mut messages = vec![Message {
-        role: "system".to_string(),
-        content: Some(system_prompt),
-        tool_call_id: None,
-        tool_calls: None,
-    }];
+    let default_session =
+        project
+            .sessions()
+            .ensure_session("cli-main", Some("primary"), "lead", "active")?;
+    let mut current_session_id = default_session.session_id.clone();
+    let mut current_session_label = default_session.label.clone();
+    let mut messages = project.sessions().load_messages(&current_session_id)?;
+    if messages.is_empty() {
+        messages.push(Message {
+            role: "system".to_string(),
+            content: Some(system_prompt.clone()),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        project
+            .sessions()
+            .save_messages(&current_session_id, &messages)?;
+    }
 
     println!("repo root: {}", repo_root.display());
     println!("focus: {}", interaction_mode.label());
+    println!("session: {}", current_session_id);
     if !project.worktrees().git_available {
         println!("warning: current directory is not a git repository");
     }
@@ -153,15 +169,30 @@ pub async fn run() -> anyhow::Result<()> {
         if let Some(action) = handle_cli_command(trimmed, &project, &progress, &skills)? {
             let outcome = process_cli_action(
                 action,
-                &repo_root,
-                &project,
-                &mut supervisor,
-                &mut skills,
-                &mut interaction_mode,
-                AUTO_TEAM_MAX_PARALLEL,
+                CliRuntime {
+                    repo_root: &repo_root,
+                    project: &project,
+                    supervisor: &mut supervisor,
+                    skills: &mut skills,
+                    current_session_id: &mut current_session_id,
+                    current_session_label: &mut current_session_label,
+                    messages: &mut messages,
+                    system_prompt: &system_prompt,
+                    interaction_mode: &mut interaction_mode,
+                    auto_team_max_parallel: AUTO_TEAM_MAX_PARALLEL,
+                },
             )
             .await?;
             emit_wire_frames(&outcome.frames);
+            project.sessions().update_state(
+                &current_session_id,
+                current_session_label.as_deref(),
+                &interaction_mode.label(),
+                "active",
+            )?;
+            project
+                .sessions()
+                .save_messages(&current_session_id, &messages)?;
             match outcome.directive {
                 LoopDirective::Continue => continue,
                 LoopDirective::Exit => break,
@@ -173,18 +204,32 @@ pub async fn run() -> anyhow::Result<()> {
                 input: trimmed.to_string(),
                 focus: Some(interaction_mode.label()),
             },
-            &repo_root,
-            &client,
-            &llm,
-            &project,
-            &mut messages,
-            &progress,
-            &mut supervisor,
-            &mut lead_cursor,
-            &interaction_mode,
+            WireRuntime {
+                repo_root: &repo_root,
+                client: &client,
+                llm: &llm,
+                project: &project,
+                messages: &mut messages,
+                progress: &progress,
+                supervisor: &mut supervisor,
+                lead_cursor: &mut lead_cursor,
+                interaction_mode: &interaction_mode,
+                sessions: project.sessions(),
+                current_session_id: &mut current_session_id,
+                current_session_label: &mut current_session_label,
+            },
         )
         .await?;
         emit_wire_frames(&outcome.frames);
+        project.sessions().update_state(
+            &current_session_id,
+            current_session_label.as_deref(),
+            &interaction_mode.label(),
+            "active",
+        )?;
+        project
+            .sessions()
+            .save_messages(&current_session_id, &messages)?;
     }
 
     supervisor.stop_all();
@@ -201,8 +246,19 @@ fn emit_wire_frames(frames: &[WireFrame]) {
             },
             WireFrame::Event { event } => match &event.payload {
                 WireEvent::Error { message } => println!("error: {}", message),
-                WireEvent::SessionUpdated { focus, status } => {
-                    println!("[session] focus={} status={}", focus, status)
+                WireEvent::SessionUpdated {
+                    focus,
+                    status,
+                    abortable,
+                } => {
+                    if let Some(abortable) = abortable {
+                        println!(
+                            "[session] focus={} status={} abortable={}",
+                            focus, status, abortable
+                        )
+                    } else {
+                        println!("[session] focus={} status={}", focus, status)
+                    }
                 }
                 other => println!("{}", serde_json::to_string(other).unwrap_or_default()),
             },
