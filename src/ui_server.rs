@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 use tokio::time::{self, Duration};
 
 use crate::project_tools::ProjectContext;
+use crate::wire::{WireRequest, WireResponse};
+use crate::wire_exec::execute_ui_wire_request;
 
 #[derive(Clone)]
 struct UiServerState {
@@ -56,7 +58,8 @@ pub fn spawn_ui_server(
             let app = Router::new()
                 .route("/", get(index))
                 .route("/api/status", get(api_status))
-                .route("/api/request", post(api_request))
+                .route("/api/request", post(api_request_compat))
+                .route("/api/wire", post(api_wire_request))
                 .route("/ws", get(ws_handler))
                 .with_state(state.clone());
             if let Err(err) = axum::serve(listener, app).await {
@@ -76,13 +79,32 @@ async fn api_status(
     Ok(Json(build_status_payload(&state).map_err(internal_error)?))
 }
 
-async fn api_request(
+async fn api_request_compat(
     State(state): State<UiServerState>,
     Json(payload): Json<UiRequestPayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let result = dispatch_request(&state, payload, "ui.http.request.received")
+    let response = execute_ui_wire_request(
+        compat_payload_to_wire_request(payload),
+        &state.repo_root,
+        &state.agent_id,
+        "ui.http.request.received",
+    )
         .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    Ok(Json(result))
+    Ok(Json(compat_response_payload(response)))
+}
+
+async fn api_wire_request(
+    State(state): State<UiServerState>,
+    Json(request): Json<WireRequest>,
+) -> Result<Json<WireResponse>, (StatusCode, String)> {
+    let response = execute_ui_wire_request(
+        request,
+        &state.repo_root,
+        &state.agent_id,
+        "ui.http.wire_request.received",
+    )
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    Ok(Json(response))
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<UiServerState>) -> impl IntoResponse {
@@ -110,9 +132,41 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<UiSocketClientMessage>(&text) {
                         Ok(message) if message.msg_type == "dispatch_request" => {
-                            let event = match dispatch_request(&state, message.payload, "ui.ws.request.received") {
-                                Ok(payload) => serialize_ws_event("request.accepted", payload),
-                                Err(err) => serialize_ws_event("request.rejected", json!({ "error": err.to_string() })),
+                            let event = match serde_json::from_value::<UiRequestPayload>(message.payload) {
+                                Ok(payload) => match execute_ui_wire_request(
+                                    compat_payload_to_wire_request(payload),
+                                    &state.repo_root,
+                                    &state.agent_id,
+                                    "ui.ws.request.received",
+                                ) {
+                                    Ok(response) => {
+                                        serialize_ws_event(
+                                            "wire.response",
+                                            serde_json::to_value(response).unwrap_or_else(|_| json!({"error":"serialize failed"})),
+                                        )
+                                    }
+                                    Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
+                                },
+                                Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
+                            };
+                            if let Ok(event) = event {
+                                if sender.send(Message::Text(event.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(message) if message.msg_type == "wire_request" => {
+                            let event = match serde_json::from_value::<WireRequest>(message.payload) {
+                                Ok(request) => match execute_ui_wire_request(
+                                    request,
+                                    &state.repo_root,
+                                    &state.agent_id,
+                                    "ui.ws.wire_request.received",
+                                ) {
+                                    Ok(response) => serialize_ws_event("wire.response", serde_json::to_value(response).unwrap_or_else(|_| json!({"error":"serialize failed"}))),
+                                    Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
+                                },
+                                Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
                             };
                             if let Ok(event) = event {
                                 if sender.send(Message::Text(event.into())).await.is_err() {
@@ -175,7 +229,7 @@ struct UiRequestPayload {
 struct UiSocketClientMessage {
     #[serde(rename = "type")]
     msg_type: String,
-    payload: UiRequestPayload,
+    payload: Value,
 }
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
@@ -240,22 +294,7 @@ fn stable_snapshot_payload(mut payload: Value) -> anyhow::Result<Value> {
     Ok(payload)
 }
 
-fn dispatch_request(
-    state: &UiServerState,
-    payload: UiRequestPayload,
-    decision_action: &str,
-) -> anyhow::Result<Value> {
-    let message = payload.message.trim();
-    if message.is_empty() {
-        anyhow::bail!("message cannot be empty");
-    }
-
-    let target = payload.target.as_deref().unwrap_or("ui").trim().to_string();
-    let msg_type = match target.as_str() {
-        "concierge" => "user.request",
-        "reviewer" => "proposal.request",
-        _ => "ui.request",
-    };
+fn compat_payload_to_wire_request(payload: UiRequestPayload) -> WireRequest {
     let priority = payload
         .priority
         .as_deref()
@@ -266,27 +305,30 @@ fn dispatch_request(
         "critical" | "high" | "medium" | "low" => priority,
         _ => "medium".to_string(),
     };
-    let content = format!("[{}] {}", priority, message);
+    WireRequest::ChatSend {
+        input: format!("[{}] {}", priority, payload.message.trim()),
+        focus: Some(payload.target.unwrap_or_else(|| "ui".to_string())),
+    }
+}
 
-    let project = ProjectContext::new(state.repo_root.clone())?;
-    project.mailbox().send_typed(
-        "ui-web", &target, msg_type, &content, None, None, false, None,
-    )?;
-    let _ = project.decisions().append(
-        "ui-web",
-        decision_action,
-        None,
-        None,
-        "accepted request from local ui surface",
-        &format!("target={} type={} priority={}", target, msg_type, priority),
-    );
-
-    Ok(json!({
-        "queued": true,
-        "target": target,
-        "priority": priority,
-        "message": content
-    }))
+fn compat_response_payload(response: WireResponse) -> Value {
+    match response {
+        WireResponse::Ack { message } => match serde_json::from_str::<Value>(&message) {
+            Ok(value) => value,
+            Err(_) => json!({
+                "queued": true,
+                "message": message
+            }),
+        },
+        WireResponse::Error { message } => json!({
+            "queued": false,
+            "error": message
+        }),
+        other => json!({
+            "queued": false,
+            "error": format!("unsupported legacy response: {:?}", other)
+        }),
+    }
 }
 
 fn serialize_ws_event(event_type: &str, payload: Value) -> anyhow::Result<String> {

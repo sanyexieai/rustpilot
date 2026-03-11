@@ -78,8 +78,8 @@ impl LlmProfileManager {
         let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
         let llm_model = std::env::var("LLM_MODEL").ok();
         let anthropic_model = std::env::var("ANTHROPIC_MODEL").ok();
-        let provider_hint_base_url = anthropic_base_url.as_deref().or(llm_base_url.as_deref());
-        let provider_hint_model = anthropic_model.as_deref().or(llm_model.as_deref());
+        let provider_hint_base_url = llm_base_url.as_deref().or(anthropic_base_url.as_deref());
+        let provider_hint_model = llm_model.as_deref().or(anthropic_model.as_deref());
         let requested_provider = resolve_requested_provider(
             raw_provider.as_deref(),
             provider_hint_base_url,
@@ -158,8 +158,8 @@ impl LlmProfileManager {
         let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
         let llm_model = std::env::var("LLM_MODEL").ok();
         let anthropic_model = std::env::var("ANTHROPIC_MODEL").ok();
-        let provider_hint_base_url = anthropic_base_url.as_deref().or(llm_base_url.as_deref());
-        let provider_hint_model = anthropic_model.as_deref().or(llm_model.as_deref());
+        let provider_hint_base_url = llm_base_url.as_deref().or(anthropic_base_url.as_deref());
+        let provider_hint_model = llm_model.as_deref().or(anthropic_model.as_deref());
         let provider = resolve_requested_provider(
             raw_provider.as_deref(),
             provider_hint_base_url,
@@ -256,8 +256,8 @@ fn env_hints_for_provider<'a>(
 ) -> (Option<&'a str>, Option<&'a str>) {
     match normalize_provider(provider, None, None).as_str() {
         "kimi-coding" => (
-            anthropic_base_url.or(llm_base_url),
-            anthropic_model.or(llm_model),
+            llm_base_url.or(anthropic_base_url),
+            llm_model.or(anthropic_model),
         ),
         _ => (
             llm_base_url.or(anthropic_base_url),
@@ -329,10 +329,10 @@ pub fn provider_spec(provider: &str) -> ProviderSpec {
             default_model: "kimi-for-coding",
             api_kind: LlmApiKind::AnthropicMessages,
             api_key_env_vars: &[
+                "LLM_API_KEY",
                 "KIMI_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_API_KEY",
-                "LLM_API_KEY",
             ],
         },
         "moonshot" => ProviderSpec {
@@ -359,12 +359,23 @@ pub fn resolve_env_api_key(provider: &str) -> Option<(String, String)> {
             continue;
         };
         let trimmed = value.trim().to_string();
-        if trimmed.is_empty() || trimmed == "your_api_key_here" {
+        if trimmed.is_empty() || looks_like_placeholder_api_key(&trimmed) {
             continue;
         }
         return Some((trimmed, format!("env:{}", env_key)));
     }
     None
+}
+
+fn looks_like_placeholder_api_key(value: &str) -> bool {
+    matches!(
+        value,
+        "your_api_key_here"
+            | "your_moonshot_key_here"
+            | "your_minimax_key_here"
+            | "your_kimi_key_here"
+            | "your_kimi_coding_key_here"
+    )
 }
 
 pub fn normalize_provider(raw: &str, base_url: Option<&str>, model: Option<&str>) -> String {

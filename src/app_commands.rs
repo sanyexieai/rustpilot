@@ -18,11 +18,17 @@ use crate::runtime::team::{
 };
 use crate::skills::SkillRegistry;
 use crate::team::send_input_to_worker;
+use crate::wire::WireFrame;
 use std::path::PathBuf;
 
 pub(crate) enum LoopDirective {
     Continue,
     Exit,
+}
+
+pub(crate) struct CommandOutcome {
+    pub(crate) directive: LoopDirective,
+    pub(crate) frames: Vec<WireFrame>,
 }
 
 pub(crate) async fn process_cli_action(
@@ -33,76 +39,109 @@ pub(crate) async fn process_cli_action(
     skills: &mut SkillRegistry,
     interaction_mode: &mut InteractionMode,
     auto_team_max_parallel: usize,
-) -> anyhow::Result<LoopDirective> {
+) -> anyhow::Result<CommandOutcome> {
+    let mut frames = Vec::new();
     match action {
-        CliAction::Exit => return Ok(LoopDirective::Exit),
+        CliAction::Exit => {
+            frames.push(WireFrame::ack("exit"));
+            return Ok(CommandOutcome {
+                directive: LoopDirective::Exit,
+                frames,
+            });
+        }
         CliAction::ReloadSkills => {
             *skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+            frames.push(WireFrame::ack("skills reloaded"));
         }
         CliAction::FocusLead => {
             focus_lead(project, interaction_mode);
-            println!("focus: lead");
+            frames.push(WireFrame::session_updated("lead", "active"));
+            frames.push(WireFrame::ack("focus: lead"));
         }
         CliAction::FocusTeam => {
             focus_team(project, interaction_mode);
-            println!("focus: team");
+            frames.push(WireFrame::session_updated("team", "idle"));
+            frames.push(WireFrame::ack("focus: team"));
         }
         CliAction::FocusWorker { task_id } => {
-            println!("{}", focus_worker(repo_root, project, interaction_mode, task_id)?);
+            let message = focus_worker(repo_root, project, interaction_mode, task_id)?;
+            frames.push(WireFrame::session_updated(interaction_mode.label(), "active"));
+            frames.push(WireFrame::ack(message));
         }
         CliAction::FocusStatus => {
-            println!("current focus: {}", interaction_mode.label());
+            frames.push(WireFrame::ack(format!(
+                "current focus: {}",
+                interaction_mode.label()
+            )));
         }
         CliAction::ReplyTask { task_id, content } => {
-            println!("{}", reply_task(repo_root, project, supervisor, task_id, &content)?);
+            frames.push(WireFrame::ack(reply_task(
+                repo_root,
+                project,
+                supervisor,
+                task_id,
+                &content,
+            )?));
         }
         CliAction::TeamRun { goal, priority } => {
-            println!("{}", team_run(project, supervisor, &goal, &priority)?);
+            frames.push(WireFrame::ack(team_run(project, supervisor, &goal, &priority)?));
         }
         CliAction::TeamStart { .. } => {
-            println!("{}", team_start(supervisor)?);
+            frames.push(WireFrame::ack(team_start(supervisor)?));
         }
         CliAction::TeamStop => {
-            println!("{}", team_stop(supervisor));
+            frames.push(WireFrame::ack(team_stop(supervisor)));
         }
         CliAction::TeamStatus => {
-            println!("{}", render_team_status(project, supervisor)?);
+            frames.push(WireFrame::ack(render_team_status(project, supervisor)?));
         }
         CliAction::Residents => {
-            println!("{}", render_residents_status(project, supervisor)?);
+            frames.push(WireFrame::ack(render_residents_status(project, supervisor)?));
         }
         CliAction::ResidentSend {
             agent_id,
             msg_type,
             content,
         } => {
-            println!(
-                "{}",
-                resident_send(project, supervisor, &agent_id, &msg_type, &content)?
-            );
+            frames.push(WireFrame::ack(resident_send(
+                project,
+                supervisor,
+                &agent_id,
+                &msg_type,
+                &content,
+            )?));
         }
         CliAction::PolicyOverview => {
-            println!(
-                "{}",
-                render_policy_overview_text(project, auto_team_max_parallel)
-            );
+            frames.push(WireFrame::ack(render_policy_overview_text(
+                project,
+                auto_team_max_parallel,
+            )));
         }
         CliAction::PolicyTask { task_id } => match render_policy_task_text(
             project,
             task_id,
             auto_team_max_parallel,
         ) {
-            Ok(text) => println!("{}", text),
-            Err(err) => println!("failed to read task policy: {}", err),
+            Ok(text) => frames.push(WireFrame::ack(text)),
+            Err(err) => frames.push(WireFrame::error(format!(
+                "failed to read task policy: {}",
+                err
+            ))),
         },
         CliAction::PolicyAgent { agent_id } => match render_policy_agent_text(project, &agent_id) {
-            Ok(text) => println!("{}", text),
-            Err(err) => println!("failed to read agent policy: {}", err),
+            Ok(text) => frames.push(WireFrame::ack(text)),
+            Err(err) => frames.push(WireFrame::error(format!(
+                "failed to read agent policy: {}",
+                err
+            ))),
         },
         CliAction::Continue => {}
     }
 
-    Ok(LoopDirective::Continue)
+    Ok(CommandOutcome {
+        directive: LoopDirective::Continue,
+        frames,
+    })
 }
 
 pub(crate) async fn process_user_input(
@@ -116,15 +155,22 @@ pub(crate) async fn process_user_input(
     supervisor: &mut AgentSupervisor,
     lead_cursor: &mut usize,
     interaction_mode: &InteractionMode,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CommandOutcome> {
+    let mut frames = Vec::new();
     if trimmed.is_empty() {
-        return Ok(());
+        return Ok(CommandOutcome {
+            directive: LoopDirective::Continue,
+            frames,
+        });
     }
 
     if let Some(prompt) = trimmed.strip_prefix("/ask ").map(str::trim) {
         if prompt.is_empty() {
-            println!("usage: /ask <content>");
-            return Ok(());
+            frames.push(WireFrame::error("usage: /ask <content>"));
+            return Ok(CommandOutcome {
+                directive: LoopDirective::Continue,
+                frames,
+            });
         }
         messages.push(Message {
             role: "user".to_string(),
@@ -148,7 +194,11 @@ pub(crate) async fn process_user_input(
             prompt,
         )
         .await?;
-        return Ok(());
+        frames.push(WireFrame::ack("/ask completed"));
+        return Ok(CommandOutcome {
+            directive: LoopDirective::Continue,
+            frames,
+        });
     }
 
     if !trimmed.starts_with('/') {
@@ -183,7 +233,11 @@ pub(crate) async fn process_user_input(
                         trimmed,
                     )
                     .await?;
-                    return Ok(());
+                    frames.push(WireFrame::ack("lead question handled"));
+                    return Ok(CommandOutcome {
+                        directive: LoopDirective::Continue,
+                        frames,
+                    });
                 }
                 let (priority, goal) = parse_priority_prefixed_goal(trimmed);
                 let _ = project
@@ -216,7 +270,7 @@ pub(crate) async fn process_user_input(
                     &format!("priority={} target=concierge", priority),
                 );
                 let _ = supervisor.ensure_running("concierge");
-                println!("forwarded to concierge: {}", payload);
+                frames.push(WireFrame::ack(format!("forwarded to concierge: {}", payload)));
             }
             InteractionMode::Lead => {
                 let _ = project
@@ -241,13 +295,20 @@ pub(crate) async fn process_user_input(
                     trimmed,
                 )
                 .await?;
+                frames.push(WireFrame::ack("lead input handled"));
             }
             InteractionMode::Worker { task_id } => match send_input_to_worker(repo_root, *task_id, trimmed) {
-                Ok(text) => println!("{}", text),
-                Err(err) => println!("failed to route to worker: {}", err),
+                Ok(text) => frames.push(WireFrame::ack(text)),
+                Err(err) => frames.push(WireFrame::error(format!(
+                    "failed to route to worker: {}",
+                    err
+                ))),
             },
         }
-        return Ok(());
+        return Ok(CommandOutcome {
+            directive: LoopDirective::Continue,
+            frames,
+        });
     }
 
     messages.push(Message {
@@ -272,6 +333,10 @@ pub(crate) async fn process_user_input(
         trimmed,
     )
     .await?;
+    frames.push(WireFrame::ack("command processed"));
 
-    Ok(())
+    Ok(CommandOutcome {
+        directive: LoopDirective::Continue,
+        frames,
+    })
 }

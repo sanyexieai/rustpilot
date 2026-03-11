@@ -136,14 +136,17 @@ src/
 
 ```bash
 # LLM 配置
-LLM_PROVIDER=minimax
-LLM_API_BASE_URL=https://api.minimaxi.com/v1
+LLM_PROVIDER=kimi-coding
 LLM_API_KEY=your-api-key
-LLM_MODEL=MiniMax-M2.5
+LLM_API_BASE_URL=https://api.kimi.com/coding/
+LLM_MODEL=kimi-for-coding
+LLM_USER_AGENT=openclaw
 
 # API 超时设置（秒）
 LLM_TIMEOUT_SECS=120
 ```
+
+`LLM_USER_AGENT=openclaw` 是 `kimi-coding` 兼容配置。某些 Kimi 客户端白名单环境要求固定该值，没有明确需求不要修改。
 
 ### 配置文件
 

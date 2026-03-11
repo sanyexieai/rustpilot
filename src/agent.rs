@@ -12,6 +12,7 @@ use crate::llm_profiles::LlmApiKind;
 use crate::mcp::{handle_mcp_tool_call, mcp_tool_definitions};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
 use crate::project_tools::{ProjectContext, handle_project_tool_call, project_tool_definitions};
+use crate::wire::WireToolSummary;
 
 #[derive(Debug, Clone)]
 pub struct AgentProgressReport {
@@ -304,6 +305,25 @@ pub fn tool_definitions() -> Vec<Tool> {
     tools.extend(external_tool_definitions());
     tools.extend(mcp_tool_definitions());
     tools
+}
+
+pub fn tool_summaries() -> Vec<WireToolSummary> {
+    let mut tools = Vec::new();
+    append_tool_summaries(&mut tools, "builtin", builtin_tool_definitions());
+    append_tool_summaries(&mut tools, "project", project_tool_definitions());
+    append_tool_summaries(&mut tools, "external", external_tool_definitions());
+    append_tool_summaries(&mut tools, "mcp", mcp_tool_definitions());
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    tools
+}
+
+fn append_tool_summaries(into: &mut Vec<WireToolSummary>, source: &str, tools: Vec<Tool>) {
+    into.extend(tools.into_iter().map(|tool| WireToolSummary {
+        name: tool.function.name,
+        source: source.to_string(),
+        description: tool.function.description,
+        parameters: tool.function.parameters,
+    }));
 }
 
 pub fn handle_tool_call(project: &ProjectContext, call: &ToolCall) -> anyhow::Result<String> {

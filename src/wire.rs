@@ -18,6 +18,7 @@ pub enum WireRequest {
         label: Option<String>,
     },
     SessionList,
+    ToolList,
     ToolCall {
         name: String,
         arguments_json: String,
@@ -36,6 +37,9 @@ pub enum WireResponse {
     },
     SessionList {
         sessions: Vec<WireSessionSummary>,
+    },
+    ToolList {
+        tools: Vec<WireToolSummary>,
     },
     ToolResult {
         name: String,
@@ -82,6 +86,21 @@ pub struct WireSessionSummary {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireToolSummary {
+    pub name: String,
+    pub source: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum WireFrame {
+    Response { response: WireEnvelope<WireResponse> },
+    Event { event: WireEnvelope<WireEvent> },
+}
+
 impl<T> WireEnvelope<T> {
     pub fn new(kind: impl Into<String>, payload: T) -> Self {
         Self {
@@ -91,9 +110,45 @@ impl<T> WireEnvelope<T> {
     }
 }
 
+impl WireFrame {
+    pub fn ack(message: impl Into<String>) -> Self {
+        Self::Response {
+            response: WireEnvelope::new(
+                "response",
+                WireResponse::Ack {
+                    message: message.into(),
+                },
+            ),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Event {
+            event: WireEnvelope::new(
+                "event",
+                WireEvent::Error {
+                    message: message.into(),
+                },
+            ),
+        }
+    }
+
+    pub fn session_updated(focus: impl Into<String>, status: impl Into<String>) -> Self {
+        Self::Event {
+            event: WireEnvelope::new(
+                "event",
+                WireEvent::SessionUpdated {
+                    focus: focus.into(),
+                    status: status.into(),
+                },
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{WireEnvelope, WireEvent, WireRequest};
+    use super::{WireEnvelope, WireEvent, WireRequest, WireResponse, WireToolSummary};
 
     #[test]
     fn request_serializes_with_tagged_type() {
@@ -116,5 +171,26 @@ mod tests {
         let text = serde_json::to_string(&envelope).expect("serialize envelope");
         assert!(text.contains("\"kind\":\"event\""));
         assert!(text.contains("\"type\":\"session_updated\""));
+    }
+
+    #[test]
+    fn tool_list_response_serializes_with_tools() {
+        let response = WireResponse::ToolList {
+            tools: vec![WireToolSummary {
+                name: "read_file".to_string(),
+                source: "builtin".to_string(),
+                description: "read a file".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+            }],
+        };
+        let text = serde_json::to_string(&response).expect("serialize tool list");
+        assert!(text.contains("\"type\":\"tool_list\""));
+        assert!(text.contains("\"name\":\"read_file\""));
+        assert!(text.contains("\"source\":\"builtin\""));
     }
 }

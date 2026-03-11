@@ -23,3 +23,4 @@ pub mod team;
 pub mod terminal_session;
 pub mod ui_server;
 pub mod wire;
+mod wire_exec;

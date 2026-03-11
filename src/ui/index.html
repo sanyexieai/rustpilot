@@ -62,6 +62,23 @@
     button { background: linear-gradient(135deg, var(--accent), #e28a42); color: white; border: none; font-weight: 700; cursor: pointer; }
     .feed { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
     .feed li { border: 1px solid var(--line); border-radius: 16px; padding: 12px 13px; background: rgba(255,255,255,0.68); }
+    .session-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+    .session-list li { border: 1px solid var(--line); border-radius: 14px; padding: 0; background: rgba(255,255,255,0.62); overflow: hidden; }
+    .session-list button {
+      width: 100%;
+      border: none;
+      border-radius: 0;
+      padding: 10px 12px;
+      text-align: left;
+      background: transparent;
+      color: var(--ink);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .session-list button:hover { background: rgba(15,122,101,0.08); }
+    .session-list small { display: block; color: var(--muted); margin-top: 4px; }
+    .tool-form { display: grid; grid-template-columns: 180px 1fr 120px; gap: 10px; margin-bottom: 10px; }
+    .tool-form[hidden] { display: none; }
     .ok { color: var(--accent-2); min-height: 20px; font-size: 13px; margin-top: 6px; }
     @media (max-width: 980px) { .stats { grid-template-columns: repeat(3, 1fr); } .row { grid-template-columns: 1fr; } .kv { grid-template-columns: 1fr; } }
     @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
@@ -180,7 +197,32 @@
             <select id="target">${options}</select>
             <button id="submit" type="button">${labels.submit || 'submit'}</button>
           </div>
+          <div class="row">
+            <input id="tool-name" placeholder="tool name" />
+            <input id="tool-args" placeholder='{"path":"README.md"}' />
+            <button id="tool-submit" type="button">${labels.run_tool || 'run tool'}</button>
+          </div>
+          <div class="tool-form">
+            <select id="tool-template">
+              <option value="read_file">read_file</option>
+              <option value="terminal_list">terminal_list</option>
+              <option value="task_list">task_list</option>
+            </select>
+            <input id="tool-path" placeholder="path for read_file, e.g. README.md" />
+            <input id="tool-max-lines" type="number" min="1" value="80" />
+          </div>
+          <div class="row" id="tool-presets">
+            <button class="secondary" data-tool-name="read_file" data-tool-args='{"path":"README.md","max_lines":80}' type="button">read README</button>
+            <button class="secondary" data-tool-name="terminal_list" data-tool-args='{}' type="button">terminal list</button>
+            <button class="secondary" data-tool-name="task_list" data-tool-args='{}' type="button">task list</button>
+          </div>
+          <div class="row" id="wire-actions">
+            <button class="secondary" id="session-list" type="button">sessions</button>
+            <button class="secondary" id="chat-abort" type="button">abort</button>
+            <span class="badge">wire actions</span>
+          </div>
           <div class="ok" id="result"></div>
+          <ul class="session-list" id="session-results"></ul>
         </div>`;
       return card(section, body);
     }
@@ -253,23 +295,157 @@
       submit.dataset.bound = '1';
       const composer = (schema.sections || []).find(item => item.kind === 'composer') || { labels: [] };
       const labels = labelMap(composer);
+      const targetSelect = document.getElementById('target');
+      const toolSubmit = document.getElementById('tool-submit');
+      const toolName = document.getElementById('tool-name');
+      const toolArgs = document.getElementById('tool-args');
+      const toolTemplate = document.getElementById('tool-template');
+      const toolPath = document.getElementById('tool-path');
+      const toolMaxLines = document.getElementById('tool-max-lines');
+      const sessionList = document.getElementById('session-list');
+      const chatAbort = document.getElementById('chat-abort');
+      const sessionResults = document.getElementById('session-results');
+      const syncToolInputs = () => {
+        if (!toolTemplate || !toolName || !toolArgs) return;
+        const template = toolTemplate.value || 'read_file';
+        toolName.value = template;
+        if (template === 'read_file') {
+          const args = {
+            path: (toolPath && toolPath.value.trim()) || 'README.md',
+            max_lines: Number((toolMaxLines && toolMaxLines.value) || '80') || 80,
+          };
+          toolArgs.value = JSON.stringify(args);
+          if (toolPath) toolPath.disabled = false;
+          if (toolMaxLines) toolMaxLines.disabled = false;
+        } else {
+          toolArgs.value = '{}';
+          if (toolPath) toolPath.disabled = true;
+          if (toolMaxLines) toolMaxLines.disabled = true;
+        }
+      };
       submit.addEventListener('click', () => {
         const message = document.getElementById('message').value.trim();
         const priority = document.getElementById('priority').value;
         const target = document.getElementById('target').value;
         if (!message) {
-          document.getElementById('result').textContent = labels.error_empty || '请输入内容';
+          document.getElementById('result').textContent = labels.error_empty || '?????';
           return;
         }
         if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) {
-          document.getElementById('result').textContent = labels.error_request || '实时通道尚未连接';
+          document.getElementById('result').textContent = labels.error_request || '????????';
           return;
         }
         window.uiSocket.send(JSON.stringify({
-          type: 'dispatch_request',
-          payload: { message, priority, target }
+          type: 'wire_request',
+          payload: {
+            type: 'chat_send',
+            input: `[${priority}] ${message}`,
+            focus: target
+          }
         }));
       });
+      if (toolSubmit && toolSubmit.dataset.bound !== '1') {
+        toolSubmit.dataset.bound = '1';
+        toolSubmit.addEventListener('click', () => {
+          syncToolInputs();
+          const name = toolName.value.trim();
+          const args = toolArgs.value.trim() || '{}';
+          if (!name) {
+            document.getElementById('result').textContent = labels.error_empty || '?????';
+            return;
+          }
+          if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) {
+            document.getElementById('result').textContent = labels.error_request || '????????';
+            return;
+          }
+          window.uiSocket.send(JSON.stringify({
+            type: 'wire_request',
+            payload: {
+              type: 'tool_call',
+              name,
+              arguments_json: args
+            }
+          }));
+        });
+      }
+      const presetRoot = document.getElementById('tool-presets');
+      if (presetRoot && presetRoot.dataset.bound !== '1') {
+        presetRoot.dataset.bound = '1';
+        presetRoot.querySelectorAll('[data-tool-name]').forEach((button) => {
+          button.addEventListener('click', () => {
+            toolName.value = button.dataset.toolName || '';
+            toolArgs.value = button.dataset.toolArgs || '{}';
+            if (toolTemplate) {
+              toolTemplate.value = button.dataset.toolName || 'read_file';
+            }
+            try {
+              const parsed = JSON.parse(button.dataset.toolArgs || '{}');
+              if (toolPath && typeof parsed.path === 'string') toolPath.value = parsed.path;
+              if (toolMaxLines && parsed.max_lines != null) toolMaxLines.value = String(parsed.max_lines);
+            } catch (_) {}
+            syncToolInputs();
+          });
+        });
+      }
+      if (toolTemplate && toolTemplate.dataset.bound !== '1') {
+        toolTemplate.dataset.bound = '1';
+        toolTemplate.addEventListener('change', syncToolInputs);
+      }
+      if (toolPath && toolPath.dataset.bound !== '1') {
+        toolPath.dataset.bound = '1';
+        toolPath.addEventListener('input', syncToolInputs);
+      }
+      if (toolMaxLines && toolMaxLines.dataset.bound !== '1') {
+        toolMaxLines.dataset.bound = '1';
+        toolMaxLines.addEventListener('input', syncToolInputs);
+      }
+      syncToolInputs();
+      if (sessionList && sessionList.dataset.bound !== '1') {
+        sessionList.dataset.bound = '1';
+        sessionList.addEventListener('click', () => {
+          if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) {
+            document.getElementById('result').textContent = labels.error_request || '????????';
+            return;
+          }
+          window.uiSocket.send(JSON.stringify({
+            type: 'wire_request',
+            payload: {
+              type: 'session_list'
+            }
+          }));
+        });
+      }
+      if (chatAbort && chatAbort.dataset.bound !== '1') {
+        chatAbort.dataset.bound = '1';
+        chatAbort.addEventListener('click', () => {
+          if (!window.uiSocket || window.uiSocket.readyState !== WebSocket.OPEN) {
+            document.getElementById('result').textContent = labels.error_request || '????????';
+            return;
+          }
+          window.uiSocket.send(JSON.stringify({
+            type: 'wire_request',
+            payload: {
+              type: 'chat_abort'
+            }
+          }));
+        });
+      }
+      if (sessionResults && sessionResults.dataset.bound !== '1') {
+        sessionResults.dataset.bound = '1';
+        sessionResults.addEventListener('click', (event) => {
+          const button = event.target.closest('[data-session-focus]');
+          if (!button || !targetSelect) return;
+          const focus = button.dataset.sessionFocus || '';
+          if (!focus) return;
+          const option = Array.from(targetSelect.options).find((item) => item.value === focus);
+          if (option) {
+            targetSelect.value = focus;
+            document.getElementById('result').textContent = `focus set to ${option.text}`;
+          } else {
+            document.getElementById('result').textContent = `unknown focus: ${focus}`;
+          }
+        });
+      }
     }
 
     function isComposerEditing() {
@@ -293,6 +469,29 @@
 
     function sameJson(a, b) {
       return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    function renderSessionList(sessions) {
+      const root = document.getElementById('session-results');
+      if (!root) return;
+      if (!sessions || !sessions.length) {
+        root.innerHTML = '<li><strong>no sessions</strong><small>session_list returned empty</small></li>';
+        return;
+      }
+      root.innerHTML = sessions.map((item) => `
+        <li>
+          <button type="button" data-session-focus="${item.focus || ''}">
+            <strong>${item.label || item.session_id}</strong>
+            <small>id: ${item.session_id}</small>
+            <small>focus: ${item.focus || '-'}</small>
+            <small>status: ${item.status || '-'}</small>
+          </button>
+        </li>`).join('');
+    }
+
+    function clearSessionList() {
+      const root = document.getElementById('session-results');
+      if (root) root.innerHTML = '';
     }
 
     const pendingSnapshot = { value: null };
@@ -388,15 +587,49 @@
           }
           return;
         }
-        if (data.type === 'request.accepted') {
+        if (data.type === 'wire.response') {
           const payload = data.payload || {};
-          document.getElementById('result').textContent =
-            `已投递到 ${payload.target || ''}：${payload.message || ''}`;
-          document.getElementById('message').value = '';
-          applyPendingSnapshot();
-          return;
+          if (payload.type === 'ack') {
+            let message = payload.message || '';
+            try {
+              const parsed = JSON.parse(message);
+              message = `已投递到 ${parsed.target || ''}：${parsed.message || ''}`;
+            } catch (_) {}
+            document.getElementById('result').textContent = message;
+            document.getElementById('message').value = '';
+            clearSessionList();
+            applyPendingSnapshot();
+            return;
+          }
+          if (payload.type === 'tool_result') {
+            document.getElementById('result').textContent =
+              `[${payload.name || 'tool'}] ${payload.output || ''}`;
+            clearSessionList();
+            applyPendingSnapshot();
+            return;
+          }
+          if (payload.type === 'session_list') {
+            const sessions = payload.sessions || [];
+            document.getElementById('result').textContent = `sessions: ${sessions.length}`;
+            renderSessionList(sessions);
+            return;
+          }
+          if (payload.type === 'session_created') {
+            document.getElementById('result').textContent = payload.session_id || 'session created';
+            renderSessionList([{
+              session_id: payload.session_id || 'unknown',
+              label: payload.label || 'new session',
+              focus: '-',
+              status: 'created'
+            }]);
+            return;
+          }
+          if (payload.type === 'error') {
+            document.getElementById('result').textContent = payload.message || '请求失败';
+            return;
+          }
         }
-        if (data.type === 'request.rejected' || data.type === 'error') {
+        if (data.type === 'error' || data.type === 'wire.error') {
           document.getElementById('result').textContent =
             (data.payload && data.payload.error) || '请求失败';
         }

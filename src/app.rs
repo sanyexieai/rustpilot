@@ -1,4 +1,4 @@
-use crate::app_commands::{LoopDirective, process_cli_action, process_user_input};
+use crate::app_commands::{LoopDirective, process_cli_action};
 use crate::app_support::{
     InteractionMode, load_repo_env, parse_resident_args, parse_teammate_args, pump_lead_mailbox,
 };
@@ -16,6 +16,8 @@ use crate::runtime_env::{
 };
 use crate::skills::SkillRegistry;
 use crate::team::run_teammate_once;
+use crate::wire::{WireEvent, WireFrame, WireResponse};
+use crate::wire_exec::execute_wire_request;
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -149,7 +151,7 @@ pub async fn run() -> anyhow::Result<()> {
 
         let trimmed = input.trim();
         if let Some(action) = handle_cli_command(trimmed, &project, &progress, &skills)? {
-            match process_cli_action(
+            let outcome = process_cli_action(
                 action,
                 &repo_root,
                 &project,
@@ -158,15 +160,19 @@ pub async fn run() -> anyhow::Result<()> {
                 &mut interaction_mode,
                 AUTO_TEAM_MAX_PARALLEL,
             )
-            .await?
-            {
+            .await?;
+            emit_wire_frames(&outcome.frames);
+            match outcome.directive {
                 LoopDirective::Continue => continue,
                 LoopDirective::Exit => break,
             }
         }
 
-        process_user_input(
-            trimmed,
+        let outcome = execute_wire_request(
+            crate::wire::WireRequest::ChatSend {
+                input: trimmed.to_string(),
+                focus: Some(interaction_mode.label()),
+            },
             &repo_root,
             &client,
             &llm,
@@ -178,8 +184,28 @@ pub async fn run() -> anyhow::Result<()> {
             &interaction_mode,
         )
         .await?;
+        emit_wire_frames(&outcome.frames);
     }
 
     supervisor.stop_all();
     Ok(())
+}
+
+fn emit_wire_frames(frames: &[WireFrame]) {
+    for frame in frames {
+        match frame {
+            WireFrame::Response { response } => match &response.payload {
+                WireResponse::Ack { message } => println!("{}", message),
+                WireResponse::Error { message } => println!("error: {}", message),
+                other => println!("{}", serde_json::to_string(other).unwrap_or_default()),
+            },
+            WireFrame::Event { event } => match &event.payload {
+                WireEvent::Error { message } => println!("error: {}", message),
+                WireEvent::SessionUpdated { focus, status } => {
+                    println!("[session] focus={} status={}", focus, status)
+                }
+                other => println!("{}", serde_json::to_string(other).unwrap_or_default()),
+            },
+        }
+    }
 }

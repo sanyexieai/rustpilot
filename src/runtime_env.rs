@@ -117,9 +117,8 @@ fn required_env_entries() -> &'static [(&'static str, &'static str)] {
     &[
         ("LLM_API_KEY", "your_api_key_here"),
         ("LLM_PROVIDER", "kimi-coding"),
-        ("ANTHROPIC_AUTH_TOKEN", "your_kimi_coding_key_here"),
-        ("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/"),
-        ("ANTHROPIC_MODEL", "kimi-for-coding"),
+        ("LLM_API_BASE_URL", "https://api.kimi.com/coding/"),
+        ("LLM_MODEL", "kimi-for-coding"),
         ("LLM_TIMEOUT_SECS", "300"),
         ("LLM_USER_AGENT", "openclaw"),
     ]
@@ -136,7 +135,7 @@ LLM_API_KEY=your_api_key_here\n\
         content.push_str(&format!("{}={}\n", key, value));
     }
     content.push_str(
-        "\n# Optional provider-specific keys\n# MOONSHOT_API_KEY=your_moonshot_key_here\n# KIMI_API_KEY=your_kimi_key_here\n# MINIMAX_API_KEY=your_minimax_key_here\n\
+        "\n# Optional provider-specific keys\n# KIMI_API_KEY=your_kimi_key_here\n# MOONSHOT_API_KEY=your_moonshot_key_here\n# MINIMAX_API_KEY=your_minimax_key_here\n\
 \n# Optional auth profile override\n# LLM_AUTH_PROFILE=kimi-coding:default\n\
 \n# Optional: custom skills directory\n# SKILLS_DIR=./skills\n",
     );
