@@ -3,6 +3,7 @@ use crate::app_support::parse_interaction_mode_label;
 use crate::mcp::init_mcp_tool;
 use crate::project_tools::ProjectContext;
 use crate::skills::{SkillRegistry, init_tool_skill};
+use crate::tool_capability::ToolCapabilityLevel;
 
 pub enum CliAction {
     Continue,
@@ -59,6 +60,9 @@ pub enum CliAction {
         agent_id: String,
     },
     Usage,
+    ToolImport {
+        source_dir: String,
+    },
     ShellRun {
         command: String,
     },
@@ -386,6 +390,15 @@ pub fn handle_cli_command(
     if trimmed == "/usage" {
         return Ok(Some(CliAction::Usage));
     }
+    if let Some(source_dir) = trimmed.strip_prefix("/tool-import ").map(str::trim) {
+        if source_dir.is_empty() {
+            println!("usage: /tool-import <source_dir>");
+            return Ok(Some(CliAction::Continue));
+        }
+        return Ok(Some(CliAction::ToolImport {
+            source_dir: source_dir.to_string(),
+        }));
+    }
     if let Some(command) = trimmed.strip_prefix("/shell ").map(str::trim) {
         if command.is_empty() {
             println!("usage: /shell <command>");
@@ -419,11 +432,31 @@ pub fn handle_cli_command(
     }
     if let Some(name) = trimmed.strip_prefix("/skill-tool-init ").map(str::trim) {
         if name.is_empty() {
-            println!("usage: /skill-tool-init <name>");
+            println!("usage: /skill-tool-init <feature|project|generic|kernel> <name>");
         } else {
-            match init_tool_skill(name) {
+            let mut parts = name.splitn(2, ' ');
+            let Some(level_raw) = parts.next() else {
+                println!("usage: /skill-tool-init <feature|project|generic|kernel> <name>");
+                return Ok(Some(CliAction::Continue));
+            };
+            let Some(tool_name) = parts
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                println!("usage: /skill-tool-init <feature|project|generic|kernel> <name>");
+                return Ok(Some(CliAction::Continue));
+            };
+            let level = match ToolCapabilityLevel::parse(level_raw) {
+                Ok(level) => level,
+                Err(err) => {
+                    println!("error: {}", err);
+                    return Ok(Some(CliAction::Continue));
+                }
+            };
+            match init_tool_skill(tool_name, level) {
                 Ok(path) => {
-                    println!("created tool skill template: {}", path.display());
+                    println!("created tool template: {}", path.display());
                     return Ok(Some(CliAction::ReloadSkills));
                 }
                 Err(err) => println!("error: {}", err),

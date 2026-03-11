@@ -116,6 +116,8 @@ pub struct WireToolSummary {
     pub source: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    pub capability_level: Option<String>,
+    pub runtime_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,11 +236,14 @@ mod tests {
                         "path": { "type": "string" }
                     }
                 }),
+                capability_level: Some("kernel".to_string()),
+                runtime_kind: Some("rust_binary".to_string()),
             }],
         };
         let text = serde_json::to_string(&response).expect("serialize tool list");
         assert!(text.contains("\"type\":\"tool_list\""));
         assert!(text.contains("\"name\":\"read_file\""));
         assert!(text.contains("\"source\":\"builtin\""));
+        assert!(text.contains("\"capability_level\":\"kernel\""));
     }
 }

@@ -8,7 +8,9 @@ use crate::config::LlmConfig;
 use crate::constants::{
     MAX_AGENT_TURNS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_ATTEMPTS, RETRY_MAX_DELAY_MS,
 };
-use crate::external_tools::{external_tool_definitions, handle_external_tool_call};
+use crate::external_tools::{
+    external_tool_definitions, external_tool_summaries, handle_external_tool_call,
+};
 use crate::llm_profiles::LlmApiKind;
 use crate::mcp::{handle_mcp_tool_call, mcp_tool_definitions};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
@@ -16,6 +18,7 @@ use crate::project_tools::{
     ApprovalMode, ProjectContext, handle_project_tool_call, project_tool_definitions,
 };
 use crate::shell_file_tools::{is_dangerous_command, is_read_only_command};
+use crate::tool_capability::{ToolCapabilityLevel, ToolRuntimeKind};
 use crate::wire::WireToolSummary;
 use serde_json::Value;
 
@@ -352,20 +355,46 @@ pub fn tool_definitions() -> Vec<Tool> {
 
 pub fn tool_summaries() -> Vec<WireToolSummary> {
     let mut tools = Vec::new();
-    append_tool_summaries(&mut tools, "builtin", builtin_tool_definitions());
-    append_tool_summaries(&mut tools, "project", project_tool_definitions());
-    append_tool_summaries(&mut tools, "external", external_tool_definitions());
-    append_tool_summaries(&mut tools, "mcp", mcp_tool_definitions());
+    append_tool_summaries(
+        &mut tools,
+        "builtin",
+        ToolCapabilityLevel::Kernel,
+        ToolRuntimeKind::RustBinary,
+        builtin_tool_definitions(),
+    );
+    append_tool_summaries(
+        &mut tools,
+        "project",
+        ToolCapabilityLevel::Project,
+        ToolRuntimeKind::RustBinary,
+        project_tool_definitions(),
+    );
+    tools.extend(external_tool_summaries());
+    append_tool_summaries(
+        &mut tools,
+        "mcp",
+        ToolCapabilityLevel::Project,
+        ToolRuntimeKind::Mcp,
+        mcp_tool_definitions(),
+    );
     tools.sort_by(|left, right| left.name.cmp(&right.name));
     tools
 }
 
-fn append_tool_summaries(into: &mut Vec<WireToolSummary>, source: &str, tools: Vec<Tool>) {
+fn append_tool_summaries(
+    into: &mut Vec<WireToolSummary>,
+    source: &str,
+    capability_level: ToolCapabilityLevel,
+    runtime_kind: ToolRuntimeKind,
+    tools: Vec<Tool>,
+) {
     into.extend(tools.into_iter().map(|tool| WireToolSummary {
         name: tool.function.name,
         source: source.to_string(),
         description: tool.function.description,
         parameters: tool.function.parameters,
+        capability_level: Some(capability_level.as_str().to_string()),
+        runtime_kind: Some(runtime_kind.as_str().to_string()),
     }));
 }
 

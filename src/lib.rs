@@ -22,6 +22,8 @@ pub mod shell_file_tools;
 pub mod skills;
 pub mod team;
 pub mod terminal_session;
+pub mod tool_capability;
+pub mod tool_manifest;
 pub mod ui_server;
 pub mod wire;
 mod wire_exec;

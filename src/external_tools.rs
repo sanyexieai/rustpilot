@@ -10,6 +10,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use crate::openai_compat::{Tool, ToolCall, ToolFunction};
+use crate::tool_capability::{ToolCapabilityLevel, ToolRuntimeKind};
+use crate::tool_manifest::{ToolManifest, resolve_or_create_tools_dir, resolve_tools_dir};
+use crate::wire::WireToolSummary;
 
 #[derive(Debug, Clone)]
 struct ExternalToolConfig {
@@ -19,6 +22,8 @@ struct ExternalToolConfig {
     runtime: Option<String>,
     command: String,
     args: Vec<String>,
+    capability_level: ToolCapabilityLevel,
+    runtime_kind: ToolRuntimeKind,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +81,31 @@ pub fn external_tool_definitions() -> Vec<Tool> {
     }
 }
 
+pub fn external_tool_summaries() -> Vec<WireToolSummary> {
+    match with_loaded_tools(|tools| {
+        Ok(tools
+            .iter()
+            .map(|item| WireToolSummary {
+                name: item.config.name.clone(),
+                source: "external".to_string(),
+                description: item.config.description.clone(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": true
+                }),
+                capability_level: Some(item.config.capability_level.as_str().to_string()),
+                runtime_kind: Some(item.config.runtime_kind.as_str().to_string()),
+            })
+            .collect())
+    }) {
+        Ok(tools) => tools,
+        Err(err) => {
+            eprintln!("[external-tools] summary load failed: {}", err);
+            Vec::new()
+        }
+    }
+}
+
 pub fn handle_external_tool_call(call: &ToolCall) -> anyhow::Result<Option<String>> {
     with_loaded_tools(|tools| {
         let Some(tool) = tools
@@ -95,7 +125,7 @@ fn with_loaded_tools<T>(
     f: impl FnOnce(&[LoadedExternalTool]) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let mut guard = cache().lock().unwrap_or_else(|err| err.into_inner());
-    let Some(skills_dir) = resolve_skills_dir()? else {
+    let Some(skills_dir) = resolve_tools_dir()? else {
         guard.fingerprint = 0;
         guard.tools.clear();
         return f(&[]);
@@ -108,25 +138,6 @@ fn with_loaded_tools<T>(
         guard.tools = loaded;
     }
     f(&guard.tools)
-}
-
-fn resolve_skills_dir() -> anyhow::Result<Option<PathBuf>> {
-    if let Ok(dir) = std::env::var("SKILLS_DIR") {
-        return Ok(Some(PathBuf::from(dir)));
-    }
-
-    let cwd = std::env::current_dir()?;
-    let direct = cwd.join("skills");
-    if direct.is_dir() {
-        return Ok(Some(direct));
-    }
-
-    let fallback = cwd.join("s05").join("skills");
-    if fallback.is_dir() {
-        return Ok(Some(fallback));
-    }
-
-    Ok(None)
 }
 
 fn compute_skills_fingerprint(skills_dir: &Path) -> anyhow::Result<u64> {
@@ -166,97 +177,72 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> anyhow:
 
 fn load_external_tools(skills_dir: &Path) -> anyhow::Result<Vec<LoadedExternalTool>> {
     let mut loaded = Vec::new();
-    for entry in fs::read_dir(skills_dir)? {
-        let entry = entry?;
-        let skill_dir = entry.path();
-        if !skill_dir.is_dir() {
+    for level in ToolCapabilityLevel::all() {
+        let level_dir = skills_dir.join(level.directory_name());
+        if !level_dir.is_dir() {
             continue;
         }
+        for entry in fs::read_dir(&level_dir)? {
+            let entry = entry?;
+            let skill_dir = entry.path();
+            if !skill_dir.is_dir() {
+                continue;
+            }
 
-        let skill_md = skill_dir.join("SKILL.md");
-        let tests_dir = skill_dir.join("tests");
-        if !skill_md.is_file() || !tests_dir.is_dir() {
-            continue;
+            let skill_md = skill_dir.join("tool.toml");
+            let tests_dir = skill_dir.join("tests");
+            if !skill_md.is_file() || !tests_dir.is_dir() {
+                continue;
+            }
+
+            let config = parse_tool_config_from_manifest(&skill_dir)?;
+            if config.capability_level != level {
+                eprintln!(
+                    "[external-tools] skip '{}' ({}): tool_level '{}' does not match directory '{}'",
+                    config.name,
+                    skill_dir.display(),
+                    config.capability_level.as_str(),
+                    level.directory_name()
+                );
+                continue;
+            }
+            let tool = LoadedExternalTool {
+                config,
+                skill_dir: skill_dir.clone(),
+            };
+
+            if let Err(err) = validate_and_test_tool(&tool) {
+                eprintln!(
+                    "[external-tools] skip '{}' ({}): {}",
+                    tool.config.name,
+                    skill_dir.display(),
+                    err
+                );
+                continue;
+            }
+
+            loaded.push(tool);
         }
-
-        let config = parse_tool_config_from_skill_md(&skill_md)?;
-        let tool = LoadedExternalTool {
-            config,
-            skill_dir: skill_dir.clone(),
-        };
-
-        if let Err(err) = validate_and_test_tool(&tool) {
-            eprintln!(
-                "[external-tools] skip '{}' ({}): {}",
-                tool.config.name,
-                skill_dir.display(),
-                err
-            );
-            continue;
-        }
-
-        loaded.push(tool);
     }
 
     Ok(loaded)
 }
 
-fn parse_tool_config_from_skill_md(path: &Path) -> anyhow::Result<ExternalToolConfig> {
-    let content = fs::read_to_string(path)?;
-    let frontmatter = parse_frontmatter_map(&content)
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md missing frontmatter: {}", path.display()))?;
-
-    let name = frontmatter
-        .get("name")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md missing 'name': {}", path.display()))?;
-    let description = frontmatter
-        .get("description")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md missing 'description': {}", path.display()))?;
-    let language = frontmatter
-        .get("tool_language")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md missing 'tool_language': {}", path.display()))?;
-    let runtime = frontmatter.get("tool_runtime").cloned();
-    let command = frontmatter
-        .get("tool_command")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md missing 'tool_command': {}", path.display()))?;
-    let args = frontmatter
-        .get("tool_args_json")
-        .map(|value| serde_json::from_str::<Vec<String>>(value))
-        .transpose()
-        .with_context(|| format!("invalid tool_args_json in {}", path.display()))?
-        .unwrap_or_default();
+fn parse_tool_config_from_manifest(dir: &Path) -> anyhow::Result<ExternalToolConfig> {
+    let manifest = ToolManifest::load_from_dir(dir)?;
+    let capability_level = manifest.level()?;
+    let runtime_kind = manifest.runtime_kind()?;
 
     Ok(ExternalToolConfig {
-        name,
-        description,
-        language,
-        runtime,
-        command,
-        args,
+        name: manifest.tool.name,
+        description: manifest.tool.description,
+        language: manifest.tool.language,
+        runtime: manifest.tool.runtime,
+        command: manifest.tool.command,
+        args: manifest.tool.args,
+        capability_level,
+        runtime_kind,
     })
-}
-
-fn parse_frontmatter_map(content: &str) -> Option<std::collections::HashMap<String, String>> {
-    let mut lines = content.lines();
-    if lines.next()?.trim() != "---" {
-        return None;
-    }
-
-    let mut map = std::collections::HashMap::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            break;
-        }
-        if let Some((k, v)) = trimmed.split_once(':') {
-            map.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    Some(map)
 }
 
 fn validate_and_test_tool(tool: &LoadedExternalTool) -> anyhow::Result<()> {
@@ -273,6 +259,11 @@ fn validate_and_test_tool(tool: &LoadedExternalTool) -> anyhow::Result<()> {
         anyhow::bail!("tool_command is required");
     }
     let _ = &tool.config.runtime;
+    if tool.config.capability_level == ToolCapabilityLevel::Kernel
+        && tool.config.runtime_kind != ToolRuntimeKind::RustBinary
+    {
+        anyhow::bail!("kernel-level tools must resolve to a compiled rust binary");
+    }
 
     let tests = load_test_cases(&tool.skill_dir.join("tests"))?;
     if tests.is_empty() {
@@ -280,6 +271,64 @@ fn validate_and_test_tool(tool: &LoadedExternalTool) -> anyhow::Result<()> {
     }
     for case in &tests {
         run_test_case(tool, case).with_context(|| format!("test '{}' failed", case.name))?;
+    }
+    Ok(())
+}
+
+pub fn import_external_tool(source_dir: &Path) -> anyhow::Result<PathBuf> {
+    let manifest = ToolManifest::load_from_dir(source_dir)?;
+    let level = manifest.level()?;
+    let tools_root = resolve_or_create_tools_dir()?;
+    let target = tools_root
+        .join(level.directory_name())
+        .join(normalize_tool_dir_name(&manifest.tool.name));
+    if target.exists() {
+        anyhow::bail!("tool already exists: {}", target.display());
+    }
+    copy_dir_recursive(source_dir, &target)?;
+    Ok(target)
+}
+
+fn normalize_tool_dir_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_hyphen = false;
+    for ch in name.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == '-' || ch == '_' || ch.is_whitespace() {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(c) = normalized {
+            if c == '-' {
+                if prev_hyphen || out.is_empty() {
+                    continue;
+                }
+                prev_hyphen = true;
+            } else {
+                prev_hyphen = false;
+            }
+            out.push(c);
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let from_path = entry.path();
+        let to_path = to.join(entry.file_name());
+        if from_path.is_dir() {
+            copy_dir_recursive(&from_path, &to_path)?;
+        } else {
+            fs::copy(&from_path, &to_path)?;
+        }
     }
     Ok(())
 }

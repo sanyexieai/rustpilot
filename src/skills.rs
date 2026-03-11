@@ -1,3 +1,5 @@
+use crate::tool_capability::ToolCapabilityLevel;
+use crate::tool_manifest::resolve_or_create_tools_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,39 +67,33 @@ fn resolve_skills_dir() -> anyhow::Result<PathBuf> {
     anyhow::bail!("skills directory not found")
 }
 
-pub fn init_tool_skill(raw_name: &str) -> anyhow::Result<PathBuf> {
+pub fn init_tool_skill(raw_name: &str, level: ToolCapabilityLevel) -> anyhow::Result<PathBuf> {
     let name = normalize_skill_name(raw_name);
     if name.is_empty() {
         anyhow::bail!("invalid skill name: {}", raw_name);
     }
 
-    let base_dir = resolve_or_create_skills_dir()?;
-    let skill_dir = base_dir.join(&name);
+    let base_dir = resolve_or_create_tools_dir()?;
+    let skill_dir = base_dir.join(level.directory_name()).join(&name);
     if skill_dir.exists() {
         anyhow::bail!("skill already exists: {}", skill_dir.display());
     }
 
     fs::create_dir_all(skill_dir.join("tests"))?;
-    fs::write(skill_dir.join("SKILL.md"), skill_md_template(&name))?;
+    fs::write(
+        skill_dir.join("tool.toml"),
+        tool_manifest_template(&name, level),
+    )?;
+    fs::write(
+        skill_dir.join("README.md"),
+        tool_readme_template(&name, level),
+    )?;
     fs::write(skill_dir.join("tool.sh"), tool_script_template())?;
     fs::write(
         skill_dir.join("tests").join("smoke.json"),
         test_case_template(),
     )?;
     Ok(skill_dir)
-}
-
-fn resolve_or_create_skills_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var("SKILLS_DIR") {
-        let path = PathBuf::from(dir);
-        fs::create_dir_all(&path)?;
-        return Ok(path);
-    }
-
-    let cwd = std::env::current_dir()?;
-    let direct = cwd.join("skills");
-    fs::create_dir_all(&direct)?;
-    Ok(direct)
 }
 
 fn normalize_skill_name(input: &str) -> String {
@@ -130,9 +126,17 @@ fn normalize_skill_name(input: &str) -> String {
     out
 }
 
-fn skill_md_template(name: &str) -> String {
+fn tool_manifest_template(name: &str, level: ToolCapabilityLevel) -> String {
     format!(
-        "---\nname: {name}\ndescription: external tool skill\ntool_language: python\ntool_runtime: python 3\ntool_command: python\ntool_args_json: [\"./tool.py\"]\n---\n\n# {name}\n\nThis skill provides a minimal external tool template.\n"
+        "schema_version = 1\n\n[tool]\nname = \"{name}\"\ndescription = \"external tool skill\"\nlevel = \"{}\"\nruntime_kind = \"script\"\nlanguage = \"python\"\nruntime = \"python 3\"\ncommand = \"python\"\nargs = [\"./tool.py\"]\n",
+        level.as_str()
+    )
+}
+
+fn tool_readme_template(name: &str, level: ToolCapabilityLevel) -> String {
+    format!(
+        "# {name}\n\nThis tool must stay in `tools/{}/{name}/`.\n\nRequired files:\n- `tool.toml`\n- tool entrypoint such as `tool.py`\n- `tests/` with at least one smoke test\n",
+        level.directory_name()
     )
 }
 
@@ -205,6 +209,7 @@ fn parse_frontmatter(content: &str, path: &Path) -> Option<SkillInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_capability::ToolCapabilityLevel;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir {
@@ -272,20 +277,24 @@ mod tests {
     fn init_tool_skill_creates_template_files() {
         let temp = TestDir::new("init_tool_skill");
         unsafe {
-            std::env::set_var("SKILLS_DIR", temp.path());
+            std::env::set_var("TOOLS_DIR", temp.path());
         }
 
-        let created = init_tool_skill("Echo Tool").expect("init tool skill");
-        assert!(created.join("SKILL.md").is_file());
+        let created =
+            init_tool_skill("Echo Tool", ToolCapabilityLevel::Generic).expect("init tool skill");
+        assert!(created.join("tool.toml").is_file());
+        assert!(created.join("README.md").is_file());
         assert!(created.join("tool.sh").is_file());
         assert!(created.join("tests").join("smoke.json").is_file());
+        assert!(created.ends_with(Path::new("generic").join("echo-tool")));
 
-        let skill_md = fs::read_to_string(created.join("SKILL.md")).expect("read skill md");
-        assert!(skill_md.contains("tool_command"));
-        assert!(skill_md.contains("tool_language"));
+        let manifest = fs::read_to_string(created.join("tool.toml")).expect("read tool manifest");
+        assert!(manifest.contains("command = \"python\""));
+        assert!(manifest.contains("language = \"python\""));
+        assert!(manifest.contains("level = \"generic\""));
 
         unsafe {
-            std::env::remove_var("SKILLS_DIR");
+            std::env::remove_var("TOOLS_DIR");
         }
     }
 }

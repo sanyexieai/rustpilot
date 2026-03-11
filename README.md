@@ -12,6 +12,7 @@ The repository is in active development, but the main runtime is already wired t
 - Team/task/worktree orchestration
 - Resident agents and internal UI server
 - Skill loading from `skills/`
+- Tool discovery/import via `tool.toml`
 - MCP tool loading from `mcps/`
 
 Local verification currently passes:
@@ -54,6 +55,7 @@ cargo run
 - `/sessions`
 - `/session current`
 - `/session new [label]`
+- `/session new [label] [--focus <lead|shell|team|worker(...)>]`
 - `/session use <session_id>`
 - `/focus lead`
 - `/focus shell`
@@ -74,6 +76,8 @@ cargo run
 - `/skills`
 - `/skill <name>`
 - `/skill-tool-init <name>`
+- `/skill-tool-init <feature|project|generic|kernel> <name>`
+- `/tool-import <source_dir>`
 - `/mcp-tool-init <name>`
 
 ## Project Layout
@@ -95,7 +99,7 @@ src/
 
 ## Skills
 
-External tools can be loaded from `skills/` or a custom `SKILLS_DIR`.
+Prompt/reference skills are loaded from `skills/` or a custom `SKILLS_DIR`.
 
 Each skill directory must contain:
 
@@ -108,6 +112,63 @@ skills/
 ```
 
 The loader validates and runs the tool tests before exposing the tool to the agent.
+
+## Tools
+
+Executable project tools are separate from prompt skills. They must be installed under:
+
+```text
+tools/
+  feature/
+    my-tool/
+      tool.toml
+      README.md
+      tool.py
+      tests/
+        smoke.json
+  project/
+  generic/
+  kernel/
+```
+
+Rules:
+
+- Only `tools/<level>/<tool-name>/` is treated as an installed tool location
+- Each tool must live in its own directory
+- Each tool must include `tool.toml`
+- The directory level and `tool.toml` `level` must match
+- `kernel` tools must resolve to a compiled Rust binary
+- `generic` tools are intended for script runtimes such as Python or Node
+
+Minimal `tool.toml`:
+
+```toml
+schema_version = 1
+
+[tool]
+name = "echo_external"
+description = "echo input json"
+level = "generic"
+runtime_kind = "script"
+language = "python"
+runtime = "python 3"
+command = "python"
+args = ["./tool.py"]
+```
+
+You can scaffold a new tool with:
+
+```text
+/skill-tool-init generic echo-tool
+```
+
+You can import a discovered tool into the canonical project layout with:
+
+```text
+/tool-import path/to/unpacked/tool
+```
+
+Only directories containing a valid `tool.toml` are recognized as importable tools.
 
 ## MCP Tools
 

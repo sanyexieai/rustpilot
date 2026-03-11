@@ -5,6 +5,7 @@ use crate::app_support::{
 };
 use crate::cli::CliAction;
 use crate::config::LlmConfig;
+use crate::external_tools::import_external_tool;
 use crate::openai_compat::Message;
 use crate::project_tools::{ApprovalMode, ProjectContext};
 use crate::resident_agents::AgentSupervisor;
@@ -392,6 +393,13 @@ pub(crate) async fn process_cli_action(
             }
         }
         CliAction::Usage => frames.push(WireFrame::ack(render_usage_text(runtime.project)?)),
+        CliAction::ToolImport { source_dir } => {
+            let imported = import_external_tool(Path::new(&source_dir))?;
+            frames.push(WireFrame::ack(format!(
+                "imported tool to {}",
+                imported.display()
+            )));
+        }
         CliAction::ShellRun { command } => {
             if is_dangerous_command(&command) {
                 frames.push(WireFrame::error(format!(

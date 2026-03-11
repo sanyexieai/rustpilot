@@ -137,7 +137,8 @@ LLM_API_KEY=your_api_key_here\n\
     content.push_str(
         "\n# Optional provider-specific keys\n# KIMI_API_KEY=your_kimi_key_here\n# MOONSHOT_API_KEY=your_moonshot_key_here\n# MINIMAX_API_KEY=your_minimax_key_here\n\
 \n# Optional auth profile override\n# LLM_AUTH_PROFILE=kimi-coding:default\n\
-\n# Optional: custom skills directory\n# SKILLS_DIR=./skills\n",
+\n# Optional: custom skills directory\n# SKILLS_DIR=./skills\n\
+\n# Optional: custom tools directory (must use tools/<level>/<tool-name>/)\n# TOOLS_DIR=./tools\n",
     );
     content
 }
