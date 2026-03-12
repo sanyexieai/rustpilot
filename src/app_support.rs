@@ -1,7 +1,20 @@
 use crate::openai_compat::Message;
-use crate::project_tools::ProjectContext;
+use crate::project_tools::{ProjectContext, UiUserIntentMemory};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) const DEFAULT_UI_PORT: u16 = 3847;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UiIntent {
+    pub(crate) intent_type: String,
+    pub(crate) desired_view: String,
+    pub(crate) primary_request: String,
+    pub(crate) constraints: Vec<String>,
+    pub(crate) operator_notes: Vec<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InteractionMode {
@@ -119,6 +132,172 @@ pub(crate) fn parse_priority_prefixed_goal(input: &str) -> (String, String) {
         }
     }
     ("medium".to_string(), trimmed.to_string())
+}
+
+pub(crate) fn parse_ui_intent(input: &str) -> Option<UiIntent> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let english_exact = [
+        "open ui",
+        "open the ui",
+        "open dashboard",
+        "open the dashboard",
+        "open status page",
+        "open the status page",
+        "open control panel",
+        "open management page",
+        "show dashboard",
+        "show status page",
+        "show control panel",
+    ];
+    if english_exact
+        .iter()
+        .any(|pattern| lowered.contains(pattern))
+    {
+        return Some(UiIntent {
+            intent_type: "open_management_page".to_string(),
+            desired_view: "project_state".to_string(),
+            primary_request: trimmed.to_string(),
+            constraints: Vec::new(),
+            operator_notes: vec!["intent detected from direct ui open phrasing".to_string()],
+        });
+    }
+
+    let has_open = [
+        "open",
+        "show",
+        "launch",
+        "start",
+        "\u{6253}\u{5f00}",
+        "\u{5f00}\u{542f}",
+        "\u{5f00}\u{4e2a}",
+        "\u{7ed9}\u{6211}\u{5f00}",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword));
+    let wants_tasks = ["task", "tasks", "任务", "工单"]
+        .iter()
+        .any(|keyword| lowered.contains(keyword));
+    let wants_sessions = ["session", "sessions", "会话"]
+        .iter()
+        .any(|keyword| lowered.contains(keyword));
+    let wants_approval = ["approval", "approvals", "审批"]
+        .iter()
+        .any(|keyword| lowered.contains(keyword));
+    let wants_residents = ["resident", "residents", "agent", "agents", "驻留", "代理"]
+        .iter()
+        .any(|keyword| lowered.contains(keyword));
+    let has_ui_surface = [
+        "ui",
+        "dashboard",
+        "status page",
+        "control panel",
+        "management page",
+        "page",
+        "panel",
+        "\u{9875}\u{9762}",
+        "\u{754c}\u{9762}",
+        "\u{9762}\u{677f}",
+        "\u{72b6}\u{6001}\u{9875}",
+        "\u{7ba1}\u{7406}\u{9875}",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword));
+    let has_management_intent = [
+        "status",
+        "current state",
+        "system state",
+        "project state",
+        "manage",
+        "management",
+        "current",
+        "\u{72b6}\u{6001}",
+        "\u{5f53}\u{524d}",
+        "\u{7ba1}\u{7406}",
+        "\u{7cfb}\u{7edf}",
+        "\u{9879}\u{76ee}",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword));
+
+    if !((has_open || has_management_intent) && has_ui_surface) {
+        return None;
+    }
+
+    let desired_view = if wants_tasks {
+        "task_board"
+    } else if wants_sessions {
+        "session_console"
+    } else if wants_approval {
+        "approval_overview"
+    } else if wants_residents {
+        "resident_monitor"
+    } else {
+        "project_state"
+    };
+
+    Some(UiIntent {
+        intent_type: "open_management_page".to_string(),
+        desired_view: desired_view.to_string(),
+        primary_request: trimmed.to_string(),
+        constraints: Vec::new(),
+        operator_notes: vec![format!("derived desired_view={}", desired_view)],
+    })
+}
+
+pub(crate) fn ui_intent_to_memory(intent: &UiIntent) -> UiUserIntentMemory {
+    UiUserIntentMemory {
+        updated_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64(),
+        intent_type: intent.intent_type.clone(),
+        desired_view: intent.desired_view.clone(),
+        primary_request: intent.primary_request.clone(),
+        constraints: intent.constraints.clone(),
+        operator_notes: intent.operator_notes.clone(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+    Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+    Command::new("open").arg(url).spawn()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+    Command::new("xdg-open").arg(url).spawn()?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+pub(crate) fn open_browser(_url: &str) -> anyhow::Result<()> {
+    anyhow::bail!("opening a browser is not supported on this platform")
+}
+
+pub(crate) fn resolve_ui_port(project: &ProjectContext) -> u16 {
+    project
+        .residents()
+        .get("ui")
+        .ok()
+        .flatten()
+        .and_then(|config| config.listen_port)
+        .unwrap_or(DEFAULT_UI_PORT)
+}
+
+pub(crate) fn ui_base_url(project: &ProjectContext) -> String {
+    format!("http://127.0.0.1:{}", resolve_ui_port(project))
 }
 
 pub(crate) fn build_priority_task_description(source: &str, priority: &str, goal: &str) -> String {
@@ -301,4 +480,26 @@ pub(crate) fn parse_resident_args(
         role: role.ok_or_else(|| anyhow::anyhow!("missing --role"))?,
         max_parallel: max_parallel.unwrap_or(default_max_parallel),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ui_intent;
+
+    #[test]
+    fn ui_open_request_detection_matches_natural_language() {
+        assert!(parse_ui_intent("打开一个管理当前状态的页面").is_some());
+        assert!(parse_ui_intent("open dashboard").is_some());
+        assert!(parse_ui_intent("show me the current status page").is_some());
+        assert!(parse_ui_intent("/session current").is_none());
+        assert!(parse_ui_intent("continue working on the task").is_none());
+    }
+
+    #[test]
+    fn ui_intent_parser_derives_specialized_view() {
+        let intent =
+            parse_ui_intent("open a task dashboard for the current project").expect("intent");
+        assert_eq!(intent.intent_type, "open_management_page");
+        assert_eq!(intent.desired_view, "task_board");
+    }
 }

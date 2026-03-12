@@ -11,6 +11,7 @@ The repository is in active development, but the main runtime is already wired t
 - Approval modes: `auto`, `read_only`, `manual`
 - Team/task/worktree orchestration
 - Resident agents and internal UI server
+- Agent-generated chat-style management UI driven by project state, UI memory, backend protocols, and structured `chat_ui` data
 - Skill loading from `skills/`
 - Tool discovery/import via `tool.toml`
 - MCP tool loading from `mcps/`
@@ -46,6 +47,8 @@ LLM_USER_AGENT=openclaw
 ```bash
 cargo run
 ```
+
+The main process starts a local UI server automatically. Natural-language requests such as `open dashboard` or `打开一个管理当前状态的页面` trigger the generated management page instead of requiring a dedicated command.
 
 ## Common CLI Commands
 
@@ -96,6 +99,28 @@ src/
   runtime/                focused runtime helpers
   project_tools/          tasks, worktrees, approvals, mailbox, sessions
 ```
+
+The UI page is no longer maintained as a static `src/ui/index.html` template. The server generates and caches project-local artifacts under `.team/`, including:
+
+```text
+.team/
+  ui_surface.json
+  ui_schema.json
+  ui_rules.json
+  ui_page_context.json
+  ui_page.html
+  ui_page_request.json
+```
+
+These files represent the UI planning, schema, structured UI design rules, final HTML cache, and structured user-intent memory used by the UI agent.
+
+By default, the intended generated UI is a chat-style control surface:
+
+- one fixed `Main` conversation
+- one `Agent Team` group thread
+- a detail panel for the selected agent's transcript and runtime state
+
+The Rust server should provide data and rules; the final UI code should come from the UI agent. The built-in fallback page is only a minimal bootstrap shell while generation is pending or retrying.
 
 ## Skills
 

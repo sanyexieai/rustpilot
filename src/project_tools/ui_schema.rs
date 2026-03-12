@@ -98,6 +98,7 @@ impl UiSchemaManager {
         &self,
         model: &SystemModel,
         surface: &UiSurface,
+        desired_view: &str,
         fingerprint: &str,
     ) -> anyhow::Result<UiSchema> {
         let page = surface
@@ -225,11 +226,12 @@ impl UiSchemaManager {
             });
         }
 
+        reorder_sections_for_view(&mut sections, desired_view);
         let schema = UiSchema {
             generated_at: now_secs_f64(),
             source_fingerprint: fingerprint.to_string(),
-            title: page.title.clone(),
-            subtitle: page.purpose.clone(),
+            title: schema_title_for_view(desired_view, &page.title),
+            subtitle: schema_subtitle_for_view(desired_view, &page.purpose),
             theme_name: "paper-console".to_string(),
             sections,
         };
@@ -242,9 +244,10 @@ impl UiSchemaManager {
         model: &SystemModel,
         surface: &UiSurface,
         prompt_text: &str,
+        desired_view: &str,
         fingerprint: &str,
     ) -> anyhow::Result<UiSchema> {
-        let fallback = self.generate_from_surface(model, surface, fingerprint)?;
+        let fallback = self.generate_from_surface(model, surface, desired_view, fingerprint)?;
         let model_json = serde_json::to_string_pretty(model)?;
         let surface_json = serde_json::to_string_pretty(surface)?;
         let fallback_json = serde_json::to_string_pretty(&fallback)?;
@@ -255,6 +258,8 @@ Return exactly one JSON object. Do not output explanations, Markdown, or code fe
 \n\
 Prompt text:\n{prompt_text}\n\
 \n\
+Desired view:\n{desired_view}\n\
+\n\
 Rules:\n\
 1. The page structure must follow ui_surface first, not free-form invention.\n\
 2. You may only use sections, sources, and targets that are supported by backend protocols.\n\
@@ -263,6 +268,7 @@ Rules:\n\
 5. You may optimize title, subtitle, section order, descriptions, empty states, labels, target_options, columns, and theme_name.\n\
 6. Any language or copy preference must come from the prompt text and surface spec, not from hardcoded defaults.\n\
 7. The goal is to evolve UI expression when system capability or prompt text changes, without breaking protocol constraints.\n\
+8. The desired view should influence section emphasis and ordering.\n\
 \n\
 System model:\n{model_json}\n\
 \n\
@@ -270,7 +276,8 @@ UI surface spec:\n{surface_json}\n\
 \n\
 Fallback schema:\n{fallback_json}\n\
 \n\
-Now output the final JSON:"
+Now output the final JSON:",
+            desired_view = desired_view
         );
 
         let content = std::thread::spawn(move || -> anyhow::Result<String> {
@@ -447,6 +454,89 @@ fn normalize_schema(schema: &mut UiSchema, fallback: &UiSchema) {
     }
 }
 
+fn reorder_sections_for_view(sections: &mut [UiSection], desired_view: &str) {
+    let priority = match desired_view {
+        "task_board" => [
+            "tasks",
+            "summary",
+            "composer",
+            "alerts",
+            "residents",
+            "proposals",
+            "decisions",
+        ],
+        "session_console" => [
+            "composer",
+            "summary",
+            "residents",
+            "alerts",
+            "tasks",
+            "proposals",
+            "decisions",
+        ],
+        "approval_overview" => [
+            "alerts",
+            "summary",
+            "decisions",
+            "proposals",
+            "residents",
+            "tasks",
+            "composer",
+        ],
+        "resident_monitor" => [
+            "residents",
+            "alerts",
+            "summary",
+            "tasks",
+            "composer",
+            "proposals",
+            "decisions",
+        ],
+        _ => [
+            "summary",
+            "alerts",
+            "residents",
+            "tasks",
+            "composer",
+            "proposals",
+            "decisions",
+        ],
+    };
+
+    sections.sort_by_key(|section| {
+        priority
+            .iter()
+            .position(|item| *item == section.id || *item == section.kind)
+            .unwrap_or(priority.len())
+    });
+}
+
+fn schema_title_for_view(desired_view: &str, default_title: &str) -> String {
+    match desired_view {
+        "task_board" => "Task Board".to_string(),
+        "session_console" => "Session Console".to_string(),
+        "approval_overview" => "Approval Overview".to_string(),
+        "resident_monitor" => "Resident Monitor".to_string(),
+        _ => default_title.to_string(),
+    }
+}
+
+fn schema_subtitle_for_view(desired_view: &str, default_subtitle: &str) -> String {
+    match desired_view {
+        "task_board" => "Focus on queued work, blockers, and dispatch flow.".to_string(),
+        "session_console" => {
+            "Focus on sessions, focus routing, and current interaction state.".to_string()
+        }
+        "approval_overview" => {
+            "Focus on policy state, approval blocks, and governance decisions.".to_string()
+        }
+        "resident_monitor" => {
+            "Focus on resident health, backlog, and runtime activity.".to_string()
+        }
+        _ => default_subtitle.to_string(),
+    }
+}
+
 fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()> {
     if schema.title.trim().is_empty() {
         anyhow::bail!("ui schema title cannot be empty");
@@ -604,4 +694,129 @@ fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     text.get(start..=end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UiSchemaManager;
+    use crate::project_tools::{SystemModel, SystemSummary, UiAction, UiSurface, UiSurfacePage};
+
+    #[test]
+    fn generate_from_surface_respects_desired_view() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rustpilot-ui-schema-test-{}-{}",
+            std::process::id(),
+            crate::project_tools::util::now_secs_f64()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let manager = UiSchemaManager::new(temp_dir.clone()).expect("manager");
+        let model = SystemModel {
+            generated_at: 0.0,
+            summary: SystemSummary {
+                resident_count: 1,
+                pending_tasks: 1,
+                running_tasks: 0,
+                blocked_tasks: 0,
+                completed_tasks: 0,
+                open_proposals: 0,
+                recent_decisions: 0,
+            },
+            alerts: Vec::new(),
+            protocols: vec![
+                crate::project_tools::SystemProtocol {
+                    id: "ui.status".to_string(),
+                    transport: "http".to_string(),
+                    method: "GET".to_string(),
+                    path: "/api/status".to_string(),
+                    purpose: "status".to_string(),
+                    readonly: true,
+                    requires_confirmation: false,
+                    targets: Vec::new(),
+                    request_fields: Vec::new(),
+                    response_fields: Vec::new(),
+                    supported_sections: vec![
+                        "metrics".to_string(),
+                        "residents".to_string(),
+                        "tasks".to_string(),
+                    ],
+                    supported_sources: vec![
+                        "summary".to_string(),
+                        "residents".to_string(),
+                        "tasks".to_string(),
+                    ],
+                    event_types: Vec::new(),
+                },
+                crate::project_tools::SystemProtocol {
+                    id: "ui.wire.dispatch".to_string(),
+                    transport: "http".to_string(),
+                    method: "POST".to_string(),
+                    path: "/api/wire".to_string(),
+                    purpose: "dispatch".to_string(),
+                    readonly: false,
+                    requires_confirmation: false,
+                    targets: vec!["ui".to_string()],
+                    request_fields: Vec::new(),
+                    response_fields: Vec::new(),
+                    supported_sections: vec!["composer".to_string()],
+                    supported_sources: vec!["composer".to_string()],
+                    event_types: Vec::new(),
+                },
+            ],
+            residents: Vec::new(),
+            recent_prompt_changes: Vec::new(),
+            tasks: vec![crate::project_tools::SystemTask {
+                id: 1,
+                subject: "test".to_string(),
+                status: "pending".to_string(),
+                priority: "medium".to_string(),
+                role: "developer".to_string(),
+                owner: "lead".to_string(),
+            }],
+            proposals: Vec::new(),
+            decisions: Vec::new(),
+        };
+        let surface = UiSurface {
+            generated_at: 0.0,
+            source_fingerprint: "surface".to_string(),
+            title: "System Overview".to_string(),
+            summary: "summary".to_string(),
+            pages: vec![UiSurfacePage {
+                id: "system-overview".to_string(),
+                title: "System Overview".to_string(),
+                purpose: "Operate the system".to_string(),
+                audience: "operator".to_string(),
+                data_sources: vec![
+                    "summary".to_string(),
+                    "residents".to_string(),
+                    "tasks".to_string(),
+                ],
+                supported_sections: vec![
+                    "metrics".to_string(),
+                    "residents".to_string(),
+                    "composer".to_string(),
+                    "tasks".to_string(),
+                ],
+                actions: vec![UiAction {
+                    id: "dispatch-ui".to_string(),
+                    title: "Dispatch".to_string(),
+                    protocol_id: "ui.wire.dispatch".to_string(),
+                    target: "ui".to_string(),
+                    description: "Send request".to_string(),
+                }],
+                notes: Vec::new(),
+            }],
+        };
+
+        let schema = manager
+            .generate_from_surface(&model, &surface, "task_board", "fp")
+            .expect("schema");
+
+        assert_eq!(schema.title, "Task Board");
+        assert_eq!(
+            schema.sections.first().map(|item| item.id.as_str()),
+            Some("tasks")
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
 }

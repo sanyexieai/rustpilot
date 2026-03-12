@@ -4,8 +4,8 @@ use std::sync::Arc;
 use super::{
     AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, Mailbox,
     PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
-    ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiSchemaManager,
-    UiSurfaceManager, WorktreeManager,
+    ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiPageManager,
+    UiSchemaManager, UiSurfaceManager, WorktreeManager,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,7 @@ pub struct ProjectContext {
     system_model: Arc<SystemModelManager>,
     ui_surface: Arc<UiSurfaceManager>,
     ui_schema: Arc<UiSchemaManager>,
+    ui_page: Arc<UiPageManager>,
     worktrees: Arc<WorktreeManager>,
 }
 
@@ -50,6 +51,7 @@ impl ProjectContext {
         let system_model = Arc::new(SystemModelManager::new(repo_root.join(".team"))?);
         let ui_surface = Arc::new(UiSurfaceManager::new(repo_root.join(".team"))?);
         let ui_schema = Arc::new(UiSchemaManager::new(repo_root.join(".team"))?);
+        let ui_page = Arc::new(UiPageManager::new(repo_root.join(".team"))?);
         let worktrees = Arc::new(WorktreeManager::new(
             repo_root.clone(),
             (*tasks).clone(),
@@ -73,6 +75,7 @@ impl ProjectContext {
             system_model,
             ui_surface,
             ui_schema,
+            ui_page,
             worktrees,
         })
     }
@@ -147,5 +150,9 @@ impl ProjectContext {
 
     pub fn ui_surface(&self) -> &UiSurfaceManager {
         self.ui_surface.as_ref()
+    }
+
+    pub fn ui_page(&self) -> &UiPageManager {
+        self.ui_page.as_ref()
     }
 }

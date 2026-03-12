@@ -7,3 +7,4 @@ target-test/*
 .cargo/*
 .terminal_sessions/*
 .team/*
+target-test-isolated/*

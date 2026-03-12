@@ -1,7 +1,8 @@
 use crate::activity::new_activity_handle;
 use crate::app_commands::{CliRuntime, LoopDirective, process_cli_action};
 use crate::app_support::{
-    InteractionMode, load_repo_env, parse_resident_args, parse_teammate_args, pump_lead_mailbox,
+    InteractionMode, load_repo_env, open_browser, parse_resident_args, parse_teammate_args,
+    parse_ui_intent, pump_lead_mailbox, resolve_ui_port, ui_base_url,
 };
 use crate::cli::handle_cli_command;
 use crate::config::{LlmConfig, default_llm_user_agent};
@@ -15,10 +16,12 @@ use crate::runtime_env::{
 };
 use crate::skills::SkillRegistry;
 use crate::team::run_teammate_once;
+use crate::ui_server::spawn_ui_server;
 use crate::wire::{WireEvent, WireFrame, WireResponse};
 use crate::wire_exec::{WireRuntime, execute_wire_request};
 use anyhow::Context;
 use std::io::{self, Write};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 const AUTO_TEAM_MAX_PARALLEL: usize = 2;
@@ -125,6 +128,8 @@ pub async fn run() -> anyhow::Result<()> {
     let mut lead_cursor = 0usize;
     let mut interaction_mode = InteractionMode::Lead;
     let system_prompt = render_lead_system_prompt(&repo_root)?;
+    let ui_port = resolve_ui_port(&project);
+    let _ui_server = start_main_ui_server(repo_root.clone(), ui_port);
     let default_session =
         project
             .sessions()
@@ -147,6 +152,7 @@ pub async fn run() -> anyhow::Result<()> {
     println!("repo root: {}", repo_root.display());
     println!("focus: {}", interaction_mode.label());
     println!("session: {}", current_session_id);
+    println!("ui: http://127.0.0.1:{ui_port}");
     if !project.worktrees().git_available {
         println!("warning: current directory is not a git repository");
     }
@@ -166,6 +172,14 @@ pub async fn run() -> anyhow::Result<()> {
         }
 
         let trimmed = input.trim();
+        if parse_ui_intent(trimmed).is_some() {
+            let url = ui_base_url(&project);
+            match open_browser(&url) {
+                Ok(()) => println!("opened management page: {url}"),
+                Err(err) => println!("management page: {url} (browser launch failed: {err})"),
+            }
+            continue;
+        }
         if let Some(action) = handle_cli_command(trimmed, &project, &progress, &skills)? {
             let outcome = process_cli_action(
                 action,
@@ -234,6 +248,24 @@ pub async fn run() -> anyhow::Result<()> {
 
     supervisor.stop_all();
     Ok(())
+}
+
+fn start_main_ui_server(repo_root: std::path::PathBuf, port: u16) -> Option<JoinHandle<()>> {
+    match spawn_ui_server(repo_root, "lead-ui".to_string(), port) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            let address_in_use = err
+                .chain()
+                .filter_map(|item| item.downcast_ref::<std::io::Error>())
+                .any(|io_err| io_err.kind() == std::io::ErrorKind::AddrInUse);
+            if address_in_use {
+                println!("ui server already available on http://127.0.0.1:{port}");
+            } else {
+                println!("warning: failed to start ui server on port {port}: {err}");
+            }
+            None
+        }
+    }
 }
 
 fn emit_wire_frames(frames: &[WireFrame]) {

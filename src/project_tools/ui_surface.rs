@@ -154,21 +154,32 @@ impl UiSurfaceManager {
         read_prompt_recovery(&self.planner_prompt_path)
     }
 
-    pub fn collection_fingerprint(&self, model: &SystemModel) -> anyhow::Result<String> {
+    pub fn collection_fingerprint(
+        &self,
+        model: &SystemModel,
+        desired_view: &str,
+    ) -> anyhow::Result<String> {
         Ok(format!(
-            "{}:{}",
+            "{}:{}:{}",
             self.planner_prompt_fingerprint()?,
-            model_fingerprint(model)?
+            model_fingerprint(model)?,
+            desired_view
         ))
     }
 
-    pub fn rebuild_from_model(&self, model: &SystemModel) -> anyhow::Result<UiSurface> {
+    pub fn rebuild_from_model(
+        &self,
+        model: &SystemModel,
+        desired_view: &str,
+    ) -> anyhow::Result<UiSurface> {
         let fingerprint = model_fingerprint(model)?;
         let page = UiPage {
             id: "system-overview".to_string(),
-            title: "系统总览".to_string(),
-            purpose: "统一承载系统运行状态、治理信息和对常驻 agent 的操作入口".to_string(),
-            audience: "操作者、调度者、观察者".to_string(),
+            title: "System Overview".to_string(),
+            purpose:
+                "Provide one management surface for system state, governance signals, and common operator actions."
+                    .to_string(),
+            audience: "operator, dispatcher, observer".to_string(),
             data_sources: vec![
                 "summary".to_string(),
                 "alerts".to_string(),
@@ -189,39 +200,48 @@ impl UiSurfaceManager {
             actions: vec![
                 UiAction {
                     id: "dispatch-ui".to_string(),
-                    title: "投递给 UI Agent".to_string(),
+                    title: "Send to UI Agent".to_string(),
                     protocol_id: "ui.request.dispatch".to_string(),
                     target: "ui".to_string(),
-                    description: "用于请求页面设计、结构调整和界面演化".to_string(),
+                    description:
+                        "Request page design changes, structure adjustments, or UI evolution."
+                            .to_string(),
                 },
                 UiAction {
                     id: "dispatch-concierge".to_string(),
-                    title: "投递给需求接待".to_string(),
+                    title: "Send to Concierge".to_string(),
                     protocol_id: "ui.request.dispatch".to_string(),
                     target: "concierge".to_string(),
-                    description: "用于把自然语言需求整理成系统任务".to_string(),
+                    description: "Turn natural-language requests into structured system work."
+                        .to_string(),
                 },
                 UiAction {
                     id: "dispatch-reviewer".to_string(),
-                    title: "投递给评审整理".to_string(),
+                    title: "Send to Reviewer".to_string(),
                     protocol_id: "ui.request.dispatch".to_string(),
                     target: "reviewer".to_string(),
-                    description: "用于汇总阻塞、失败和优化建议".to_string(),
+                    description:
+                        "Collect blockers, failures, and optimization suggestions."
+                            .to_string(),
                 },
             ],
             notes: vec![
-                "页面结构必须服从系统协议，不允许编造不存在的数据源或操作".to_string(),
-                "页面信息文件是 UI Agent 的设计输入，不是最终页面代码".to_string(),
+                "The page structure must follow supported backend protocols and real data sources."
+                    .to_string(),
+                "ui_surface.json is planning input for the UI agent, not final page code."
+                    .to_string(),
             ],
         };
-        let surface = UiSurface {
+        let mut surface = UiSurface {
             generated_at: now_secs_f64(),
             source_fingerprint: fingerprint,
-            title: "Rustpilot 页面信息".to_string(),
-            summary: "由页面信息收集阶段整理出的可展示页面、数据源和可用动作，供 UI Agent 生成界面"
-                .to_string(),
+            title: "Rustpilot UI Surface".to_string(),
+            summary:
+                "A planning artifact that captures pages, data sources, and actions for the UI agent."
+                    .to_string(),
             pages: vec![page],
         };
+        apply_surface_view_bias(&mut surface, desired_view);
         self.save(&surface)?;
         Ok(surface)
     }
@@ -230,28 +250,32 @@ impl UiSurfaceManager {
         &self,
         model: &SystemModel,
         planner_prompt: &str,
+        desired_view: &str,
     ) -> anyhow::Result<UiSurface> {
-        let fallback = self.rebuild_from_model(model)?;
+        let fallback = self.rebuild_from_model(model, desired_view)?;
         let model_json = serde_json::to_string_pretty(model)?;
         let fallback_json = serde_json::to_string_pretty(&fallback)?;
         let prompt = format!(
-            "你是 Rustpilot 的页面信息收集 agent。你的职责是从系统业务模型中整理出“应该展示哪些页面、页面服务谁、依赖哪些数据源、允许哪些动作”，并固化为 ui_surface.json。\n\
-只返回一个 JSON 对象，不要输出解释、Markdown 或代码块。\n\
+            "You are Rustpilot's UI surface planner. Your job is to inspect the system model and produce a stable `ui_surface.json` planning artifact.\n\
+Return exactly one JSON object. Do not output explanations, Markdown, or code fences.\n\
 \n\
-收集提示词如下：\n{planner_prompt}\n\
+Planner prompt:\n{planner_prompt}\n\
 \n\
-规则：\n\
-1. 你的输出是页面信息文件，不是最终页面代码，也不是 UiSchema。\n\
-2. 页面信息必须来自系统功能和后端协议，不得虚构页面能力。\n\
-3. actions.protocol_id、actions.target 必须来自 protocols 中真实存在的能力。\n\
-4. pages[].supported_sections 和 pages[].data_sources 只能使用系统协议允许的 section/source。\n\
-5. 页面文案默认使用简体中文。\n\
+Desired view:\n{desired_view}\n\
 \n\
-系统业务模型如下：\n{model_json}\n\
+Rules:\n\
+1. Output planning data, not final HTML and not `UiSchema`.\n\
+2. Every page, data source, section, and action must be backed by real backend protocols.\n\
+3. `actions.protocol_id` and `actions.target` must match supported protocol definitions.\n\
+4. `pages[].supported_sections` and `pages[].data_sources` may only contain supported section/source ids.\n\
+5. Bias the plan toward the desired view when deciding what should be emphasized first.\n\
+6. Keep the result stable, cacheable, and easy to audit.\n\
 \n\
-兜底页面信息如下：\n{fallback_json}\n\
+System model:\n{model_json}\n\
 \n\
-现在输出最终 JSON："
+Fallback surface:\n{fallback_json}\n\
+\n\
+Now output the final JSON:"
         );
 
         let repo_root = self.repo_root()?;
@@ -265,7 +289,7 @@ impl UiSurfaceManager {
                 Message {
                     role: "system".to_string(),
                     content: Some(
-                        "你是严格受协议约束的页面信息规划器。只能输出合法 JSON，不能虚构不存在的页面能力。"
+                        "You are a protocol-constrained UI surface planner. Output valid JSON only."
                             .to_string(),
                     ),
                     tool_call_id: None,
@@ -336,13 +360,17 @@ impl UiSurfaceManager {
                                 .into_iter()
                                 .next()
                                 .and_then(|choice| choice.message.content)
-                                .ok_or_else(|| anyhow::anyhow!("surface collector returned no content"))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("surface collector returned no content")
+                                })
                         }
                         LlmApiKind::AnthropicMessages => {
                             let parsed: anthropic_compat::AnthropicResponse = response.json()?;
                             anthropic_compat::parse_response(parsed)
                                 .content
-                                .ok_or_else(|| anyhow::anyhow!("surface collector returned no content"))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("surface collector returned no content")
+                                })
                         }
                     };
                 }
@@ -363,7 +391,9 @@ impl UiSurfaceManager {
             }
             anyhow::bail!(
                 "{}",
-                last_error.unwrap_or_else(|| "ui surface request failed without provider response".to_string())
+                last_error.unwrap_or_else(
+                    || "ui surface request failed without provider response".to_string()
+                )
             )
         })
         .join()
@@ -387,46 +417,46 @@ impl UiSurfaceManager {
 }
 
 fn default_ui_prompt() -> &'static str {
-    r#"你是 Rustpilot 的 UI Agent。
+    r#"You are Rustpilot's UI Agent.
 
-你的职责：
-- 读取页面信息文件 ui_surface.json
-- 读取系统业务模型 system_model.json
-- 在后端协议允许的边界内设计页面结构和文案
-- 产出 UiSchema 作为页面缓存
+Responsibilities:
+- Read `ui_surface.json`
+- Read `system_model.json`
+- Design page structure and copy within backend protocol constraints
+- Produce `UiSchema` as a cacheable UI planning artifact
 
-你的限制：
-- 不得虚构不存在的接口、事件、按钮动作或数据源
-- 不得删除系统关键区块：metrics、residents、composer
-- 有 alerts 时必须体现 alerts
-- 页面文案默认使用简体中文
-- 页面应优先表达系统业务和协作状态，而不是仅表现单个 agent
+Constraints:
+- Do not invent unsupported endpoints, events, actions, or data sources
+- Do not remove required core sections such as `metrics`, `residents`, and `composer`
+- If alerts exist, alerts must still be represented
+- Prefer operational clarity over decorative polish
+- Represent system workflow and collaboration state, not just a single agent
 
-你的演化目标：
-- 当系统功能增加时，能根据页面信息文件新增或重组页面区块
-- 当用户更新提示词时，能在不突破协议约束的前提下优化布局、文案和层级
-- 最终页面应缓存到本地，供后续快速加载与比对
+Evolution goals:
+- Adapt page structure when system capabilities change
+- Respond to updated prompts without breaking protocol constraints
+- Keep generated UI artifacts stable and comparable across revisions
 "#
 }
 
 fn default_planner_prompt() -> &'static str {
-    r#"你是 Rustpilot 的页面信息收集 agent。
+    r#"You are Rustpilot's UI surface planner.
 
-你的职责：
-- 从 system_model.json 收集系统当前可见的功能、角色、数据源和动作
-- 整理成稳定的页面信息文件 ui_surface.json
-- 让 UI Agent 后续能基于这份页面信息演化页面
+Responsibilities:
+- Inspect `system_model.json`
+- Collect visible capabilities, roles, data sources, and allowed actions
+- Persist a stable `ui_surface.json` that later UI generation can build from
 
-你的限制：
-- 不得直接生成页面代码
-- 不得虚构协议、接口、事件、目标角色或数据源
-- 页面信息应体现系统业务，而不是只体现单个 agent
-- 页面信息默认使用简体中文
+Constraints:
+- Do not generate final page code
+- Do not invent protocols, interfaces, events, roles, or data sources
+- Reflect system workflow, not just one agent's point of view
+- Keep the output structured, cacheable, and easy to audit
 
-你的演化目标：
-- 当系统功能升级时，补充或重组 pages / actions / supported_sections
-- 当协议能力变化时，同步调整页面信息
-- 为 UI Agent 提供稳定、可缓存、可审查的设计输入
+Evolution goals:
+- Adjust pages, actions, and supported sections when capabilities change
+- Keep the surface spec aligned with protocol changes
+- Provide stable planning input for downstream schema and page generation
 "#
 }
 
@@ -450,6 +480,127 @@ fn normalize_surface(surface: &mut UiSurface, fallback: &UiSurface) {
     }
     if surface.pages.is_empty() {
         surface.pages = fallback.pages.clone();
+    }
+}
+
+fn apply_surface_view_bias(surface: &mut UiSurface, desired_view: &str) {
+    surface.title = format!("Rustpilot surface ({})", desired_view);
+    surface.summary = surface_summary_for_view(desired_view).to_string();
+    if let Some(page) = surface.pages.first_mut() {
+        page.title = surface_title_for_view(desired_view).to_string();
+        page.purpose = surface_purpose_for_view(desired_view).to_string();
+        page.audience = surface_audience_for_view(desired_view).to_string();
+        reorder_surface_items_for_view(&mut page.data_sources, desired_view);
+        reorder_surface_items_for_view(&mut page.supported_sections, desired_view);
+    }
+}
+
+fn reorder_surface_items_for_view(items: &mut [String], desired_view: &str) {
+    let priority = match desired_view {
+        "task_board" => [
+            "tasks",
+            "summary",
+            "alerts",
+            "residents",
+            "proposals",
+            "decisions",
+            "composer",
+            "metrics",
+        ],
+        "session_console" => [
+            "composer",
+            "summary",
+            "residents",
+            "alerts",
+            "tasks",
+            "proposals",
+            "decisions",
+            "metrics",
+        ],
+        "approval_overview" => [
+            "alerts",
+            "decisions",
+            "proposals",
+            "summary",
+            "residents",
+            "tasks",
+            "composer",
+            "metrics",
+        ],
+        "resident_monitor" => [
+            "residents",
+            "alerts",
+            "summary",
+            "tasks",
+            "composer",
+            "proposals",
+            "decisions",
+            "metrics",
+        ],
+        _ => [
+            "summary",
+            "alerts",
+            "residents",
+            "tasks",
+            "proposals",
+            "decisions",
+            "composer",
+            "metrics",
+        ],
+    };
+    items.sort_by_key(|item| {
+        priority
+            .iter()
+            .position(|priority_item| *priority_item == item)
+            .unwrap_or(priority.len())
+    });
+}
+
+fn surface_title_for_view(desired_view: &str) -> &'static str {
+    match desired_view {
+        "task_board" => "Task Board",
+        "session_console" => "Session Console",
+        "approval_overview" => "Approval Overview",
+        "resident_monitor" => "Resident Monitor",
+        _ => "System Overview",
+    }
+}
+
+fn surface_purpose_for_view(desired_view: &str) -> &'static str {
+    match desired_view {
+        "task_board" => "Focus the UI plan on queued work, blockers, and dispatch actions.",
+        "session_console" => "Focus the UI plan on sessions, routing, and live operator actions.",
+        "approval_overview" => {
+            "Focus the UI plan on policy state, approval blocks, and governance context."
+        }
+        "resident_monitor" => {
+            "Focus the UI plan on resident health, backlog, and runtime visibility."
+        }
+        _ => "Provide an overview of current system state and operator actions.",
+    }
+}
+
+fn surface_audience_for_view(desired_view: &str) -> &'static str {
+    match desired_view {
+        "task_board" => "operator, dispatcher, reviewer",
+        "session_console" => "operator, support, debugger",
+        "approval_overview" => "operator, reviewer, governance owner",
+        "resident_monitor" => "operator, maintainer, observer",
+        _ => "operator, dispatcher, observer",
+    }
+}
+
+fn surface_summary_for_view(desired_view: &str) -> &'static str {
+    match desired_view {
+        "task_board" => "Surface plan biased toward task flow, blockers, and work dispatch.",
+        "session_console" => {
+            "Surface plan biased toward sessions, routing state, and interaction controls."
+        }
+        "approval_overview" => {
+            "Surface plan biased toward approval state, policy context, and decisions."
+        }
+        "resident_monitor" => "Surface plan biased toward resident runtime state and health.",
+        _ => "Surface plan for the current project state and operational control.",
     }
 }
 

@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::app_support::{parse_ui_intent, ui_base_url, ui_intent_to_memory};
 use crate::project_tools::{ProjectContext, ResidentAgentConfig};
 use crate::team::TeamRuntime;
 use crate::ui_server::spawn_ui_server;
@@ -480,6 +481,38 @@ fn handle_ui_request_behavior(
         return Ok(());
     }
 
+    if let Some(intent) = parse_ui_intent(&item.message) {
+        project
+            .ui_page()
+            .save_user_request_memory(&ui_intent_to_memory(&intent))?;
+        let ui_url = ui_base_url(project);
+        let _ = project.decisions().append(
+            &config.agent_id,
+            "ui.request.page_goal_updated",
+            None,
+            None,
+            "updated ui page goal from mailbox request",
+            &format!(
+                "from={} url={} desired_view={}",
+                item.from, ui_url, intent.desired_view
+            ),
+        );
+        let _ = project.mailbox().send_typed(
+            &config.agent_id,
+            &item.from,
+            "ui.request.accepted",
+            &format!(
+                "ui page goal updated: {} (view={})",
+                ui_url, intent.desired_view
+            ),
+            None,
+            None,
+            false,
+            Some(&item.msg_id),
+        );
+        return Ok(());
+    }
+
     let priority = infer_priority_from_mail(&item.message);
     let description = format!(
         "[SOURCE=resident-ui][FROM={}][MSG_TYPE={}][PRIORITY={}]\nGoal:\n{}\n\nExecution notes:\n{}",
@@ -652,15 +685,18 @@ fn handle_ui_surface_planning_behavior(
     project: &ProjectContext,
     config: &ResidentAgentConfig,
 ) -> anyhow::Result<()> {
+    let desired_view = project.ui_page().user_request_memory()?.desired_view;
     let model = project.system_model().rebuild(project)?;
     let planner_prompt = project.ui_surface().planner_prompt_text()?;
-    let fingerprint = project.ui_surface().collection_fingerprint(&model)?;
+    let fingerprint = project
+        .ui_surface()
+        .collection_fingerprint(&model, &desired_view)?;
     if !project.ui_surface().needs_refresh(&fingerprint)? {
         return Ok(());
     }
     match project
         .ui_surface()
-        .generate_with_collector(&model, &planner_prompt)
+        .generate_with_collector(&model, &planner_prompt, &desired_view)
     {
         Ok(surface) => {
             let mut surface = surface;
@@ -701,10 +737,11 @@ fn handle_ui_surface_planning_behavior(
             }
             if adaptation.as_ref().is_some_and(|item| item.changed) {
                 let retried_prompt = project.ui_surface().planner_prompt_text()?;
-                match project
-                    .ui_surface()
-                    .generate_with_collector(&model, &retried_prompt)
-                {
+                match project.ui_surface().generate_with_collector(
+                    &model,
+                    &retried_prompt,
+                    &desired_view,
+                ) {
                     Ok(surface) => {
                         let mut surface = surface;
                         surface.source_fingerprint = fingerprint.clone();
@@ -725,7 +762,9 @@ fn handle_ui_surface_planning_behavior(
                         return Ok(());
                     }
                     Err(retry_err) => {
-                        let mut fallback = project.ui_surface().rebuild_from_model(&model)?;
+                        let mut fallback = project
+                            .ui_surface()
+                            .rebuild_from_model(&model, &desired_view)?;
                         fallback.source_fingerprint = fingerprint.clone();
                         let _ = project.ui_surface().save(&fallback);
                         let _ = project.decisions().append(
@@ -746,7 +785,9 @@ fn handle_ui_surface_planning_behavior(
                 }
             }
 
-            let mut fallback = project.ui_surface().rebuild_from_model(&model)?;
+            let mut fallback = project
+                .ui_surface()
+                .rebuild_from_model(&model, &desired_view)?;
             fallback.source_fingerprint = fingerprint.clone();
             let _ = project.ui_surface().save(&fallback);
             let _ = project.decisions().append(
@@ -864,24 +905,31 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
     if config.role != "ui" && config.behavior_mode != "ui_request" {
         return Ok(());
     }
+    let desired_view = project.ui_page().user_request_memory()?.desired_view;
     let model = project.system_model().rebuild(project)?;
     let surface = match project.ui_surface().snapshot()? {
         Some(surface) => surface,
-        None => project.ui_surface().rebuild_from_model(&model)?,
+        None => project
+            .ui_surface()
+            .rebuild_from_model(&model, &desired_view)?,
     };
     let prompt_text = project.ui_surface().prompt_text()?;
     let fingerprint = format!(
-        "{}:{}",
+        "{}:{}:{}",
         project.ui_surface().prompt_fingerprint()?,
         surface.source_fingerprint,
+        desired_view,
     );
     if !project.ui_schema().needs_refresh(&fingerprint)? {
         return Ok(());
     }
-    match project
-        .ui_schema()
-        .generate_with_ui_agent(&model, &surface, &prompt_text, &fingerprint)
-    {
+    match project.ui_schema().generate_with_ui_agent(
+        &model,
+        &surface,
+        &prompt_text,
+        &desired_view,
+        &fingerprint,
+    ) {
         Ok(_) => {
             let _ = project.decisions().append(
                 &config.agent_id,
@@ -915,14 +963,16 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
             if adaptation.as_ref().is_some_and(|item| item.changed) {
                 let retried_prompt = project.ui_surface().prompt_text()?;
                 let retry_fingerprint = format!(
-                    "{}:{}",
+                    "{}:{}:{}",
                     project.ui_surface().prompt_fingerprint()?,
                     surface.source_fingerprint,
+                    desired_view,
                 );
                 match project.ui_schema().generate_with_ui_agent(
                     &model,
                     &surface,
                     &retried_prompt,
+                    &desired_view,
                     &retry_fingerprint,
                 ) {
                     Ok(_) => {
@@ -940,6 +990,7 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
                         let _ = project.ui_schema().generate_from_surface(
                             &model,
                             &surface,
+                            &desired_view,
                             &retry_fingerprint,
                         )?;
                         let _ = project.decisions().append(
@@ -955,9 +1006,12 @@ fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> an
                 }
             }
 
-            let _ = project
-                .ui_schema()
-                .generate_from_surface(&model, &surface, &fingerprint)?;
+            let _ = project.ui_schema().generate_from_surface(
+                &model,
+                &surface,
+                &desired_view,
+                &fingerprint,
+            )?;
             let _ = project.decisions().append(
                 &config.agent_id,
                 "ui.schema.fallback",

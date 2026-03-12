@@ -14,6 +14,7 @@ mod session;
 mod system_model;
 mod task;
 mod tools;
+mod ui_page;
 mod ui_schema;
 mod ui_surface;
 mod util;
@@ -38,6 +39,9 @@ pub use system_model::{
 };
 pub use task::{TaskManager, TaskRecord, task_priority_rank};
 pub use tools::{handle_project_tool_call, project_tool_definitions};
+pub use ui_page::{
+    UiDesignRules, UiPage as GeneratedUiPage, UiPageContext, UiPageManager, UiUserIntentMemory,
+};
 pub use ui_schema::{UiSchema, UiSchemaManager, UiSection};
-pub use ui_surface::{UiAction, UiPage, UiSurface, UiSurfaceManager};
+pub use ui_surface::{UiAction, UiPage as UiSurfacePage, UiSurface, UiSurfaceManager};
 pub use worktree::{WorktreeManager, WorktreeRecord};

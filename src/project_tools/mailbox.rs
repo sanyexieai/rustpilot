@@ -220,6 +220,36 @@ impl Mailbox {
         Ok(total.saturating_sub(after_cursor))
     }
 
+    pub fn list_recent(&self, limit: usize) -> anyhow::Result<Vec<MailRecord>> {
+        let count = limit.clamp(1, 500);
+        let mut items = Vec::new();
+        if !self.dir.exists() {
+            return Ok(items);
+        }
+
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let content = fs::read_to_string(path)?;
+            for line in content.lines() {
+                let Ok(record) = serde_json::from_str::<MailRecord>(line) else {
+                    continue;
+                };
+                items.push(record);
+            }
+        }
+
+        items.sort_by(|left, right| right.ts.total_cmp(&left.ts));
+        if items.len() > count {
+            items.truncate(count);
+        }
+        items.reverse();
+        Ok(items)
+    }
+
     fn find_message_for_owner(
         &self,
         owner: &str,

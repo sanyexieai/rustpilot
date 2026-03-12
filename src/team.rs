@@ -541,6 +541,12 @@ pub async fn run_teammate_once(
     );
 
     let config = worker_role_config(&role_hint);
+    let _ = project.sessions().ensure_session(
+        &owner,
+        Some(&format!("worker {}", task_id)),
+        &format!("worker({task_id})"),
+        "active",
+    )?;
     let _system_prompt = format!(
         "你是团队成员 {}，role={}，task_priority={}。{} 只完成当前任务并汇报结果；任务是控制面，worktree 是执行面。需要协作时使用 team_send 和 team_inbox。仓库: {}",
         owner,
@@ -602,6 +608,7 @@ pub async fn run_teammate_once(
             tool_calls: None,
         },
     ];
+    let _ = project.sessions().save_messages(&owner, &messages);
 
     let tools = tools_for_role_and_priority(&role_hint, &task.priority);
     let progress = crate::activity::new_activity_handle();
@@ -684,8 +691,16 @@ pub async fn run_teammate_once(
                         tool_call_id: None,
                         tool_calls: None,
                     });
+                    let _ = project.sessions().save_messages(&owner, &messages);
                     continue;
                 }
+                let _ = project.sessions().save_messages(&owner, &messages);
+                let _ = project.sessions().update_state(
+                    &owner,
+                    Some(&format!("worker {}", task_id)),
+                    &format!("worker({task_id})"),
+                    "idle",
+                );
                 let _ = project
                     .tasks()
                     .update(task_id, Some("completed"), Some(&owner));
@@ -769,9 +784,17 @@ pub async fn run_teammate_once(
                             "worker recovered after auto-adjusting prompt",
                             &error_text,
                         );
+                        let _ = project.sessions().save_messages(&owner, &messages);
                         continue;
                     }
                 }
+                let _ = project.sessions().save_messages(&owner, &messages);
+                let _ = project.sessions().update_state(
+                    &owner,
+                    Some(&format!("worker {}", task_id)),
+                    &format!("worker({task_id})"),
+                    "failed",
+                );
                 let _ = project
                     .tasks()
                     .update(task_id, Some("failed"), Some(&owner));
@@ -1152,6 +1175,10 @@ pub fn get_worker_endpoint(
     Ok(load_worker_endpoints(repo_root)?
         .into_iter()
         .find(|item| item.task_id == task_id))
+}
+
+pub fn list_worker_endpoints(repo_root: &Path) -> anyhow::Result<Vec<WorkerEndpoint>> {
+    load_worker_endpoints(repo_root)
 }
 
 pub fn send_input_to_worker(repo_root: &Path, task_id: u64, input: &str) -> anyhow::Result<String> {

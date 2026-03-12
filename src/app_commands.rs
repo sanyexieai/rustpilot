@@ -1,7 +1,8 @@
 use crate::abort_control::{abort_session, has_active_request};
 use crate::activity::ActivityHandle;
 use crate::app_support::{
-    InteractionMode, parse_interaction_mode_label, parse_priority_prefixed_goal,
+    InteractionMode, open_browser, parse_interaction_mode_label, parse_priority_prefixed_goal,
+    parse_ui_intent, ui_base_url,
 };
 use crate::cli::CliAction;
 use crate::config::LlmConfig;
@@ -454,6 +455,19 @@ pub(crate) async fn process_user_input(
 ) -> anyhow::Result<CommandOutcome> {
     let mut frames = Vec::new();
     if trimmed.is_empty() {
+        return Ok(CommandOutcome {
+            directive: LoopDirective::Continue,
+            frames,
+        });
+    }
+
+    if parse_ui_intent(trimmed).is_some() {
+        let url = ui_base_url(runtime.project);
+        let message = match open_browser(&url) {
+            Ok(()) => format!("opened management page: {}", url),
+            Err(err) => format!("management page: {} (browser launch failed: {})", url, err),
+        };
+        frames.push(WireFrame::ack(message));
         return Ok(CommandOutcome {
             directive: LoopDirective::Continue,
             frames,

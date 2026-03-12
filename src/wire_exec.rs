@@ -2,7 +2,9 @@ use crate::abort_control::{abort_session, has_active_request};
 use crate::activity::ActivityHandle;
 use crate::agent::{handle_tool_call, tool_summaries};
 use crate::app_commands::{CommandOutcome, LoopDirective, process_user_input};
-use crate::app_support::{InteractionMode, parse_interaction_mode_label};
+use crate::app_support::{
+    InteractionMode, parse_interaction_mode_label, parse_ui_intent, ui_base_url,
+};
 use crate::config::LlmConfig;
 use crate::openai_compat::Message;
 use crate::openai_compat::{ToolCall, ToolCallFunction};
@@ -446,6 +448,20 @@ pub(crate) fn execute_ui_wire_request(
                 anyhow::bail!("message cannot be empty");
             }
 
+            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            if let Some(intent) = parse_ui_intent(message) {
+                let url = ui_base_url(&project);
+                return Ok(WireResponse::Ack {
+                    message: serde_json::to_string(&serde_json::json!({
+                        "queued": false,
+                        "opened": false,
+                        "ui_url": url,
+                        "desired_view": intent.desired_view,
+                        "message": "ui page available"
+                    }))?,
+                });
+            }
+
             let target = focus.unwrap_or_else(|| "ui".to_string()).trim().to_string();
             let msg_type = match target.as_str() {
                 "concierge" => "user.request",
@@ -454,7 +470,6 @@ pub(crate) fn execute_ui_wire_request(
             };
             let content = format!("[medium] {}", message);
 
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
             project.mailbox().send_typed(
                 &context.source_id,
                 &target,
@@ -611,7 +626,7 @@ fn wire_approval_block(block: &crate::project_tools::ApprovalBlockRecord) -> Wir
 
 #[cfg(test)]
 mod tests {
-    use super::{WireRuntime, execute_wire_request};
+    use super::{WireRuntime, execute_ui_wire_request, execute_wire_request};
     use crate::activity::new_activity_handle;
     use crate::app_support::InteractionMode;
     use crate::config::LlmConfig;
@@ -1024,5 +1039,33 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&response).expect("serialize"))
                 .expect("parse");
         assert_eq!(parsed["type"].as_str(), Some("tool_result"));
+    }
+
+    #[test]
+    fn ui_wire_open_request_returns_ui_url_without_queueing() {
+        let temp = TestDir::new("ui-wire-open-request");
+        init_git_repo(temp.path());
+
+        let response = execute_ui_wire_request(
+            WireRequest::ChatSend {
+                input: "open dashboard".to_string(),
+                focus: Some("ui".to_string()),
+            },
+            temp.path(),
+            "ui",
+            "ui.http.wire_request.received",
+        )
+        .expect("ui wire request");
+
+        match response {
+            WireResponse::Ack { message } => {
+                let parsed: Value = serde_json::from_str(&message).expect("json");
+                assert_eq!(parsed["queued"].as_bool(), Some(false));
+                assert_eq!(parsed["message"].as_str(), Some("ui page available"));
+                assert_eq!(parsed["desired_view"].as_str(), Some("project_state"));
+                assert_eq!(parsed["ui_url"].as_str(), Some("http://127.0.0.1:3847"));
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
     }
 }

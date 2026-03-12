@@ -197,11 +197,19 @@ impl AgentManager {
             .find(|item| item.agent_id == agent_id))
     }
 
+    pub fn profiles(&self) -> anyhow::Result<Vec<AgentProfile>> {
+        self.load_profiles()
+    }
+
     pub fn state(&self, agent_id: &str) -> anyhow::Result<Option<AgentState>> {
         Ok(self
             .load_states()?
             .into_iter()
             .find(|item| item.agent_id == agent_id))
+    }
+
+    pub fn states(&self) -> anyhow::Result<Vec<AgentState>> {
+        self.load_states()
     }
 
     pub fn list_all_with_budgets(&self, budgets: &BudgetManager) -> anyhow::Result<String> {
