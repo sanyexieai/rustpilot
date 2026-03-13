@@ -37,6 +37,12 @@ pub enum CliAction {
         task_id: u64,
         content: String,
     },
+    TaskTree,
+    TaskControl {
+        task_id: u64,
+        action: String,
+        priority: Option<String>,
+    },
     TeamRun {
         goal: String,
         priority: String,
@@ -85,7 +91,7 @@ pub fn handle_cli_command(
         if rest.is_empty() || rest == "status" {
             return Ok(Some(CliAction::FocusStatus));
         }
-        if rest == "lead" {
+        if matches!(rest, "lead" | "root") {
             return Ok(Some(CliAction::FocusLead));
         }
         if rest == "shell" {
@@ -109,7 +115,7 @@ pub fn handle_cli_command(
             return Ok(Some(CliAction::FocusWorker { task_id }));
         }
         println!(
-            "usage: /focus lead | /focus shell | /focus team | /focus worker <task_id> | /focus status"
+            "usage: /focus root|lead | /focus shell | /focus team | /focus worker <task_id> | /focus status"
         );
         return Ok(Some(CliAction::Continue));
     }
@@ -159,7 +165,7 @@ pub fn handle_cli_command(
                 if part == "--focus" {
                     let Some(value) = parts.next() else {
                         println!(
-                            "usage: /session new [label] --focus <lead|shell|team|worker(...)>"
+                            "usage: /session new [label] --focus <root|lead|shell|team|worker(...)>"
                         );
                         return Ok(Some(CliAction::Continue));
                     };
@@ -189,7 +195,7 @@ pub fn handle_cli_command(
             }));
         }
         println!(
-            "usage: /sessions | /session current | /session new [label] [--focus <lead|shell|team|worker(...)>] | /session use <session_id>"
+            "usage: /sessions | /session current | /session new [label] [--focus <root|lead|shell|team|worker(...)>] | /session use <session_id>"
         );
         return Ok(Some(CliAction::Continue));
     }
@@ -254,9 +260,59 @@ pub fn handle_cli_command(
         );
         return Ok(Some(CliAction::Continue));
     }
-    if trimmed == "/tasks" {
+    if trimmed == "/tasks" || trimmed == "/tasks list" {
         println!("{}", project.tasks().list_all()?);
         return Ok(Some(CliAction::Continue));
+    }
+    if trimmed == "/tasks tree" {
+        return Ok(Some(CliAction::TaskTree));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/task ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let Some(action) = parts.next() else {
+            println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+            return Ok(Some(CliAction::Continue));
+        };
+        let Some(task_id_raw) = parts.next() else {
+            println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+            return Ok(Some(CliAction::Continue));
+        };
+        let task_id = match task_id_raw.parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                println!("task_id must be an integer");
+                return Ok(Some(CliAction::Continue));
+            }
+        };
+        let priority = parts.next().map(str::to_string);
+        match action {
+            "pause" | "resume" | "cancel" => {
+                return Ok(Some(CliAction::TaskControl {
+                    task_id,
+                    action: action.to_string(),
+                    priority: None,
+                }));
+            }
+            "priority" => {
+                let Some(priority) = priority else {
+                    println!("usage: /task priority <task_id> <critical|high|medium|low>");
+                    return Ok(Some(CliAction::Continue));
+                };
+                if !is_task_priority(&priority) {
+                    println!("priority must be one of: critical high medium low");
+                    return Ok(Some(CliAction::Continue));
+                }
+                return Ok(Some(CliAction::TaskControl {
+                    task_id,
+                    action: action.to_string(),
+                    priority: Some(priority),
+                }));
+            }
+            _ => {
+                println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+                return Ok(Some(CliAction::Continue));
+            }
+        }
     }
     if trimmed == "/agents" {
         println!(
@@ -418,6 +474,9 @@ pub fn handle_cli_command(
             }
         }
         return Ok(Some(CliAction::Continue));
+    }
+    if trimmed == "/reload-skills" {
+        return Ok(Some(CliAction::ReloadSkills));
     }
     if let Some(name) = trimmed.strip_prefix("/skill ").map(str::trim) {
         if name.is_empty() {

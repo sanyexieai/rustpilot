@@ -771,6 +771,8 @@ mod tests {
                 priority: "medium".to_string(),
                 role: "developer".to_string(),
                 owner: "lead".to_string(),
+                parent_task_id: None,
+                depth: 0,
             }],
             proposals: Vec::new(),
             decisions: Vec::new(),

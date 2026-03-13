@@ -300,7 +300,7 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
             })
         })
         .collect::<Vec<_>>();
-    let chat_ui = build_chat_ui_payload(&project, &model)?;
+    let chat_ui = build_chat_ui_payload(&project, &model, &state.agent_id)?;
 
     Ok(json!({
         "agent_id": state.agent_id,
@@ -327,6 +327,7 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
 fn build_chat_ui_payload(
     project: &ProjectContext,
     model: &crate::project_tools::SystemModel,
+    preferred_actor_id: &str,
 ) -> anyhow::Result<Value> {
     let profiles = project.agents().profiles()?;
     let states = project.agents().states()?;
@@ -350,7 +351,9 @@ fn build_chat_ui_payload(
         .collect::<HashMap<_, _>>();
     let sessions = project.sessions().list()?;
     let mut agent_ids = BTreeSet::new();
-    agent_ids.insert("lead".to_string());
+    if !preferred_actor_id.trim().is_empty() {
+        agent_ids.insert(preferred_actor_id.trim().to_string());
+    }
     for profile in &profiles {
         agent_ids.insert(profile.agent_id.clone());
     }
@@ -363,6 +366,7 @@ fn build_chat_ui_payload(
     for worker in &worker_endpoints {
         agent_ids.insert(worker.owner.clone());
     }
+    let primary_actor_id = normalize_primary_actor_id(preferred_actor_id, &agent_ids);
 
     let agents = agent_ids
         .into_iter()
@@ -371,7 +375,8 @@ fn build_chat_ui_payload(
             let profile = profile_map.get(agent_id.as_str()).copied();
             let resident = resident_map.get(agent_id.as_str()).copied();
             let worker = worker_map.get(agent_id.as_str()).copied();
-            let transcript_session_id = transcript_session_id_for_agent(&agent_id, &sessions);
+            let transcript_session_id =
+                transcript_session_id_for_agent(&agent_id, &sessions, &primary_actor_id);
             let transcript = transcript_session_id
                 .as_deref()
                 .map(|session_id| load_transcript(project, session_id))
@@ -392,8 +397,8 @@ fn build_chat_ui_payload(
                 .collect::<String>();
             Ok(json!({
                 "agent_id": agent_id,
-                "display_name": display_name_for_agent(&agent_id, profile),
-                "group_member": agent_id != "lead",
+                "display_name": display_name_for_agent(&agent_id, profile, &primary_actor_id),
+                "group_member": agent_id != primary_actor_id,
                 "role": profile
                     .map(|item| item.role.clone())
                     .or_else(|| resident.map(|item| item.role.clone()))
@@ -441,14 +446,14 @@ fn build_chat_ui_payload(
     let timeline = recent_mail
         .into_iter()
         .map(|item| {
-            let kind = mailbox_kind(&item.from, &item.to, &item.msg_type);
+            let kind = mailbox_kind(&item.from, &item.to, &item.msg_type, &primary_actor_id);
             json!({
                 "msg_id": item.msg_id,
                 "from": item.from,
                 "to": item.to,
                 "type": item.msg_type,
                 "kind": kind,
-                "direction": mailbox_direction(&item.from, &item.to),
+                "direction": mailbox_direction(&item.from, &item.to, &primary_actor_id),
                 "message": item.message,
                 "ts": item.ts,
                 "task_id": item.task_id,
@@ -457,8 +462,8 @@ fn build_chat_ui_payload(
         })
         .collect::<Vec<_>>();
 
-    let lead_session_id = transcript_session_id_for_agent("lead", &sessions);
-    let lead_transcript = lead_session_id
+    let main_session_id = transcript_session_id_for_agent(&primary_actor_id, &sessions, &primary_actor_id);
+    let main_transcript = main_session_id
         .as_deref()
         .map(|session_id| load_transcript(project, session_id))
         .transpose()?
@@ -466,7 +471,7 @@ fn build_chat_ui_payload(
     let group_members = agents
         .iter()
         .filter_map(|item| item.get("agent_id").cloned())
-        .filter(|agent_id| agent_id.as_str() != Some("lead"))
+        .filter(|agent_id| agent_id.as_str() != Some(primary_actor_id.as_str()))
         .collect::<Vec<_>>();
 
     let agent_details = agents
@@ -480,21 +485,21 @@ fn build_chat_ui_payload(
 
     Ok(json!({
         "main_friend": {
-            "agent_id": "lead",
-            "display_name": "Main",
+            "agent_id": primary_actor_id,
+            "display_name": display_name_for_agent(&primary_actor_id, profile_map.get(primary_actor_id.as_str()).copied(), &primary_actor_id),
             "chat_kind": "direct",
-            "default_target": "lead",
-            "session_id": lead_session_id,
-            "transcript_message_count": lead_transcript.len(),
-            "transcript": lead_transcript,
+            "default_target": primary_actor_id,
+            "session_id": main_session_id,
+            "transcript_message_count": main_transcript.len(),
+            "transcript": main_transcript,
         },
         "group_chat": {
             "group_id": "agent-team",
             "title": "Agent Team",
             "chat_kind": "group",
-            "primary_actor": "lead",
+            "primary_actor": primary_actor_id,
             "member_ids": group_members,
-            "member_count": agents.iter().filter(|item| item.get("agent_id").and_then(Value::as_str) != Some("lead")).count(),
+            "member_count": agents.iter().filter(|item| item.get("agent_id").and_then(Value::as_str) != Some(primary_actor_id.as_str())).count(),
             "timeline": timeline,
         },
         "agents": agents,
@@ -505,14 +510,15 @@ fn build_chat_ui_payload(
 fn transcript_session_id_for_agent(
     agent_id: &str,
     sessions: &[crate::project_tools::SessionRecord],
+    primary_actor_id: &str,
 ) -> Option<String> {
-    if agent_id == "lead" {
+    if agent_id == primary_actor_id {
         if sessions.iter().any(|item| item.session_id == "cli-main") {
             return Some("cli-main".to_string());
         }
         return sessions
             .iter()
-            .find(|item| item.focus == "lead")
+            .find(|item| item.focus == agent_id)
             .map(|item| item.session_id.clone());
     }
     sessions
@@ -545,8 +551,9 @@ fn message_to_json(message: ChatMessage) -> Option<Value> {
 fn display_name_for_agent(
     agent_id: &str,
     profile: Option<&crate::project_tools::AgentProfile>,
+    primary_actor_id: &str,
 ) -> String {
-    if agent_id == "lead" {
+    if agent_id == primary_actor_id {
         return "Main".to_string();
     }
     profile
@@ -556,20 +563,20 @@ fn display_name_for_agent(
         .unwrap_or_else(|| agent_id.to_string())
 }
 
-fn mailbox_direction(from: &str, to: &str) -> &'static str {
-    if from == "lead" {
+fn mailbox_direction(from: &str, to: &str, primary_actor_id: &str) -> &'static str {
+    if from == primary_actor_id {
         "main_to_agent"
-    } else if to == "lead" {
+    } else if to == primary_actor_id {
         "agent_to_main"
     } else {
         "agent_to_agent"
     }
 }
 
-fn mailbox_kind(from: &str, to: &str, msg_type: &str) -> &'static str {
+fn mailbox_kind(from: &str, to: &str, msg_type: &str, primary_actor_id: &str) -> &'static str {
     if msg_type.starts_with("task.") {
         "task_update"
-    } else if from == "lead" || to == "lead" {
+    } else if from == primary_actor_id || to == primary_actor_id {
         "chat"
     } else {
         "system"
@@ -776,4 +783,82 @@ fn escape_html(input: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('\"', "&quot;")
+}
+
+fn normalize_primary_actor_id(preferred_actor_id: &str, agent_ids: &BTreeSet<String>) -> String {
+    let preferred = preferred_actor_id.trim();
+    if !preferred.is_empty() && agent_ids.contains(preferred) {
+        return preferred.to_string();
+    }
+    if agent_ids.contains(preferred) {
+        return preferred.to_string();
+    }
+    if agent_ids.contains("lead") {
+        return "lead".to_string();
+    }
+    agent_ids
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "lead".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        mailbox_direction, mailbox_kind, normalize_primary_actor_id, transcript_session_id_for_agent,
+    };
+    use crate::project_tools::SessionRecord;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn primary_actor_prefers_available_non_lead_node() {
+        let mut agent_ids = BTreeSet::new();
+        agent_ids.insert("teammate-root".to_string());
+        agent_ids.insert("reviewer".to_string());
+        assert_eq!(
+            normalize_primary_actor_id("teammate-root", &agent_ids),
+            "teammate-root"
+        );
+    }
+
+    #[test]
+    fn transcript_lookup_uses_cli_main_for_primary_actor() {
+        let sessions = vec![
+            SessionRecord {
+                session_id: "cli-main".to_string(),
+                label: Some("primary".to_string()),
+                focus: "worker(7)".to_string(),
+                status: "active".to_string(),
+                updated_at: 1,
+            },
+            SessionRecord {
+                session_id: "teammate-root".to_string(),
+                label: None,
+                focus: "lead".to_string(),
+                status: "active".to_string(),
+                updated_at: 2,
+            },
+        ];
+        assert_eq!(
+            transcript_session_id_for_agent("teammate-root", &sessions, "teammate-root"),
+            Some("cli-main".to_string())
+        );
+    }
+
+    #[test]
+    fn mailbox_semantics_follow_primary_actor() {
+        assert_eq!(
+            mailbox_direction("teammate-root", "reviewer", "teammate-root"),
+            "main_to_agent"
+        );
+        assert_eq!(
+            mailbox_direction("reviewer", "teammate-root", "teammate-root"),
+            "agent_to_main"
+        );
+        assert_eq!(
+            mailbox_kind("reviewer", "teammate-root", "message", "teammate-root"),
+            "chat"
+        );
+    }
 }

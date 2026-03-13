@@ -2,17 +2,21 @@ use crate::abort_control::begin_session_request;
 use crate::activity::{ActivityHandle, set_activity};
 use crate::agent::{diagnose_agent_failure, run_agent_loop, tool_definitions};
 use crate::app_commands::AppRuntime;
-use crate::app_support::{InteractionMode, pump_lead_mailbox, trim_messages};
+use crate::app_support::{InteractionMode, current_agent_id, pump_lead_mailbox, trim_messages};
 use crate::config::LlmConfig;
 use crate::openai_compat::Message;
 use crate::project_tools::{EnergyMode, ProjectContext};
 use crate::prompt_manager::{
-    PromptAdaptation, adapt_lead_prompt_detailed, render_lead_system_prompt,
+    PromptAdaptation, adapt_root_prompt_detailed, render_root_system_prompt,
 };
 use crate::resident_agents::AgentSupervisor;
 
+const ROOT_ERROR_EVENT: &str = "root.error";
+const ROOT_RECOVERY_EVENT: &str = "root.recovery";
+const ROOT_RECOVERED_ACTION: &str = "root.recovered";
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_lead_turn(
+pub(crate) async fn run_root_turn(
     session_id: &str,
     client: &reqwest::Client,
     llm: &LlmConfig,
@@ -43,11 +47,28 @@ pub(crate) async fn run_lead_turn(
     Ok(())
 }
 
-pub(crate) async fn run_lead_turn_with_recovery(
+#[allow(dead_code)]
+pub(crate) async fn run_lead_turn(
+    session_id: &str,
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    project: &ProjectContext,
+    messages: &mut Vec<Message>,
+    progress: &ActivityHandle,
+    supervisor: &mut AgentSupervisor,
+    lead_cursor: &mut usize,
+) -> anyhow::Result<()> {
+    run_root_turn(
+        session_id, client, llm, project, messages, progress, supervisor, lead_cursor,
+    )
+    .await
+}
+
+pub(crate) async fn run_root_turn_with_recovery(
     user_input: &str,
     runtime: AppRuntime<'_>,
 ) -> anyhow::Result<()> {
-    match run_lead_turn(
+    match run_root_turn(
         runtime.session_id,
         runtime.client,
         runtime.llm,
@@ -61,10 +82,11 @@ pub(crate) async fn run_lead_turn_with_recovery(
     {
         Ok(()) => Ok(()),
         Err(err) => {
+            let actor_id = current_agent_id();
             if err.to_string().contains("request aborted") {
                 set_activity(runtime.progress, 0, "aborted", None);
                 let _ = runtime.project.agents().set_state(
-                    "lead",
+                    &actor_id,
                     "idle",
                     None,
                     Some("cli"),
@@ -75,14 +97,14 @@ pub(crate) async fn run_lead_turn_with_recovery(
                 return Ok(());
             }
             let error_text = format_error_chain(&err);
-            let adaptation = adapt_lead_prompt_detailed(runtime.project.repo_root(), &error_text)
+            let adaptation = adapt_root_prompt_detailed(runtime.project.repo_root(), &error_text)
                 .unwrap_or_else(|_| PromptAdaptation {
                     changed: false,
                     file_path: runtime
                         .project
                         .repo_root()
                         .join(".team")
-                        .join("lead_agent_prompt.md"),
+                        .join("root_agent_prompt.md"),
                     before: String::new(),
                     after: String::new(),
                     recovery: None,
@@ -91,8 +113,8 @@ pub(crate) async fn run_lead_turn_with_recovery(
                 if let Some(recovery) = adaptation.recovery.as_ref() {
                     let file_path = adaptation.file_path.display().to_string();
                     let _ = runtime.project.prompt_history().append(
-                        "lead",
-                        "lead",
+                        "root",
+                        &actor_id,
                         &file_path,
                         &recovery.strategy,
                         &recovery.trigger,
@@ -100,8 +122,8 @@ pub(crate) async fn run_lead_turn_with_recovery(
                         &adaptation.after,
                     );
                 }
-                refresh_lead_system_prompt(runtime.project.repo_root(), runtime.messages)?;
-                if run_lead_turn(
+                refresh_root_system_prompt(runtime.project.repo_root(), runtime.messages)?;
+                if run_root_turn(
                     runtime.session_id,
                     runtime.client,
                     runtime.llm,
@@ -115,11 +137,11 @@ pub(crate) async fn run_lead_turn_with_recovery(
                 .is_ok()
                 {
                     let _ = runtime.project.decisions().append(
-                        "lead",
-                        "lead.recovered",
+                        &actor_id,
+                        ROOT_RECOVERED_ACTION,
                         None,
                         None,
-                        "lead turn recovered after auto-adjusting prompt",
+                        "root turn recovered after auto-adjusting prompt",
                         &error_text,
                     );
                     return Ok(());
@@ -139,6 +161,14 @@ pub(crate) async fn run_lead_turn_with_recovery(
             Ok(())
         }
     }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn run_lead_turn_with_recovery(
+    user_input: &str,
+    runtime: AppRuntime<'_>,
+) -> anyhow::Result<()> {
+    run_root_turn_with_recovery(user_input, runtime).await
 }
 
 pub(crate) fn estimate_text_tokens(text: &str) -> u32 {
@@ -231,7 +261,12 @@ pub(crate) fn maybe_reflect_energy(
 }
 
 fn prepare_messages_for_lead(project: &ProjectContext, messages: &[Message]) -> Vec<Message> {
-    match project.budgets().energy_mode("lead").ok().flatten() {
+    match project
+        .budgets()
+        .energy_mode(&current_agent_id())
+        .ok()
+        .flatten()
+    {
         Some(EnergyMode::Constrained) => trim_messages(messages, 12),
         Some(EnergyMode::Low) => trim_messages(messages, 8),
         Some(EnergyMode::Exhausted) => trim_messages(messages, 4),
@@ -239,11 +274,11 @@ fn prepare_messages_for_lead(project: &ProjectContext, messages: &[Message]) -> 
     }
 }
 
-fn refresh_lead_system_prompt(
+fn refresh_root_system_prompt(
     repo_root: &std::path::Path,
     messages: &mut Vec<Message>,
 ) -> anyhow::Result<()> {
-    let prompt = render_lead_system_prompt(repo_root)?;
+    let prompt = render_root_system_prompt(repo_root)?;
     if let Some(system) = messages
         .first_mut()
         .filter(|message| message.role == "system")
@@ -274,23 +309,24 @@ async fn handle_lead_turn_error(
     user_input: &str,
     err: &anyhow::Error,
 ) {
+    let actor_id = current_agent_id();
     let error_text = format_error_chain(err);
     let issues = [
-        "lead turn failed".to_string(),
+        "root turn failed".to_string(),
         format!("provider={}", llm.provider),
         format!("model={}", llm.model),
         truncate_text(&error_text, 240),
     ];
     let issue_refs = issues.iter().map(|item| item.as_str()).collect::<Vec<_>>();
     let summary = format!(
-        "lead turn failed while handling input '{}'",
+        "root turn failed while handling input '{}'",
         truncate_text(user_input.trim(), 120)
     );
 
     let _ = project.events().emit(
-        "lead.error",
+        ROOT_ERROR_EVENT,
         serde_json::json!({
-            "agent": "lead",
+            "agent": actor_id,
             "input": user_input,
             "focus": interaction_mode.label(),
             "provider": llm.provider,
@@ -301,10 +337,10 @@ async fn handle_lead_turn_error(
     );
     let _ = project
         .decisions()
-        .append("lead", "lead.error", None, None, &summary, &error_text);
+        .append(&actor_id, ROOT_ERROR_EVENT, None, None, &summary, &error_text);
     let _ = project.reflections().append(
-        "lead",
-        "lead.error",
+        &actor_id,
+        ROOT_ERROR_EVENT,
         None,
         &summary,
         &issue_refs,
@@ -313,7 +349,7 @@ async fn handle_lead_turn_error(
     );
 
     let diagnostic_prompt =
-        build_lead_error_prompt(llm, messages, interaction_mode, user_input, &error_text);
+        build_root_error_prompt(llm, messages, interaction_mode, user_input, &error_text);
     let diagnosis = match diagnose_agent_failure(client, llm, &diagnostic_prompt).await {
         Ok(text) => text,
         Err(diag_err) => format!(
@@ -324,17 +360,17 @@ async fn handle_lead_turn_error(
     };
 
     let _ = project.proposals().create(
-        "lead",
-        "lead.error",
+        &actor_id,
+        ROOT_ERROR_EVENT,
         None,
-        "investigate lead runtime failure",
+        "investigate root runtime failure",
         &diagnosis,
         &issue_refs,
         Some("apply the suggested checks, then retry the command"),
     );
-    let reviewer_message = format!("Lead runtime failure detected.\n\n{}", diagnosis);
+    let reviewer_message = format!("Root runtime failure detected.\n\n{}", diagnosis);
     let _ = project.mailbox().send_typed(
-        "lead",
+        &actor_id,
         "reviewer",
         "proposal.request",
         &reviewer_message,
@@ -343,8 +379,8 @@ async fn handle_lead_turn_error(
         false,
         None,
     );
-    let _ = project.budgets().record_usage("lead", 40);
-    maybe_reflect_energy(project, "lead", "lead.error", None, &summary);
+    let _ = project.budgets().record_usage(&actor_id, 40);
+    maybe_reflect_energy(project, &actor_id, ROOT_ERROR_EVENT, None, &summary);
 
     println!();
     println!("agent error recorded");
@@ -364,7 +400,7 @@ async fn handle_lead_turn_error(
         tool_calls: None,
     });
     let _ = project.agents().set_state(
-        "lead",
+        &actor_id,
         "idle",
         None,
         Some("cli"),
@@ -372,15 +408,15 @@ async fn handle_lead_turn_error(
         Some("last turn failed; recovery advice generated"),
     );
     let _ = project.events().emit(
-        "lead.recovery",
-        serde_json::json!({"agent": "lead"}),
+        ROOT_RECOVERY_EVENT,
+        serde_json::json!({"agent": actor_id}),
         serde_json::json!({}),
         None,
     );
     set_activity(progress, 0, "error handled", None);
 }
 
-fn build_lead_error_prompt(
+fn build_root_error_prompt(
     llm: &LlmConfig,
     messages: &[Message],
     interaction_mode: &InteractionMode,
@@ -405,7 +441,7 @@ fn build_lead_error_prompt(
         .join("\n");
 
     format!(
-        "Runtime failure in rustpilot lead agent.\n\
+        "Runtime failure in rustpilot root agent.\n\
 Provider: {}\n\
 Model: {}\n\
 Focus: {}\n\

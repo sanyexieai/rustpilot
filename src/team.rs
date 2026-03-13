@@ -172,31 +172,46 @@ fn scheduler_loop(
 
         let mut finished = Vec::new();
         for (task_id, worker) in &mut workers {
+            let task_status = match load_task_status(&project, *task_id) {
+                Ok(status) => status,
+                Err(err) => {
+                    eprintln!("team scheduler: read task status failed for task {task_id}: {err}");
+                    continue;
+                }
+            };
+            if matches!(task_status.as_str(), "paused" | "cancelled") {
+                finished.push(*task_id);
+                continue;
+            }
             match worker {
                 WorkerHandle::Child { child, .. } => match child.try_wait() {
                     Ok(Some(status)) => {
                         finished.push(*task_id);
                         if status.success() {
-                            let current = load_task_status(&project, *task_id)
-                                .unwrap_or_else(|_| "failed".to_string());
-                            match current.as_str() {
+                            match task_status.as_str() {
                                 "completed" => {
                                     completed.fetch_add(1, Ordering::Relaxed);
                                 }
                                 "blocked" => {
                                     // 等待用户补充信息，不自动改状态。
                                 }
+                                "paused" | "cancelled" => {}
                                 "failed" => {
                                     failed.fetch_add(1, Ordering::Relaxed);
                                 }
                                 _ => {
-                                    let _ =
-                                        project.tasks().update(*task_id, Some("completed"), None);
+                                    let _ = project.tasks().update(
+                                        *task_id,
+                                        Some("completed"),
+                                        None,
+                                        None,
+                                    );
                                     completed.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         } else {
-                            let _ = project.tasks().update(*task_id, Some("failed"), None);
+                            let _ =
+                                project.tasks().update(*task_id, Some("failed"), None, None);
                             failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -204,27 +219,20 @@ fn scheduler_loop(
                     Err(err) => {
                         eprintln!("team scheduler: wait child failed for task {task_id}: {err}");
                         finished.push(*task_id);
-                        let _ = project.tasks().update(*task_id, Some("failed"), None);
+                        let _ =
+                            project.tasks().update(*task_id, Some("failed"), None, None);
                         failed.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 WorkerHandle::TmuxWindow { task_id, .. } => {
-                    let status = match load_task_status(&project, *task_id) {
-                        Ok(status) => status,
-                        Err(err) => {
-                            eprintln!(
-                                "team scheduler: read task status failed for task {task_id}: {err}"
-                            );
-                            continue;
-                        }
-                    };
+                    let status = &task_status;
                     if status == "completed" {
                         completed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
                     } else if status == "failed" {
                         failed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
-                    } else if status == "blocked" {
+                    } else if matches!(status.as_str(), "blocked" | "paused" | "cancelled") {
                         finished.push(*task_id);
                     }
                 }
@@ -232,27 +240,20 @@ fn scheduler_loop(
                     task_id,
                     session_id,
                 } => {
-                    let status = match load_task_status(&project, *task_id) {
-                        Ok(status) => status,
-                        Err(err) => {
-                            eprintln!(
-                                "team scheduler: read task status failed for task {task_id}: {err}"
-                            );
-                            continue;
-                        }
-                    };
+                    let status = &task_status;
                     if status == "completed" {
                         completed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
                     } else if status == "failed" {
                         failed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
-                    } else if status == "blocked" {
+                    } else if matches!(status.as_str(), "blocked" | "paused" | "cancelled") {
                         finished.push(*task_id);
                     } else if let Ok(info) = terminal_manager.status(session_id)
                         && !matches!(info.state, SessionState::Running)
                     {
-                        let _ = project.tasks().update(*task_id, Some("failed"), None);
+                        let _ =
+                            project.tasks().update(*task_id, Some("failed"), None, None);
                         failed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
                     }
@@ -321,7 +322,8 @@ fn scheduler_loop(
                                 "team scheduler: create worktree failed for task {}: {}",
                                 task.id, err
                             );
-                            let _ = project.tasks().update(task.id, Some("failed"), None);
+                            let _ =
+                                project.tasks().update(task.id, Some("failed"), None, None);
                             failed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
@@ -363,7 +365,7 @@ fn scheduler_loop(
                         "team scheduler: spawn teammate failed for task {}: {}",
                         task.id, err
                     );
-                    let _ = project.tasks().update(task.id, Some("failed"), None);
+                    let _ = project.tasks().update(task.id, Some("failed"), None, None);
                     failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -528,7 +530,7 @@ pub async fn run_teammate_once(
 
     project
         .tasks()
-        .update(task_id, Some("in_progress"), Some(&owner))?;
+        .update(task_id, Some("in_progress"), Some(&owner), None)?;
     let _ = project.mailbox().send_typed(
         &owner,
         "lead",
@@ -662,7 +664,7 @@ pub async fn run_teammate_once(
                     );
                     let _ = project
                         .tasks()
-                        .update(task_id, Some("blocked"), Some(&owner));
+                        .update(task_id, Some("blocked"), Some(&owner), None);
                     let _ = project.mailbox().send_typed(
                         &owner,
                         "lead",
@@ -703,7 +705,7 @@ pub async fn run_teammate_once(
                 );
                 let _ = project
                     .tasks()
-                    .update(task_id, Some("completed"), Some(&owner));
+                    .update(task_id, Some("completed"), Some(&owner), None);
                 let _ = project.budgets().record_usage(&owner, 80);
                 let _ = project.reflections().append(
                     &owner,
@@ -797,7 +799,7 @@ pub async fn run_teammate_once(
                 );
                 let _ = project
                     .tasks()
-                    .update(task_id, Some("failed"), Some(&owner));
+                    .update(task_id, Some("failed"), Some(&owner), None);
                 let _ = project.budgets().record_usage(&owner, 50);
                 let _ = project.reflections().append(
                     &owner,
@@ -1334,8 +1336,10 @@ fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
             "team_ack",
             "team_poll",
             "team_inbox",
+            "task_create",
             "task_list",
             "task_get",
+            "delegate_long_running",
             "worktree_list",
             "worktree_status",
             "worktree_events",
@@ -1348,9 +1352,11 @@ fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
             "team_ack",
             "team_poll",
             "team_inbox",
+            "task_create",
             "task_list",
             "task_get",
             "task_update",
+            "delegate_long_running",
             "worktree_list",
             "worktree_status",
             "worktree_events",
@@ -1364,9 +1370,11 @@ fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
             "team_ack",
             "team_poll",
             "team_inbox",
+            "task_create",
             "task_list",
             "task_get",
             "task_update",
+            "delegate_long_running",
             "worktree_list",
             "worktree_status",
             "worktree_run",
@@ -1380,9 +1388,11 @@ fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
             "team_ack",
             "team_poll",
             "team_inbox",
+            "task_create",
             "task_list",
             "task_get",
             "task_update",
+            "delegate_long_running",
             "worktree_list",
             "worktree_status",
             "worktree_run",
@@ -1397,9 +1407,11 @@ fn tools_for_role_and_priority(role_hint: &str, priority: &str) -> Vec<Tool> {
             "team_ack",
             "team_poll",
             "team_inbox",
+            "task_create",
             "task_list",
             "task_get",
             "task_update",
+            "delegate_long_running",
             "worktree_list",
             "worktree_status",
             "worktree_run",

@@ -291,7 +291,7 @@ impl WorktreeManager {
 
         if complete_task && let Some(task_id) = wt.task_id {
             let before: TaskRecord = serde_json::from_str(&self.tasks.get(task_id)?)?;
-            self.tasks.update(task_id, Some("completed"), None)?;
+            self.tasks.update(task_id, Some("completed"), None, None)?;
             self.tasks.unbind_worktree(task_id)?;
             self.events.emit(
                 "task.completed",

@@ -116,6 +116,8 @@ pub struct SystemTask {
     pub priority: String,
     pub role: String,
     pub owner: String,
+    pub parent_task_id: Option<u64>,
+    pub depth: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +289,8 @@ impl SystemModelManager {
                 priority: item.priority.clone(),
                 role: item.role_hint.clone(),
                 owner: item.owner.clone(),
+                parent_task_id: item.parent_task_id,
+                depth: item.depth,
             })
             .collect::<Vec<_>>();
 

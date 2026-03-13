@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::openai_compat::{Tool, ToolCall, ToolFunction};
+use crate::project_tools::TaskManager;
 use crate::shell_file_tools::{
-    BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file, read_file, write_file,
+    BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file,
+    is_likely_long_running_command, read_file, write_file,
 };
 use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
 
@@ -160,6 +162,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
     let output = match call.function.name.as_str() {
         "bash" => run_builtin_tool("bash", || {
             let args: BashArgs = parse_tool_args("bash", &call.function.arguments)?;
+            reject_long_running_for_lead("bash", &args.command)?;
             run_with_classified_error("bash", BuiltinToolErrorKind::Execution, || {
                 BashTool::run(&args.command)
             })
@@ -186,6 +189,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         "terminal_write" => run_builtin_tool("terminal_write", || {
             let args: TerminalWriteArgs =
                 parse_tool_args("terminal_write", &call.function.arguments)?;
+            reject_long_running_for_lead("terminal_write", &args.input)?;
             run_with_classified_error("terminal_write", BuiltinToolErrorKind::Session, || {
                 terminal_manager().write(&args.session_id, &args.input)?;
                 Ok(format!("已写入会话 {}", args.session_id))
@@ -264,6 +268,44 @@ pub fn reset_terminal_manager() -> anyhow::Result<()> {
 
 pub fn clear_terminal_manager_live_sessions() -> anyhow::Result<()> {
     terminal_manager().clear_live_sessions()
+}
+
+fn reject_long_running_for_lead(tool: &str, command: &str) -> anyhow::Result<()> {
+    if current_node_is_parent().unwrap_or(false) && is_likely_long_running_command(command) {
+        anyhow::bail!(
+            "{} refused: long-running commands must be delegated to a child agent/worker-owned terminal session; use delegate_long_running instead. Suggested recovery: call delegate_long_running with a concise goal plus this command: `{}`",
+            tool,
+            command.trim()
+        );
+    }
+    Ok(())
+}
+
+fn current_agent_id() -> String {
+    std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
+}
+
+fn current_node_is_parent() -> anyhow::Result<bool> {
+    if current_task_id().is_none() && current_agent_id() == "lead" {
+        return Ok(true);
+    }
+    let repo_root = std::env::var("RUSTPILOT_REPO_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let tasks_dir = repo_root.join(".tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(current_agent_id() == "lead");
+    }
+    let tasks = TaskManager::new(tasks_dir)?;
+    let parent_task_id = current_task_id();
+    Ok(tasks.active_child_count(parent_task_id)? > 0)
+}
+
+fn current_task_id() -> Option<u64> {
+    std::env::var("RUSTPILOT_TASK_ID")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn tool(name: &str, description: &str, parameters: serde_json::Value) -> Tool {

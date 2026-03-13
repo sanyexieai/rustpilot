@@ -53,6 +53,7 @@ The main process starts a local UI server automatically. Natural-language reques
 ## Common CLI Commands
 
 - `/tasks`
+- `/tasks tree`
 - `/agents`
 - `/residents`
 - `/sessions`
@@ -72,6 +73,10 @@ The main process starts a local UI server automatically. Natural-language reques
 - `/approval manual`
 - `/shell <command>`
 - `/reply <task_id> <content>`
+- `/task pause <task_id>`
+- `/task resume <task_id>`
+- `/task cancel <task_id>`
+- `/task priority <task_id> <critical|high|medium|low>`
 - `/team run <goal>`
 - `/team start [max_parallel]`
 - `/team stop`
@@ -82,6 +87,23 @@ The main process starts a local UI server automatically. Natural-language reques
 - `/skill-tool-init <feature|project|generic|kernel> <name>`
 - `/tool-import <source_dir>`
 - `/mcp-tool-init <name>`
+
+## Hierarchical Task Control
+
+Task delegation now follows a hierarchical expansion protocol:
+
+- Try to complete a task directly when it can be done with no more than 2 tool types and usually under 10 steps per tool
+- Otherwise decompose it into sub-tasks with explicit deliverables
+- Keep direct child count per parent at 10 or below
+- Escalate back up the chain when depth, child count, or execution steps exceed the threshold
+
+Useful commands:
+
+- `/tasks tree` shows parent-child structure and threshold alerts
+- `/task pause <task_id>` pauses delegated work for replanning
+- `/task resume <task_id>` re-queues a paused task
+- `/task cancel <task_id>` cancels delegated work
+- `/task priority <task_id> <critical|high|medium|low>` changes a task priority
 
 ## Project Layout
 

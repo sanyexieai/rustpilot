@@ -1,6 +1,0 @@
-{
-  "name": "smoke",
-  "arguments": { "input": "hello" },
-  "expect_status": 0,
-  "expect_stdout_contains": "hello"
-}

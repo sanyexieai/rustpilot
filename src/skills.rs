@@ -48,6 +48,28 @@ impl SkillRegistry {
     }
 }
 
+pub fn create_prompt_skill(
+    raw_name: &str,
+    description: &str,
+    body: &str,
+) -> anyhow::Result<PathBuf> {
+    let name = normalize_skill_name(raw_name);
+    if name.is_empty() {
+        anyhow::bail!("invalid skill name: {}", raw_name);
+    }
+    let base_dir = resolve_or_create_skills_dir()?;
+    let skill_dir = base_dir.join(&name);
+    if skill_dir.exists() {
+        anyhow::bail!("skill already exists: {}", skill_dir.display());
+    }
+    fs::create_dir_all(&skill_dir)?;
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        render_prompt_skill_markdown(&name, description, body),
+    )?;
+    Ok(skill_dir)
+}
+
 fn resolve_skills_dir() -> anyhow::Result<PathBuf> {
     if let Ok(dir) = std::env::var("SKILLS_DIR") {
         return Ok(PathBuf::from(dir));
@@ -65,6 +87,19 @@ fn resolve_skills_dir() -> anyhow::Result<PathBuf> {
     }
 
     anyhow::bail!("skills directory not found")
+}
+
+fn resolve_or_create_skills_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(dir) = std::env::var("SKILLS_DIR") {
+        let path = PathBuf::from(dir);
+        fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
+
+    let cwd = std::env::current_dir()?;
+    let direct = cwd.join("skills");
+    fs::create_dir_all(&direct)?;
+    Ok(direct)
 }
 
 pub fn init_tool_skill(raw_name: &str, level: ToolCapabilityLevel) -> anyhow::Result<PathBuf> {
@@ -124,6 +159,30 @@ fn normalize_skill_name(input: &str) -> String {
         out.pop();
     }
     out
+}
+
+fn render_prompt_skill_markdown(name: &str, description: &str, body: &str) -> String {
+    let title = name
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut output = first.to_uppercase().collect::<String>();
+                    output.push_str(chars.as_str());
+                    output
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!(
+        "---\nname: {name}\ndescription: {description}\n---\n\n# {title}\n\n{}\n",
+        body.trim()
+    )
 }
 
 fn tool_manifest_template(name: &str, level: ToolCapabilityLevel) -> String {
@@ -295,6 +354,30 @@ mod tests {
 
         unsafe {
             std::env::remove_var("TOOLS_DIR");
+        }
+    }
+
+    #[test]
+    fn create_prompt_skill_writes_loadable_skill_markdown() {
+        let temp = TestDir::new("create_prompt_skill");
+        unsafe {
+            std::env::set_var("SKILLS_DIR", temp.path());
+        }
+
+        let created = create_prompt_skill(
+            "Frontend Engineer",
+            "frontend implementation help",
+            "Use React or Vue when appropriate.",
+        )
+        .expect("create prompt skill");
+        assert!(created.join("SKILL.md").is_file());
+        let content = fs::read_to_string(created.join("SKILL.md")).expect("read skill");
+        assert!(content.starts_with("---\nname: frontend-engineer\n"));
+        assert!(content.contains("description: frontend implementation help"));
+        assert!(content.contains("# Frontend Engineer"));
+
+        unsafe {
+            std::env::remove_var("SKILLS_DIR");
         }
     }
 }

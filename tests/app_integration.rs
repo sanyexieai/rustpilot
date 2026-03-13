@@ -280,9 +280,14 @@ fn builtin_tool_filesystem_errors_are_classified() {
 
 #[test]
 fn manual_approval_mode_blocks_model_shell_tools() {
+    let _guard = lock_global();
     let temp = TestDir::new("approval_manual_shell");
     init_git_repo(temp.path());
     let project = project_context(temp.path());
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
     project
         .approval()
         .set_mode(rustpilot::project_tools::ApprovalMode::Manual)
@@ -309,13 +314,23 @@ fn manual_approval_mode_blocks_model_shell_tools() {
     .unwrap_err()
     .to_string();
     assert!(worktree_error.contains("approval mode=manual"));
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
 }
 
 #[test]
 fn dangerous_bash_command_is_rejected() {
+    let _guard = lock_global();
     let temp = TestDir::new("dangerous_bash");
     init_git_repo(temp.path());
     let project = project_context(temp.path());
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
 
     let error = handle_tool_call(
         &project,
@@ -328,6 +343,129 @@ fn dangerous_bash_command_is_rejected() {
     let last_block = policy.last_block.expect("last block");
     assert_eq!(last_block.reason_code, "dangerous");
     assert_eq!(last_block.actor_id, "lead");
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
+}
+
+#[test]
+fn lead_long_running_bash_is_rejected_with_delegate_hint() {
+    let _guard = lock_global();
+    let temp = TestDir::new("lead_long_running_bash");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
+
+    let error = handle_tool_call(
+        &project,
+        &tool_call("bash", json!({ "command": "npm run dev" })),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("delegate_long_running"));
+    assert!(error.contains("npm run dev"));
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
+}
+
+#[test]
+fn worker_delegate_long_running_inherits_parent_task() {
+    let _guard = lock_global();
+    let temp = TestDir::new("worker_delegate_long_running");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+    let created = project
+        .tasks()
+        .create("parent task", "delegate child")
+        .expect("create parent");
+    let parent: TaskRecord = serde_json::from_str(&created).expect("parse parent");
+
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "teammate-1");
+        std::env::set_var("RUSTPILOT_TASK_ID", parent.id.to_string());
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
+
+    let output = handle_tool_call(
+        &project,
+        &tool_call(
+            "delegate_long_running",
+            json!({
+                "goal": "start dev server",
+                "command": "npm run dev"
+            }),
+        ),
+    )
+    .expect("delegate long running");
+    assert!(output.contains("delegated long-running work as task"));
+
+    let tasks = project.tasks().list_records().expect("list records");
+    let child = tasks
+        .iter()
+        .find(|item| item.parent_task_id == Some(parent.id))
+        .expect("child task");
+    assert_eq!(child.depth, parent.depth + 1);
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_TASK_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
+}
+
+#[test]
+fn parent_worker_long_running_bash_is_rejected() {
+    let _guard = lock_global();
+    let temp = TestDir::new("parent_worker_long_running_bash");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    let parent_created = project
+        .tasks()
+        .create("parent worker task", "parent")
+        .expect("create parent");
+    let parent: TaskRecord = serde_json::from_str(&parent_created).expect("parse parent");
+    project
+        .tasks()
+        .create_detailed(
+            "child worker task",
+            "child",
+            rustpilot::project_tools::TaskCreateOptions {
+                parent_task_id: Some(parent.id),
+                depth: Some(parent.depth + 1),
+                ..rustpilot::project_tools::TaskCreateOptions::default()
+            },
+        )
+        .expect("create child");
+
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "teammate-parent");
+        std::env::set_var("RUSTPILOT_TASK_ID", parent.id.to_string());
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
+
+    let error = handle_tool_call(
+        &project,
+        &tool_call("bash", json!({ "command": "npm run dev" })),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("delegate_long_running"));
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_TASK_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
 }
 
 #[test]

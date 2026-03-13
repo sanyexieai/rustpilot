@@ -41,6 +41,53 @@ impl BashTool {
     }
 }
 
+pub fn is_likely_long_running_command(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    const LONG_RUNNING_PATTERNS: &[&str] = &[
+        "npm run dev",
+        "npm start",
+        "pnpm dev",
+        "pnpm start",
+        "yarn dev",
+        "yarn start",
+        "bun dev",
+        "vite",
+        "webpack serve",
+        "next dev",
+        "nuxt dev",
+        "astro dev",
+        "cargo run",
+        "cargo watch",
+        "python -m http.server",
+        "python -m uvicorn",
+        "uvicorn",
+        "flask run",
+        "django-admin runserver",
+        "npm create",
+        "npx create-",
+        "tail -f",
+        "ping ",
+    ];
+
+    if LONG_RUNNING_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+    {
+        return true;
+    }
+
+    normalized.ends_with(" --watch")
+        || normalized.contains(" --watch ")
+        || normalized.ends_with(" watch")
+        || normalized.starts_with("watch ")
+        || normalized.contains(" serve ")
+        || normalized.ends_with(" serve")
+}
+
 pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<String> {
     let normalized = normalize_command(command);
     let output = shell_command(&normalized, current_dir)?.output()?;
@@ -250,7 +297,7 @@ $OutputEncoding = [Console]::OutputEncoding; {}",
 
 #[cfg(test)]
 mod tests {
-    use super::is_read_only_command;
+    use super::{is_likely_long_running_command, is_read_only_command};
 
     #[test]
     fn read_only_command_detection_accepts_common_queries() {
@@ -265,5 +312,15 @@ mod tests {
         assert!(!is_read_only_command("git add README.md"));
         assert!(!is_read_only_command("echo hi > out.txt"));
         assert!(!is_read_only_command("pwd && git status"));
+    }
+
+    #[test]
+    fn long_running_command_detection_flags_dev_servers() {
+        assert!(is_likely_long_running_command("npm run dev"));
+        assert!(is_likely_long_running_command("cargo run"));
+        assert!(is_likely_long_running_command("python -m uvicorn app:app --reload"));
+        assert!(is_likely_long_running_command("vite --watch"));
+        assert!(!is_likely_long_running_command("cargo test"));
+        assert!(!is_likely_long_running_command("git status"));
     }
 }

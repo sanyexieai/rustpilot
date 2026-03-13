@@ -1,8 +1,8 @@
 use crate::abort_control::{abort_session, has_active_request};
 use crate::activity::ActivityHandle;
 use crate::app_support::{
-    InteractionMode, open_browser, parse_interaction_mode_label, parse_priority_prefixed_goal,
-    parse_ui_intent, ui_base_url,
+    InteractionMode, current_agent_id, open_browser, parse_interaction_mode_label,
+    parse_priority_prefixed_goal, parse_ui_intent, ui_base_url,
 };
 use crate::cli::CliAction;
 use crate::config::LlmConfig;
@@ -12,15 +12,15 @@ use crate::project_tools::{ApprovalMode, ProjectContext};
 use crate::resident_agents::AgentSupervisor;
 use crate::runtime::approval::render_approval_status;
 use crate::runtime::lead::{
-    estimate_text_tokens, looks_like_question, maybe_reflect_energy, run_lead_turn_with_recovery,
+    estimate_text_tokens, looks_like_question, maybe_reflect_energy, run_root_turn_with_recovery,
 };
 use crate::runtime::policy::{
     render_policy_agent_text, render_policy_overview_text, render_policy_task_text,
 };
 use crate::runtime::residents::{render_residents_status, render_team_status};
 use crate::runtime::team::{
-    focus_lead, focus_shell, focus_team, focus_worker, reply_task, resident_send, team_run,
-    team_start, team_stop,
+    control_task, focus_lead, focus_shell, focus_team, focus_worker, render_task_tree,
+    reply_task, resident_send, team_run, team_start, team_stop,
 };
 use crate::runtime::usage::render_usage_text;
 use crate::shell_file_tools::{is_dangerous_command, run_shell_command};
@@ -265,8 +265,8 @@ pub(crate) async fn process_cli_action(
                 &runtime.interaction_mode.label(),
                 "active",
             )?;
-            frames.push(WireFrame::session_updated("lead", "active"));
-            frames.push(WireFrame::ack("focus: lead"));
+            frames.push(WireFrame::session_updated("root", "active"));
+            frames.push(WireFrame::ack("focus: root"));
         }
         CliAction::FocusShell => {
             focus_shell(runtime.project, runtime.interaction_mode);
@@ -327,6 +327,22 @@ pub(crate) async fn process_cli_action(
                 runtime.supervisor,
                 task_id,
                 &content,
+            )?));
+        }
+        CliAction::TaskTree => {
+            frames.push(WireFrame::ack(render_task_tree(runtime.project)?));
+        }
+        CliAction::TaskControl {
+            task_id,
+            action,
+            priority,
+        } => {
+            frames.push(WireFrame::ack(control_task(
+                runtime.project,
+                runtime.supervisor,
+                task_id,
+                &action,
+                priority.as_deref(),
             )?));
         }
         CliAction::TeamRun { goal, priority } => {
@@ -445,7 +461,7 @@ fn persist_session(
 ) -> anyhow::Result<()> {
     project
         .sessions()
-        .ensure_session(session_id, label, "lead", "active")?;
+        .ensure_session(session_id, label, "root", "active")?;
     project.sessions().save_messages(session_id, messages)
 }
 
@@ -453,6 +469,7 @@ pub(crate) async fn process_user_input(
     trimmed: &str,
     runtime: AppRuntime<'_>,
 ) -> anyhow::Result<CommandOutcome> {
+    let actor_id = current_agent_id();
     let mut frames = Vec::new();
     if trimmed.is_empty() {
         return Ok(CommandOutcome {
@@ -491,15 +508,15 @@ pub(crate) async fn process_user_input(
         let _ = runtime
             .project
             .budgets()
-            .record_usage("lead", estimate_text_tokens(prompt).saturating_add(40));
+            .record_usage(&actor_id, estimate_text_tokens(prompt).saturating_add(40));
         maybe_reflect_energy(
             runtime.project,
-            "lead",
+            &actor_id,
             "user.ask",
             None,
             "processed /ask input",
         );
-        run_lead_turn_with_recovery(prompt, runtime).await?;
+        run_root_turn_with_recovery(prompt, runtime).await?;
         frames.push(WireFrame::ack("/ask completed"));
         return Ok(CommandOutcome {
             directive: LoopDirective::Continue,
@@ -518,13 +535,13 @@ pub(crate) async fn process_user_input(
                     let _ = runtime
                         .project
                         .budgets()
-                        .record_usage("lead", estimate_text_tokens(trimmed).saturating_add(40));
+                        .record_usage(&actor_id, estimate_text_tokens(trimmed).saturating_add(40));
                     maybe_reflect_energy(
                         runtime.project,
-                        "lead",
-                        "lead.message",
+                        &actor_id,
+                        "root.message",
                         None,
-                        "processed question from team focus via lead",
+                        "processed question from team focus via current parent node",
                     );
                     runtime.messages.push(Message {
                         role: "user".to_string(),
@@ -532,8 +549,8 @@ pub(crate) async fn process_user_input(
                         tool_call_id: None,
                         tool_calls: None,
                     });
-                    run_lead_turn_with_recovery(trimmed, runtime).await?;
-                    frames.push(WireFrame::ack("lead question handled"));
+                    run_root_turn_with_recovery(trimmed, runtime).await?;
+                    frames.push(WireFrame::ack("root question handled"));
                     return Ok(CommandOutcome {
                         directive: LoopDirective::Continue,
                         frames,
@@ -543,17 +560,17 @@ pub(crate) async fn process_user_input(
                 let _ = runtime
                     .project
                     .budgets()
-                    .record_usage("lead", estimate_text_tokens(trimmed).saturating_add(20));
+                    .record_usage(&actor_id, estimate_text_tokens(trimmed).saturating_add(20));
                 maybe_reflect_energy(
                     runtime.project,
-                    "lead",
+                    &actor_id,
                     "task.enqueue",
                     None,
                     "forwarded team queue input to concierge",
                 );
                 let payload = format!("[{}] {}", priority, goal);
                 let _ = runtime.project.mailbox().send_typed(
-                    "lead",
+                    &actor_id,
                     "concierge",
                     "user.request",
                     &payload,
@@ -563,7 +580,7 @@ pub(crate) async fn process_user_input(
                     None,
                 )?;
                 let _ = runtime.project.decisions().append(
-                    "lead",
+                    &actor_id,
                     "resident.message.sent",
                     None,
                     None,
@@ -580,13 +597,13 @@ pub(crate) async fn process_user_input(
                 let _ = runtime
                     .project
                     .budgets()
-                    .record_usage("lead", estimate_text_tokens(trimmed).saturating_add(40));
+                    .record_usage(&actor_id, estimate_text_tokens(trimmed).saturating_add(40));
                 maybe_reflect_energy(
                     runtime.project,
-                    "lead",
-                    "lead.message",
+                    &actor_id,
+                    "root.message",
                     None,
-                    "processed lead input",
+                    "processed root input",
                 );
                 runtime.messages.push(Message {
                     role: "user".to_string(),
@@ -594,8 +611,8 @@ pub(crate) async fn process_user_input(
                     tool_call_id: None,
                     tool_calls: None,
                 });
-                run_lead_turn_with_recovery(trimmed, runtime).await?;
-                frames.push(WireFrame::ack("lead input handled"));
+                run_root_turn_with_recovery(trimmed, runtime).await?;
+                frames.push(WireFrame::ack("root input handled"));
             }
             InteractionMode::Shell => unreachable!("shell mode handled before routing"),
             InteractionMode::Worker { task_id } => {
@@ -623,15 +640,15 @@ pub(crate) async fn process_user_input(
     let _ = runtime
         .project
         .budgets()
-        .record_usage("lead", estimate_text_tokens(trimmed).saturating_add(30));
+        .record_usage(&actor_id, estimate_text_tokens(trimmed).saturating_add(30));
     maybe_reflect_energy(
         runtime.project,
-        "lead",
+        &actor_id,
         "command",
         None,
         "processed command",
     );
-    run_lead_turn_with_recovery(trimmed, runtime).await?;
+    run_root_turn_with_recovery(trimmed, runtime).await?;
     frames.push(WireFrame::ack("command processed"));
 
     Ok(CommandOutcome {
@@ -641,13 +658,14 @@ pub(crate) async fn process_user_input(
 }
 
 fn run_shell_mode_input(project: &ProjectContext, command: &str) -> CommandOutcome {
+    let actor_id = current_agent_id();
     let mut frames = Vec::new();
     let _ = project
         .budgets()
-        .record_usage("lead", estimate_text_tokens(command).saturating_add(10));
+        .record_usage(&actor_id, estimate_text_tokens(command).saturating_add(10));
     maybe_reflect_energy(
         project,
-        "lead",
+        &actor_id,
         "shell.input",
         None,
         "processed shell mode input",

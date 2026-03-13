@@ -1,14 +1,15 @@
 use crate::activity::new_activity_handle;
 use crate::app_commands::{CliRuntime, LoopDirective, process_cli_action};
 use crate::app_support::{
-    InteractionMode, load_repo_env, open_browser, parse_resident_args, parse_teammate_args,
-    parse_ui_intent, pump_lead_mailbox, resolve_ui_port, ui_base_url,
+    InteractionMode, current_agent_id, load_repo_env, open_browser, parse_resident_args,
+    parse_teammate_args, parse_ui_intent, pump_lead_mailbox, resolve_ui_port, root_actor_id,
+    ui_base_url,
 };
 use crate::cli::handle_cli_command;
 use crate::config::{LlmConfig, default_llm_user_agent};
 use crate::openai_compat::Message;
 use crate::project_tools::ProjectContext;
-use crate::prompt_manager::render_lead_system_prompt;
+use crate::prompt_manager::render_root_system_prompt;
 use crate::resident_agents::{AgentSupervisor, run_resident_agent};
 use crate::runtime_env::{
     detect_repo_root, ensure_env_guidance, llm_timeout_secs_for_provider,
@@ -27,12 +28,18 @@ use std::time::Duration;
 const AUTO_TEAM_MAX_PARALLEL: usize = 2;
 
 pub async fn run() -> anyhow::Result<()> {
+    let root_actor = root_actor_id();
     unsafe {
-        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_ROOT_AGENT_ID", root_actor.clone());
+        std::env::set_var("RUSTPILOT_AGENT_ID", root_actor.clone());
     }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|value| value == "teammate-run") {
         let teammate = parse_teammate_args(&args[2..])?;
+        unsafe {
+            std::env::set_var("RUSTPILOT_AGENT_ID", teammate.owner.clone());
+            std::env::set_var("RUSTPILOT_TASK_ID", teammate.task_id.to_string());
+        }
         load_repo_env(&teammate.repo_root);
         return run_teammate_once(
             teammate.repo_root,
@@ -70,6 +77,9 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     let repo_root = detect_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+    unsafe {
+        std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
+    }
     let llm = match LlmConfig::from_repo_root(&repo_root) {
         Ok(cfg) => cfg,
         Err(err)
@@ -99,7 +109,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let project = ProjectContext::new(repo_root.clone())?;
     project.agents().ensure_profile(
-        "lead",
+        &root_actor,
         "scheduler",
         "Receive user input, maintain the main dialogue, and coordinate workers.",
         &[
@@ -110,7 +120,7 @@ pub async fn run() -> anyhow::Result<()> {
         &["do not bypass tasks or mailbox routing"],
     )?;
     project.agents().set_state(
-        "lead",
+        &root_actor,
         "idle",
         None,
         Some("cli"),
@@ -119,7 +129,7 @@ pub async fn run() -> anyhow::Result<()> {
     )?;
     project
         .budgets()
-        .ensure_ledger("lead", 120_000, 30_000, 12_000)?;
+        .ensure_ledger(&root_actor, 120_000, 30_000, 12_000)?;
 
     let mut supervisor =
         AgentSupervisor::start_defaults(repo_root.clone(), AUTO_TEAM_MAX_PARALLEL)?;
@@ -127,13 +137,13 @@ pub async fn run() -> anyhow::Result<()> {
     let progress = new_activity_handle();
     let mut lead_cursor = 0usize;
     let mut interaction_mode = InteractionMode::Lead;
-    let system_prompt = render_lead_system_prompt(&repo_root)?;
+    let system_prompt = render_root_system_prompt(&repo_root)?;
     let ui_port = resolve_ui_port(&project);
     let _ui_server = start_main_ui_server(repo_root.clone(), ui_port);
     let default_session =
         project
             .sessions()
-            .ensure_session("cli-main", Some("primary"), "lead", "active")?;
+            .ensure_session("cli-main", Some("primary"), &root_actor, "active")?;
     let mut current_session_id = default_session.session_id.clone();
     let mut current_session_label = default_session.label.clone();
     let mut messages = project.sessions().load_messages(&current_session_id)?;
@@ -207,6 +217,7 @@ pub async fn run() -> anyhow::Result<()> {
             project
                 .sessions()
                 .save_messages(&current_session_id, &messages)?;
+            skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
             match outcome.directive {
                 LoopDirective::Continue => continue,
                 LoopDirective::Exit => break,
@@ -244,6 +255,7 @@ pub async fn run() -> anyhow::Result<()> {
         project
             .sessions()
             .save_messages(&current_session_id, &messages)?;
+        skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
     }
 
     supervisor.stop_all();
@@ -251,7 +263,7 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 fn start_main_ui_server(repo_root: std::path::PathBuf, port: u16) -> Option<JoinHandle<()>> {
-    match spawn_ui_server(repo_root, "lead-ui".to_string(), port) {
+    match spawn_ui_server(repo_root, current_agent_id(), port) {
         Ok(handle) => Some(handle),
         Err(err) => {
             let address_in_use = err

@@ -28,7 +28,7 @@ impl InteractionMode {
     pub(crate) fn label(&self) -> String {
         match self {
             Self::TeamQueue => "team".to_string(),
-            Self::Lead => "lead".to_string(),
+            Self::Lead => "root".to_string(),
             Self::Shell => "shell".to_string(),
             Self::Worker { task_id } => format!("worker({})", task_id),
         }
@@ -43,7 +43,7 @@ pub(crate) fn parse_interaction_mode_label(raw: &str) -> anyhow::Result<Interact
 
     let normalized = trimmed.to_ascii_lowercase();
     match normalized.as_str() {
-        "lead" => return Ok(InteractionMode::Lead),
+        "lead" | "root" => return Ok(InteractionMode::Lead),
         "shell" => return Ok(InteractionMode::Shell),
         "team" | "team_queue" => return Ok(InteractionMode::TeamQueue),
         _ => {}
@@ -103,6 +103,14 @@ pub(crate) fn load_repo_env(repo_root: &Path) {
     dotenvy::from_path_override(repo_root.join(".env")).ok();
 }
 
+pub(crate) fn root_actor_id() -> String {
+    std::env::var("RUSTPILOT_ROOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
+}
+
+pub(crate) fn current_agent_id() -> String {
+    std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| root_actor_id())
+}
+
 pub(crate) fn trim_messages(messages: &[Message], keep_tail: usize) -> Vec<Message> {
     if messages.len() <= keep_tail.saturating_add(1) {
         return messages.to_vec();
@@ -116,6 +124,36 @@ pub(crate) fn trim_messages(messages: &[Message], keep_tail: usize) -> Vec<Messa
         trimmed.push(message.clone());
     }
     trimmed
+}
+
+#[cfg(test)]
+mod root_actor_tests {
+    use super::{current_agent_id, root_actor_id};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn global_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_global() -> MutexGuard<'static, ()> {
+        global_lock().lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    #[test]
+    fn current_agent_defaults_to_root_actor() {
+        let _guard = lock_global();
+        unsafe {
+            std::env::remove_var("RUSTPILOT_AGENT_ID");
+            std::env::set_var("RUSTPILOT_ROOT_AGENT_ID", "root-node");
+        }
+        assert_eq!(root_actor_id(), "root-node");
+        assert_eq!(current_agent_id(), "root-node");
+        unsafe {
+            std::env::remove_var("RUSTPILOT_ROOT_AGENT_ID");
+        }
+    }
+
 }
 
 pub(crate) fn parse_priority_prefixed_goal(input: &str) -> (String, String) {
@@ -329,7 +367,17 @@ pub(crate) fn pump_lead_mailbox(
     cursor: &mut usize,
     messages: &mut Vec<Message>,
 ) -> anyhow::Result<()> {
-    let raw = project.mailbox().poll("lead", *cursor, 50)?;
+    let root_actor = root_actor_id();
+    pump_agent_mailbox(project, &root_actor, cursor, messages)
+}
+
+pub(crate) fn pump_agent_mailbox(
+    project: &ProjectContext,
+    agent_id: &str,
+    cursor: &mut usize,
+    messages: &mut Vec<Message>,
+) -> anyhow::Result<()> {
+    let raw = project.mailbox().poll(agent_id, *cursor, 50)?;
     let polled: MailPoll = serde_json::from_str(&raw)?;
     *cursor = polled.next_cursor;
     for item in polled.items {
@@ -340,14 +388,14 @@ pub(crate) fn pump_lead_mailbox(
         if item.msg_type == "task.request_clarification"
             && let Some(task_id) = item.task_id
         {
-            let _ = project.tasks().update(task_id, Some("blocked"), None);
+            let _ = project.tasks().update(task_id, Some("blocked"), None, None);
             println!(
                 "[clarification] task {} blocked, use /reply {} <message>",
                 task_id, task_id
             );
         }
         if item.requires_ack {
-            let _ = project.mailbox().ack("lead", &item.msg_id, "received");
+            let _ = project.mailbox().ack(agent_id, &item.msg_id, "received");
         }
         if matches!(
             item.msg_type.as_str(),

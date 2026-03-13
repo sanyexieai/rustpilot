@@ -18,10 +18,22 @@ pub struct TaskRecord {
     pub status: String,
     pub owner: String,
     pub worktree: String,
+    #[serde(default)]
+    pub parent_task_id: Option<u64>,
+    #[serde(default)]
+    pub depth: u32,
     #[serde(rename = "blockedBy")]
     pub blocked_by: Vec<u64>,
     pub created_at: f64,
     pub updated_at: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskCreateOptions {
+    pub priority: Option<String>,
+    pub role_hint: Option<String>,
+    pub parent_task_id: Option<u64>,
+    pub depth: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +48,7 @@ impl TaskManager {
     }
 
     pub fn create(&self, subject: &str, description: &str) -> anyhow::Result<String> {
-        self.create_with_priority(subject, description, "medium")
+        self.create_detailed(subject, description, TaskCreateOptions::default())
     }
 
     pub fn create_with_priority(
@@ -45,11 +57,14 @@ impl TaskManager {
         description: &str,
         priority: &str,
     ) -> anyhow::Result<String> {
-        self.create_with_priority_and_role(
+        self.create_detailed(
             subject,
             description,
-            priority,
-            &infer_task_role_hint(subject, description),
+            TaskCreateOptions {
+                priority: Some(priority.to_string()),
+                role_hint: Some(infer_task_role_hint(subject, description)),
+                ..TaskCreateOptions::default()
+            },
         )
     }
 
@@ -60,17 +75,39 @@ impl TaskManager {
         priority: &str,
         role_hint: &str,
     ) -> anyhow::Result<String> {
+        self.create_detailed(
+            subject,
+            description,
+            TaskCreateOptions {
+                priority: Some(priority.to_string()),
+                role_hint: Some(role_hint.to_string()),
+                ..TaskCreateOptions::default()
+            },
+        )
+    }
+
+    pub fn create_detailed(
+        &self,
+        subject: &str,
+        description: &str,
+        options: TaskCreateOptions,
+    ) -> anyhow::Result<String> {
         self.with_lock(|| {
             let now = now_secs_f64();
+            let inferred_role = infer_task_role_hint(subject, description);
             let task = TaskRecord {
                 id: self.max_id()? + 1,
                 subject: subject.to_string(),
                 description: description.to_string(),
-                priority: normalize_task_priority(priority),
-                role_hint: normalize_task_role_hint(role_hint),
+                priority: normalize_task_priority(options.priority.as_deref().unwrap_or("medium")),
+                role_hint: normalize_task_role_hint(
+                    options.role_hint.as_deref().unwrap_or(&inferred_role),
+                ),
                 status: "pending".to_string(),
                 owner: String::new(),
                 worktree: String::new(),
+                parent_task_id: options.parent_task_id,
+                depth: options.depth.unwrap_or(0),
                 blocked_by: Vec::new(),
                 created_at: now,
                 updated_at: now,
@@ -97,20 +134,21 @@ impl TaskManager {
         task_id: u64,
         status: Option<&str>,
         owner: Option<&str>,
+        priority: Option<&str>,
     ) -> anyhow::Result<String> {
         self.with_lock(|| {
             let mut task = self.load(task_id)?;
             if let Some(status) = status {
-                if !matches!(
-                    status,
-                    "pending" | "in_progress" | "blocked" | "completed" | "failed"
-                ) {
-                    anyhow::bail!("非法状态: {}", status);
+                if !is_valid_task_status(status) {
+                    anyhow::bail!("invalid task status: {}", status);
                 }
                 task.status = status.to_string();
             }
             if let Some(owner) = owner {
                 task.owner = owner.to_string();
+            }
+            if let Some(priority) = priority {
+                task.priority = normalize_task_priority(priority);
             }
             task.updated_at = now_secs_f64();
             self.save(&task)?;
@@ -185,7 +223,7 @@ impl TaskManager {
         let mut tasks = self.load_all()?;
         tasks.sort_by_key(|task| task.id);
         if tasks.is_empty() {
-            return Ok("没有任务。".to_string());
+            return Ok("no tasks".to_string());
         }
 
         let mut lines = Vec::new();
@@ -194,6 +232,8 @@ impl TaskManager {
                 "pending" => "[ ]",
                 "in_progress" => "[>]",
                 "blocked" => "[!]",
+                "paused" => "[||]",
+                "cancelled" => "[-]",
                 "completed" => "[x]",
                 _ => "[?]",
             };
@@ -207,11 +247,20 @@ impl TaskManager {
             } else {
                 format!(" wt={}", task.worktree)
             };
+            let parent = task
+                .parent_task_id
+                .map(|id| format!(" parent={id}"))
+                .unwrap_or_default();
+            let depth = if task.depth > 0 {
+                format!(" depth={}", task.depth)
+            } else {
+                String::new()
+            };
             let priority = format!(" priority={}", task.priority);
             let role = format!(" role={}", task.role_hint);
             lines.push(format!(
-                "{marker} #{}: {}{}{}{}{}",
-                task.id, task.subject, priority, role, owner, worktree
+                "{marker} #{}: {}{}{}{}{}{}{}",
+                task.id, task.subject, priority, role, owner, worktree, parent, depth
             ));
         }
         Ok(lines.join("\n"))
@@ -233,6 +282,22 @@ impl TaskManager {
         })
     }
 
+    pub fn active_child_count(&self, parent_task_id: Option<u64>) -> anyhow::Result<usize> {
+        self.with_lock(|| {
+            Ok(self
+                .load_all()?
+                .into_iter()
+                .filter(|task| {
+                    task.parent_task_id == parent_task_id
+                        && matches!(
+                            task.status.as_str(),
+                            "pending" | "in_progress" | "blocked" | "paused"
+                        )
+                })
+                .count())
+        })
+    }
+
     pub fn append_user_reply(
         &self,
         task_id: u64,
@@ -243,10 +308,10 @@ impl TaskManager {
             let mut task = self.load(task_id)?;
             let message = reply.trim();
             if message.is_empty() {
-                anyhow::bail!("reply 不能为空");
+                anyhow::bail!("reply cannot be empty");
             }
-            if !matches!(next_status, "pending" | "in_progress" | "blocked") {
-                anyhow::bail!("非法状态: {}", next_status);
+            if !matches!(next_status, "pending" | "in_progress" | "blocked" | "paused") {
+                anyhow::bail!("invalid task status: {}", next_status);
             }
             if !task.description.trim().is_empty() {
                 task.description.push_str("\n\n");
@@ -268,7 +333,10 @@ impl TaskManager {
         self.with_lock(|| {
             Ok(self.load_all()?.into_iter().any(|task| {
                 task.subject == subject
-                    && matches!(task.status.as_str(), "pending" | "in_progress" | "blocked")
+                    && matches!(
+                        task.status.as_str(),
+                        "pending" | "in_progress" | "blocked" | "paused"
+                    )
             }))
         })
     }
@@ -345,7 +413,7 @@ impl TaskManager {
                 Ok(_) => break,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
-                        anyhow::bail!("获取任务锁超时: {}", lock_path.display());
+                        anyhow::bail!("timed out acquiring task lock: {}", lock_path.display());
                     }
                     thread::sleep(Duration::from_millis(30));
                 }
@@ -365,6 +433,13 @@ fn default_task_priority() -> String {
 
 fn default_task_role_hint() -> String {
     "developer".to_string()
+}
+
+fn is_valid_task_status(status: &str) -> bool {
+    matches!(
+        status,
+        "pending" | "in_progress" | "blocked" | "paused" | "cancelled" | "completed" | "failed"
+    )
 }
 
 fn normalize_task_priority(priority: &str) -> String {
@@ -387,12 +462,7 @@ fn normalize_task_role_hint(role_hint: &str) -> String {
 
 fn infer_task_role_hint(subject: &str, description: &str) -> String {
     let text = format!("{} {}", subject, description).to_lowercase();
-    if text.contains("design")
-        || text.contains("ui")
-        || text.contains("ux")
-        || text.contains("椤甸潰")
-        || text.contains("鏍峰紡")
-    {
+    if text.contains("design") || text.contains("ui") || text.contains("ux") || text.contains("界面") || text.contains("设计") {
         return "design".to_string();
     }
     if text.contains("proposal")
@@ -413,5 +483,67 @@ pub fn task_priority_rank(priority: &str) -> u8 {
         "medium" => 2,
         "low" => 1,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskCreateOptions, TaskManager};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fresh_tasks_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rustpilot-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn create_detailed_persists_parent_and_depth() {
+        let manager = TaskManager::new(fresh_tasks_dir("create")).expect("manager");
+        let created = manager
+            .create_detailed(
+                "child task",
+                "delegated",
+                TaskCreateOptions {
+                    priority: Some("high".to_string()),
+                    role_hint: Some("developer".to_string()),
+                    parent_task_id: Some(7),
+                    depth: Some(2),
+                },
+            )
+            .expect("create");
+        let parsed: serde_json::Value = serde_json::from_str(&created).expect("json");
+        assert_eq!(parsed["parent_task_id"], 7);
+        assert_eq!(parsed["depth"], 2);
+        assert_eq!(parsed["priority"], "high");
+    }
+
+    #[test]
+    fn update_accepts_paused_and_cancelled() {
+        let manager = TaskManager::new(fresh_tasks_dir("update")).expect("manager");
+        let created = manager.create("task", "").expect("create");
+        let task_id = serde_json::from_str::<serde_json::Value>(&created)
+            .expect("json")["id"]
+            .as_u64()
+            .expect("id");
+
+        let paused = manager
+            .update(task_id, Some("paused"), None, Some("critical"))
+            .expect("pause");
+        let paused_json: serde_json::Value = serde_json::from_str(&paused).expect("json");
+        assert_eq!(paused_json["status"], "paused");
+        assert_eq!(paused_json["priority"], "critical");
+
+        let cancelled = manager
+            .update(task_id, Some("cancelled"), None, None)
+            .expect("cancel");
+        let cancelled_json: serde_json::Value =
+            serde_json::from_str(&cancelled).expect("json");
+        assert_eq!(cancelled_json["status"], "cancelled");
     }
 }

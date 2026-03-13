@@ -1,5 +1,5 @@
 use crate::project_tools::ProjectContext;
-use crate::prompt_manager::lead_prompt_recovery;
+use crate::prompt_manager::root_prompt_recovery;
 use crate::resident_agents::{AgentSupervisor, resident_listen_port};
 use crate::runtime::lead::truncate_text;
 
@@ -31,7 +31,7 @@ pub(crate) fn render_team_status(
         ));
     }
 
-    let lead_recovery = lead_prompt_recovery(project.repo_root())
+    let root_recovery = root_prompt_recovery(project.repo_root())
         .ok()
         .flatten()
         .map(|info| {
@@ -140,16 +140,16 @@ pub(crate) fn render_team_status(
 
     Ok(if alerts.is_empty() {
         format!(
-            "team: lead{} {} pending={} alerts=none{}",
-            lead_recovery,
+            "team: root{} {} pending={} alerts=none{}",
+            root_recovery,
             states,
             project.tasks().pending_count()?,
             latest_prompt_change
         )
     } else {
         format!(
-            "team: lead{} {} pending={} alerts={}{}",
-            lead_recovery,
+            "team: root{} {} pending={} alerts={}{}",
+            root_recovery,
             states,
             project.tasks().pending_count()?,
             alerts.join(" | "),
