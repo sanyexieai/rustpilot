@@ -559,10 +559,85 @@ fn persist_session(
     project.sessions().save_messages(session_id, messages)
 }
 
-fn is_root_implementation_file_task(input: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootRequestDisposition {
+    Direct,
+    DelegateArtifactBuild,
+    DelegateSkillAuthoring,
+}
+
+const ROOT_BUILD_VERBS_CLEAN: &[&str] = &[
+    "write ",
+    "create ",
+    "generate ",
+    "implement ",
+    "build ",
+    "make ",
+    "scaffold ",
+    "\u{5199}",
+    "\u{5199}\u{4e00}\u{4e2a}",
+    "\u{505a}\u{4e00}\u{4e2a}",
+    "\u{505a}\u{4e2a}",
+    "\u{521b}\u{5efa}",
+    "\u{751f}\u{6210}",
+    "\u{5b9e}\u{73b0}",
+];
+
+const ROOT_SKILL_TOKENS_CLEAN: &[&str] = &["skill", "skills", "\u{6280}\u{80fd}"];
+
+const ROOT_ARTIFACT_TOKENS_CLEAN: &[&str] = &[
+    "html",
+    "css",
+    "javascript",
+    "typescript",
+    "react",
+    "vue",
+    "component",
+    "page",
+    "login page",
+    "single file",
+    "file",
+    "\u{9875}\u{9762}",
+    "\u{767b}\u{5f55}\u{9875}",
+    "\u{5355}\u{6587}\u{4ef6}",
+    "\u{7ec4}\u{4ef6}",
+    "\u{7f51}\u{9875}",
+    "\u{811a}\u{672c}",
+    "\u{6587}\u{4ef6}",
+];
+
+fn contains_any_token(haystack: &str, tokens: &[&str]) -> bool {
+    tokens.iter().any(|token| haystack.contains(token))
+}
+
+fn classify_root_request_clean(input: &str) -> RootRequestDisposition {
     let trimmed = input.trim();
     if trimmed.is_empty() || looks_like_question(trimmed) {
-        return false;
+        return RootRequestDisposition::Direct;
+    }
+    let lowered = trimmed.to_lowercase();
+    if !contains_any_token(&lowered, ROOT_BUILD_VERBS_CLEAN) {
+        return RootRequestDisposition::Direct;
+    }
+    if contains_any_token(&lowered, ROOT_SKILL_TOKENS_CLEAN) {
+        return RootRequestDisposition::DelegateSkillAuthoring;
+    }
+    if contains_any_token(&lowered, ROOT_ARTIFACT_TOKENS_CLEAN) {
+        return RootRequestDisposition::DelegateArtifactBuild;
+    }
+    RootRequestDisposition::Direct
+}
+
+fn classify_root_request(input: &str) -> RootRequestDisposition {
+    classify_root_request_clean(input)
+}
+
+/*
+#[allow(dead_code)]
+fn classify_root_request_legacy(input: &str) -> RootRequestDisposition {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || looks_like_question(trimmed) {
+        return RootRequestDisposition::Direct;
     }
     let lowered = trimmed.to_lowercase();
     let has_build_verb = [
@@ -573,16 +648,25 @@ fn is_root_implementation_file_task(input: &str) -> bool {
         "build ",
         "make ",
         "scaffold ",
-        "写",
-        "创建",
-        "生成",
-        "实现",
-        "做一个",
-        "做个",
+        "鍐?,
+        "鍒涘缓",
+        "鐢熸垚",
+        "瀹炵幇",
+        "鍋氫竴涓?,
+        "鍋氫釜",
     ]
     .iter()
     .any(|token| lowered.contains(token));
-    let has_file_or_ui_target = [
+    if !has_build_verb {
+        return RootRequestDisposition::Direct;
+    }
+    if ["skill", "skills", "鎶€鑳?]
+        .iter()
+        .any(|token| lowered.contains(token))
+    {
+        return RootRequestDisposition::DelegateSkillAuthoring;
+    }
+    if [
         "html",
         "css",
         "javascript",
@@ -594,18 +678,22 @@ fn is_root_implementation_file_task(input: &str) -> bool {
         "login page",
         "single file",
         "file",
-        "页面",
-        "登录页",
-        "单文件",
-        "组件",
-        "网页",
-        "脚本",
-        "文件",
+        "椤甸潰",
+        "鐧诲綍椤?,
+        "鍗曟枃浠?,
+        "缁勪欢",
+        "缃戦〉",
+        "鑴氭湰",
+        "鏂囦欢",
     ]
     .iter()
-    .any(|token| lowered.contains(token));
-    has_build_verb && has_file_or_ui_target
+    .any(|token| lowered.contains(token))
+    {
+        return RootRequestDisposition::DelegateArtifactBuild;
+    }
+    RootRequestDisposition::Direct
 }
+*/
 
 pub(crate) async fn process_user_input(
     trimmed: &str,
@@ -736,7 +824,8 @@ pub(crate) async fn process_user_input(
                 )));
             }
             InteractionMode::Lead => {
-                if is_root_implementation_file_task(trimmed) {
+                let disposition = classify_root_request(trimmed);
+                if !matches!(disposition, RootRequestDisposition::Direct) {
                     let (priority, goal) = parse_priority_prefixed_goal(trimmed);
                     let _ = runtime
                         .project
@@ -747,11 +836,28 @@ pub(crate) async fn process_user_input(
                         &actor_id,
                         "task.enqueue",
                         None,
-                        "delegated implementation-style file generation request from root",
+                        match disposition {
+                            RootRequestDisposition::DelegateArtifactBuild => {
+                                "delegated implementation artifact request from root"
+                            }
+                            RootRequestDisposition::DelegateSkillAuthoring => {
+                                "delegated skill authoring request from root"
+                            }
+                            RootRequestDisposition::Direct => unreachable!(),
+                        },
                     );
                     let task = team_run(runtime.project, runtime.supervisor, &goal, &priority)?;
                     frames.push(WireFrame::ack(format!(
-                        "root delegated implementation request to child task\n{}",
+                        "{}\n{}",
+                        match disposition {
+                            RootRequestDisposition::DelegateArtifactBuild => {
+                                "root delegated implementation request to child task"
+                            }
+                            RootRequestDisposition::DelegateSkillAuthoring => {
+                                "root delegated skill authoring request to child task"
+                            }
+                            RootRequestDisposition::Direct => unreachable!(),
+                        },
                         task
                     )));
                     return Ok(CommandOutcome {
@@ -855,8 +961,8 @@ fn run_shell_mode_input(project: &ProjectContext, command: &str) -> CommandOutco
 #[cfg(test)]
 mod tests {
     use super::{
-        AppRuntime, CliRuntime, is_root_implementation_file_task, process_cli_action, process_user_input,
-        run_shell_mode_input,
+        AppRuntime, CliRuntime, RootRequestDisposition, classify_root_request, process_cli_action,
+        process_user_input, run_shell_mode_input,
     };
     use crate::activity::new_activity_handle;
     use crate::app_support::InteractionMode;
@@ -1101,11 +1207,39 @@ mod tests {
     }
 
     #[test]
-    fn implementation_file_requests_are_detected_for_root_delegation() {
-        assert!(is_root_implementation_file_task(
-            r"D:\tmp 在这个目录下 写一个html的单文件的登录页面"
-        ));
-        assert!(!is_root_implementation_file_task("为什么这个页面打不开？"));
+    fn implementation_file_requests_are_classified_with_clean_unicode_inputs_v2() {
+        let artifact_request =
+            "D:\\tmp \u{5728}\u{8fd9}\u{4e2a}\u{76ee}\u{5f55}\u{4e0b} \u{5199}\u{4e00}\u{4e2a}html\u{7684}\u{5355}\u{6587}\u{4ef6}\u{767b}\u{5f55}\u{9875}\u{9762}";
+        let question_request =
+            "\u{4e3a}\u{4ec0}\u{4e48}\u{8fd9}\u{4e2a}\u{9875}\u{9762}\u{6253}\u{4e0d}\u{5f00}\u{ff1f}";
+        assert_eq!(
+            classify_root_request(artifact_request),
+            RootRequestDisposition::DelegateArtifactBuild
+        );
+        assert_eq!(
+            classify_root_request(question_request),
+            RootRequestDisposition::Direct
+        );
+    }
+
+    #[test]
+    fn skill_creation_requests_are_classified_with_clean_unicode_inputs_v2() {
+        let skill_request =
+            "\u{5199}\u{4e00}\u{4e2a}\u{5c0f}\u{7ea2}\u{4e66}\u{81ea}\u{52a8}\u{767b}\u{5f55}\u{53d1}\u{5e16}\u{7684}skill";
+        let skill_question =
+            "\u{8fd9}\u{4e2a} skill \u{662f}\u{505a}\u{4ec0}\u{4e48}\u{7684}\u{ff1f}";
+        assert_eq!(
+            classify_root_request(skill_request),
+            RootRequestDisposition::DelegateSkillAuthoring
+        );
+        assert_eq!(
+            classify_root_request("create a skill for xiaohongshu autoposting"),
+            RootRequestDisposition::DelegateSkillAuthoring
+        );
+        assert_eq!(
+            classify_root_request(skill_question),
+            RootRequestDisposition::Direct
+        );
     }
 
     #[tokio::test]
@@ -1126,7 +1260,7 @@ mod tests {
         let progress = new_activity_handle();
         let mut lead_cursor = 0usize;
         let outcome = process_user_input(
-            r"D:\tmp 在这个目录下 写一个html的单文件的登录页面",
+            "D:\\tmp \u{5728}\u{8fd9}\u{4e2a}\u{76ee}\u{5f55}\u{4e0b} \u{5199}\u{4e00}\u{4e2a}html\u{7684}\u{5355}\u{6587}\u{4ef6}\u{767b}\u{5f55}\u{9875}\u{9762}",
             AppRuntime {
                 session_id: "cli-main",
                 repo_root: temp.path(),

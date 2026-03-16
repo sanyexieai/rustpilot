@@ -593,9 +593,24 @@ fn spawn_root_runtime_process(
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let result = match line {
-                Ok(text) => serde_json::from_str::<WireFrame>(&text)
-                    .map_err(anyhow::Error::from)
-                    .map_err(|err| anyhow::anyhow!("frame parse failed: {}", err)),
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<WireFrame>(trimmed) {
+                        Ok(frame) => Ok(frame),
+                        Err(_) => Ok(WireFrame::Event {
+                            event: WireEnvelope::new(
+                                "event",
+                                WireEvent::MessageDelta {
+                                    role: "system".to_string(),
+                                    content: trimmed.to_string(),
+                                },
+                            ),
+                        }),
+                    }
+                }
                 Err(err) => Err(anyhow::anyhow!("runtime read failed: {}", err)),
             };
             if tx.send(result).is_err() {
