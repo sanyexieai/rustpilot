@@ -1,9 +1,9 @@
-pub const LLM_TIMEOUT_SECS: u64 = 120;
+pub const LLM_TIMEOUT_SECS: u64 = 240;
 pub const MAX_AGENT_TURNS: usize = 24;
 /// 单轮 LLM 调用的墙钟超时（秒）。超时后 worker 会触发自愈流程。
-pub const WORKER_TURN_TIMEOUT_SECS: u64 = 60;
+pub const WORKER_TURN_TIMEOUT_SECS: u64 = 240;
 /// worker 整体运行超过此时间（秒）仍未完成，父进程调度器强制杀掉并重新排队。
-pub const WORKER_STUCK_NOTIFY_SECS: u64 = 120;
+pub const WORKER_STUCK_NOTIFY_SECS: u64 = 240;
 
 // LLM 请求重试配置
 pub const RETRY_MAX_ATTEMPTS: usize = 4; // 最多重试 4 次
