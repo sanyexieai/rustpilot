@@ -249,6 +249,9 @@ async fn run_root_console() -> anyhow::Result<()> {
         println!("warning: current directory is not a git repository");
     }
 
+    // 启动时确认未完成的任务（在进入 raw 模式前，使用普通 stdin/stdout）
+    confirm_unfinished_tasks(&project)?;
+
     let (mut child, mut child_stdin, frame_rx) = spawn_root_runtime_process(&repo_root)?;
     let mut console = InteractiveConsole::new("root".to_string())?;
     console.render_prompt()?;
@@ -754,6 +757,67 @@ fn is_exit_ack(frame: &WireFrame) -> bool {
             }
         } if message == "exit"
     )
+}
+
+/// 启动时检查未完成任务，逐一询问用户是否继续；选否则标记为取消。
+/// 此函数在进入 raw 终端模式之前调用，使用普通 stdin/stdout 交互。
+fn confirm_unfinished_tasks(project: &ProjectContext) -> anyhow::Result<()> {
+    let active: Vec<_> = project
+        .tasks()
+        .list_records()?
+        .into_iter()
+        .filter(|t| matches!(t.status.as_str(), "in_progress" | "blocked" | "pending"))
+        .collect();
+
+    if active.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("发现 {} 个未完成的任务：", active.len());
+    for task in &active {
+        println!(
+            "  #{} [{}] {}",
+            task.id, task.status, task.subject
+        );
+    }
+    println!();
+
+    let stdin = io::stdin();
+    let mut cancelled = 0usize;
+
+    for task in &active {
+        print!(
+            "继续任务 #{} 「{}」? (Y/n): ",
+            task.id, task.subject
+        );
+        io::Write::flush(&mut io::stdout())?;
+
+        let mut input = String::new();
+        stdin.lock().read_line(&mut input)?;
+        let answer = input.trim().to_ascii_lowercase();
+
+        if answer == "n" || answer == "no" || answer == "否" {
+            project
+                .tasks()
+                .update(task.id, Some("cancelled"), None, None)?;
+            println!("  → 已取消");
+            cancelled += 1;
+        } else {
+            project
+                .tasks()
+                .update(task.id, Some("pending"), None, None)?;
+            println!("  → 继续");
+        }
+    }
+
+    if cancelled > 0 {
+        println!();
+        println!("已取消 {} 个任务。", cancelled);
+    }
+    println!();
+
+    Ok(())
 }
 
 fn start_main_ui_server(repo_root: std::path::PathBuf, port: u16) -> Option<JoinHandle<()>> {

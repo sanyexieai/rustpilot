@@ -20,6 +20,7 @@ use crate::project_tools::{
 };
 use crate::prompt_manager::{adapt_worker_prompt_detailed, render_worker_system_prompt};
 use crate::resident_agents::{request_worker_launch, stop_launch, wait_for_launch_running};
+use crate::constants::WORKER_STUCK_NOTIFY_SECS;
 use crate::runtime_env::llm_timeout_secs_for_provider;
 use crate::terminal_session::{SessionState, TerminalCreateRequest, TerminalManager};
 use serde::{Deserialize, Serialize};
@@ -138,6 +139,7 @@ fn scheduler_loop(
     failed: Arc<AtomicUsize>,
 ) {
     let mut workers: HashMap<u64, WorkerHandle> = HashMap::new();
+    let mut spawn_times: HashMap<u64, Instant> = HashMap::new();
     let spawn_mode = choose_spawn_mode();
     let terminal_manager = TerminalManager::with_log_dir(repo_root.join(".team").join("sessions"));
     if let Ok(project) = ProjectContext::new(repo_root.clone()) {
@@ -299,6 +301,7 @@ fn scheduler_loop(
             }
         }
         for task_id in finished {
+            spawn_times.remove(&task_id);
             if let Some(worker) = workers.remove(&task_id) {
                 let owner = worker_owner(&worker);
                 let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
@@ -398,6 +401,7 @@ fn scheduler_loop(
                         "拉起 worker 后检查调度器预算状态。",
                     );
                     launched.fetch_add(1, Ordering::Relaxed);
+                    spawn_times.insert(task.id, Instant::now());
                     workers.insert(task.id, worker);
                 }
                 Err(err) => {
@@ -408,6 +412,48 @@ fn scheduler_loop(
                     let _ = project.tasks().update(task.id, Some("failed"), None, None);
                     failed.fetch_add(1, Ordering::Relaxed);
                 }
+            }
+        }
+
+        // 卡住检测：超过阈值的 worker 直接杀掉并重新排队 → 调度器下轮立即弹新窗口
+        let stuck_ids: Vec<u64> = spawn_times
+            .iter()
+            .filter(|(_, t)| t.elapsed().as_secs() > WORKER_STUCK_NOTIFY_SECS)
+            .map(|(id, _)| *id)
+            .collect();
+        for task_id in stuck_ids {
+            let elapsed = spawn_times.remove(&task_id).map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let Some(worker) = workers.remove(&task_id) else { continue; };
+            let owner = worker_owner(&worker);
+            let root = root_actor_id();
+
+            let attempts = project
+                .tasks()
+                .increment_recovery_attempts(task_id)
+                .unwrap_or(MAX_RECOVERY_ATTEMPTS + 1);
+
+            launch_log::emit(format!(
+                "[scheduler-watchdog] task={task_id} stuck for {elapsed}s, attempt={attempts}/{MAX_RECOVERY_ATTEMPTS}, killing and requeueing"
+            ));
+
+            let _ = mark_worker_stopped(&repo_root, task_id);
+            let _ = project.agents().set_state(&owner, "idle", None, None, None, Some("watchdog 强制终止"));
+            cleanup_worker(worker, &terminal_manager, &repo_root);
+
+            if attempts <= MAX_RECOVERY_ATTEMPTS {
+                let _ = project.tasks().update(task_id, Some("pending"), None, None);
+                let msg = format!(
+                    "[!] worker 卡住 {elapsed}s，已自动重启（第 {attempts}/{MAX_RECOVERY_ATTEMPTS} 次）：任务 #{task_id}"
+                );
+                let _ = project.mailbox().send_typed("team-manager", &root, "task.stuck", &msg, Some(task_id), None, true, None);
+            } else {
+                let _ = project.tasks().update(task_id, Some("failed"), None, None);
+                failed.fetch_add(1, Ordering::Relaxed);
+                let msg = format!(
+                    "[!] worker 卡住 {elapsed}s，已超过最大重启次数，任务 #{task_id} 标记为失败。请手动检查。"
+                );
+                let _ = project.mailbox().send_typed("team-manager", &root, "task.stuck", &msg, Some(task_id), None, true, None);
+                let _ = reconcile_parent_after_child_exit(&project, task_id);
             }
         }
 
@@ -942,6 +988,52 @@ pub async fn run_teammate_once(
                     Some(task_id),
                     "worker 失败后检查预算状态。",
                 );
+                // 尝试自愈：让 worker 自己决定是否创建子任务/子团队来恢复
+                let recovered = attempt_worker_self_recovery(
+                    &client,
+                    &llm,
+                    &project,
+                    &mut messages,
+                    &tools,
+                    progress.clone(),
+                    &report,
+                    &owner,
+                    task_id,
+                    &task_subject,
+                    &error_text,
+                )
+                .await;
+
+                if recovered {
+                    // worker 创建了子任务，进入 blocked 状态等待子任务完成
+                    launch_log::emit(format!(
+                        "[worker] task={} self-recovery: child tasks created, entering blocked",
+                        task_id
+                    ));
+                    let _ = project.tasks().update(
+                        task_id,
+                        Some("blocked"),
+                        Some(&owner),
+                        None,
+                    );
+                    let _ = send_task_notifications(
+                        &project,
+                        &notification_targets,
+                        &owner,
+                        "task.progress",
+                        &format!(
+                            "任务 #{} 自愈中：已创建子任务/子团队，等待子任务完成后继续",
+                            task_id
+                        ),
+                        Some(task_id),
+                        Some(&trace_id),
+                        false,
+                    );
+                    drop(heartbeat);
+                    return Ok(());
+                }
+
+                // 无法自愈，才真正标记为失败
                 let _ = send_task_notifications(
                     &project,
                     &notification_targets,
@@ -958,6 +1050,96 @@ pub async fn run_teammate_once(
             }
         }
     }
+}
+
+/// 自愈最大尝试次数。超过此限制的任务不再自愈，直接标记为 failed。
+const MAX_RECOVERY_ATTEMPTS: u32 = 2;
+
+/// 当 worker 的 agent loop 失败后，向 worker 注入一条恢复提示，
+/// 让 worker 自己决定是否创建子任务或子团队来解决问题。
+/// 返回 true 表示 worker 创建了恢复子任务（进入 blocked 等待）；
+/// 返回 false 表示 worker 放弃，应标记为 failed。
+async fn attempt_worker_self_recovery(
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    project: &ProjectContext,
+    messages: &mut Vec<Message>,
+    tools: &[crate::openai_compat::Tool],
+    progress: crate::activity::ActivityHandle,
+    report: &AgentProgressReport,
+    _owner: &str,
+    task_id: u64,
+    task_subject: &str,
+    error_text: &str,
+) -> bool {
+    // 超过次数上限，不再自愈
+    let attempts = project
+        .tasks()
+        .increment_recovery_attempts(task_id)
+        .unwrap_or(MAX_RECOVERY_ATTEMPTS + 1);
+    if attempts > MAX_RECOVERY_ATTEMPTS {
+        launch_log::emit(format!(
+            "[worker] task={} recovery_attempts={} exceeded limit={}, giving up",
+            task_id, attempts, MAX_RECOVERY_ATTEMPTS
+        ));
+        return false;
+    }
+    launch_log::emit(format!(
+        "[worker] task={} starting self-recovery attempt {}/{}",
+        task_id, attempts, MAX_RECOVERY_ATTEMPTS
+    ));
+
+    let child_count_before = project
+        .tasks()
+        .active_child_count(Some(task_id))
+        .unwrap_or(0);
+
+    let recovery_msg = format!(
+        "你的任务执行遇到了问题。\n\
+         错误信息：{}\n\
+         任务：{}\n\
+         \n\
+         请分析失败原因，然后选择以下恢复路径：\n\
+         方案 A — 单子任务：如果问题可以由一个子 agent 独立解决，\
+         用 task_create 创建一个子任务，描述清楚目标、方法和成功条件。\n\
+         方案 B — 子团队：如果问题需要多个角色配合（如规划+执行+验证），\
+         先创建一个规划子任务，由它分析需要哪些功能 agent 并逐一创建；\
+         各 agent 之间通过 team_send 协调。\n\
+         \n\
+         如果你判断问题根本无法通过子任务解决（例如缺少用户凭据、外部系统无法访问），\
+         则直接说明原因，不要创建子任务。",
+        error_text, task_subject
+    );
+    messages.push(Message {
+        role: "user".to_string(),
+        content: Some(recovery_msg),
+        tool_call_id: None,
+        tool_calls: None,
+    });
+
+    let recovery_ok = crate::agent::run_agent_loop(
+        client,
+        llm,
+        project,
+        messages,
+        tools,
+        progress,
+        Some(report),
+        None,
+    )
+    .await
+    .is_ok();
+
+    if !recovery_ok {
+        return false;
+    }
+
+    // 检查是否创建了新的子任务
+    let child_count_after = project
+        .tasks()
+        .active_child_count(Some(task_id))
+        .unwrap_or(0);
+    child_count_after > child_count_before
 }
 
 fn refresh_worker_system_prompt(
@@ -1342,8 +1524,47 @@ pub(crate) fn reconcile_parent_after_child_exit(
             "pending" | "in_progress" | "paused"
         )
     });
+    let all_children_done_and_failed =
+        !has_active && !has_blocked && has_failed;
 
-    let next_status = if has_failed || has_blocked {
+    let next_status = if all_children_done_and_failed {
+        // 所有子任务都失败了：检查 parent 的恢复次数，决定是重新调度还是放弃
+        let attempts = project
+            .tasks()
+            .increment_recovery_attempts(parent_task_id)
+            .unwrap_or(MAX_RECOVERY_ATTEMPTS + 1);
+
+        if attempts <= MAX_RECOVERY_ATTEMPTS {
+            // 还有恢复机会：把失败摘要追加进 parent 任务描述，然后重置为 pending
+            // scheduler 会重新分配一个新 worker，新 worker 看到失败上下文后换思路
+            let failed_summary = children
+                .iter()
+                .filter(|t| t.status == "failed")
+                .map(|t| format!("  - #{} {}: failed", t.id, t.subject))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let recovery_note = format!(
+                "\n\n[CHILD_FAILURE_RECOVERY attempt={}/{}]\n\
+                 以下子任务全部失败，请分析失败原因并采用不同方案重试：\n{}",
+                attempts, MAX_RECOVERY_ATTEMPTS, failed_summary
+            );
+            let _ = project
+                .tasks()
+                .append_user_reply(parent_task_id, &recovery_note, "pending");
+            launch_log::emit(format!(
+                "[reconcile] parent task={} all children failed, re-queuing for recovery attempt {}/{}",
+                parent_task_id, attempts, MAX_RECOVERY_ATTEMPTS
+            ));
+            "pending"
+        } else {
+            // 恢复次数耗尽，真正失败
+            launch_log::emit(format!(
+                "[reconcile] parent task={} all children failed and recovery attempts exhausted, marking failed",
+                parent_task_id
+            ));
+            "failed"
+        }
+    } else if has_failed || has_blocked {
         "blocked"
     } else if has_active {
         "in_progress"

@@ -7,6 +7,7 @@ use crate::anthropic_compat;
 use crate::config::LlmConfig;
 use crate::constants::{
     MAX_AGENT_TURNS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_ATTEMPTS, RETRY_MAX_DELAY_MS,
+    WORKER_TURN_TIMEOUT_SECS,
 };
 use crate::external_tools::{
     external_tool_definitions, external_tool_summaries, handle_external_tool_call,
@@ -239,10 +240,32 @@ pub async fn run_agent_loop(
 
         launch_log::emit(format!("> [{}] [model] turn {}", agent_label, turn + 1));
         let heartbeat = WaitHeartbeat::start(progress.clone(), format!("model turn {}", turn + 1));
-        let response = send_llm_request(client, config, &request, abort).await?;
+        let turn_result = tokio::time::timeout(
+            std::time::Duration::from_secs(WORKER_TURN_TIMEOUT_SECS),
+            async {
+                let response = send_llm_request(client, config, &request, abort).await?;
+                parse_llm_response(response, config.api_kind).await
+            },
+        )
+        .await;
         drop(heartbeat);
-
-        let assistant = parse_llm_response(response, config.api_kind).await?;
+        let assistant = match turn_result {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                launch_log::emit(format!(
+                    "[{}] turn {} timed out after {}s — triggering self-recovery",
+                    agent_label,
+                    turn + 1,
+                    WORKER_TURN_TIMEOUT_SECS
+                ));
+                anyhow::bail!(
+                    "LLM turn {} timed out after {}s with no response",
+                    turn + 1,
+                    WORKER_TURN_TIMEOUT_SECS
+                );
+            }
+        };
         let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
         messages.push(assistant.clone());
 
@@ -487,6 +510,28 @@ fn guard_tool_policy(project: &ProjectContext, call: &ToolCall) -> anyhow::Resul
             &call.function.name,
             &command,
             "manual",
+            &message,
+        );
+        anyhow::bail!("{}", message);
+    }
+    // worktree_run 时额外检查：root/parent 只允许只读命令
+    if call.function.name == "worktree_run"
+        && crate::agent_tools::current_node_is_parent().unwrap_or(false)
+        && !is_read_only_command(&command)
+    {
+        let message = format!(
+            "worktree_run refused: root/parent coordinator may only run read-only commands directly. \
+             Choose the appropriate path:\n\
+             Option A — single child task: use task_create if one worker can own this end-to-end. Command: `{}`\n\
+             Option B — team: if this requires multiple coordinated roles or phases, \
+             create one task_create per role/phase and coordinate via team_send.",
+            command.trim()
+        );
+        let _ = project.approval().record_block(
+            &actor_id,
+            &call.function.name,
+            &command,
+            "parent_policy",
             &message,
         );
         anyhow::bail!("{}", message);

@@ -399,15 +399,59 @@ fn collect_agent_mailbox_events(
         if matches!(item.msg_type.as_str(), "task.completed" | "task.failed")
             && let Some(task_id) = item.task_id
         {
-            display_lines.push(format!(
-                "[parent-notify] task {} {}",
-                task_id,
-                if item.msg_type == "task.completed" {
-                    "finished in child process"
-                } else {
-                    "failed in child process"
+            if item.msg_type == "task.completed" {
+                display_lines.push(format!(
+                    "[parent-notify] task {} finished in child process",
+                    task_id
+                ));
+            } else {
+                // 检查是否是顶层任务彻底失败（无父任务，recovery_attempts 耗尽）
+                let is_toplevel_final_failure = project
+                    .tasks()
+                    .get_record(task_id)
+                    .map(|t| t.parent_task_id.is_none())
+                    .unwrap_or(false);
+
+                display_lines.push(format!(
+                    "[parent-notify] task {} failed in child process",
+                    task_id
+                ));
+
+                if is_toplevel_final_failure {
+                    // 拉取失败任务的详情作为诊断信息
+                    let diagnosis = project
+                        .tasks()
+                        .get_record(task_id)
+                        .map(|t| {
+                            format!(
+                                "任务 #{} 「{}」已彻底失败（自愈次数耗尽）。\n\
+                                 最终错误记录在任务描述中。\n\
+                                 建议操作：\n\
+                                 1. /task get {} — 查看任务详情和失败历史\n\
+                                 2. /reply {} <补充说明> — 提供更多上下文让 agent 重试\n\
+                                 3. 直接描述新的解决思路，root 会重新规划",
+                                t.id, t.subject, task_id, task_id
+                            )
+                        })
+                        .unwrap_or_else(|_| {
+                            format!(
+                                "任务 #{} 已彻底失败。使用 /task get {} 查看详情。",
+                                task_id, task_id
+                            )
+                        });
+                    display_lines.push(format!("\n[!] TASK FAILED\n{}\n", diagnosis));
+                    messages.push(Message {
+                        role: "user".to_string(),
+                        content: Some(format!(
+                            "[task-final-failure] task {} has exhausted all recovery attempts and failed permanently. \
+                             Diagnosis: {}",
+                            task_id, diagnosis
+                        )),
+                        tool_call_id: None,
+                        tool_calls: None,
+                    });
                 }
-            ));
+            }
         }
         if item.msg_type == "task.request_clarification"
             && let Some(task_id) = item.task_id

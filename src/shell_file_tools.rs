@@ -132,6 +132,48 @@ pub fn is_likely_expensive_command(command: &str) -> bool {
         .any(|pattern| normalized.contains(pattern))
 }
 
+pub fn is_state_mutating_command(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if is_likely_expensive_command(&normalized) {
+        return true;
+    }
+    // 含输出重定向的命令视为可能有状态变更
+    if normalized.contains('>') {
+        return true;
+    }
+    const MUTATING_PATTERNS: &[&str] = &[
+        "git add",
+        "git commit",
+        "git push",
+        "git merge",
+        "git rebase",
+        "git reset",
+        "git stash",
+        "git tag",
+        "git rm",
+        "mkdir",
+        "rmdir",
+        "rm ",
+        "mv ",
+        "cp ",
+        "touch ",
+        "chmod ",
+        "chown ",
+        "cargo fmt",
+        "cargo fix",
+        "cargo add",
+        "cargo remove",
+        "pip install",
+        "npm init",
+    ];
+    MUTATING_PATTERNS.iter().any(|p| {
+        normalized == p.trim() || normalized.starts_with(&format!("{} ", p.trim()))
+    })
+}
+
 pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<String> {
     let normalized = normalize_command(command);
     let output = shell_command(&normalized, current_dir)?.output()?;
@@ -172,6 +214,19 @@ pub fn is_read_only_command(command: &str) -> bool {
         "dir",
         "find ",
         "rg ",
+        "grep ",
+        "head ",
+        "wc ",
+        "bat ",
+        "stat ",
+        "file ",
+        "du ",
+        "df",
+        "env",
+        "printenv",
+        "uname",
+        "tree ",
+        "jq ",
         "git status",
         "git diff",
         "git log",
@@ -179,6 +234,15 @@ pub fn is_read_only_command(command: &str) -> bool {
         "git branch",
         "git rev-parse",
         "git remote -v",
+        "git ls-files",
+        "git blame",
+        "git stash list",
+        "git tag",
+        "git describe",
+        "git shortlog",
+        "cargo metadata",
+        "cargo tree",
+        "cargo locate-project",
         "cat ",
         "type ",
         "get-content ",

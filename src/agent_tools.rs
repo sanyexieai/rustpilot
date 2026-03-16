@@ -9,7 +9,7 @@ use crate::openai_compat::{Tool, ToolCall, ToolFunction};
 use crate::project_tools::TaskManager;
 use crate::shell_file_tools::{
     BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file,
-    is_likely_expensive_command, is_likely_long_running_command, read_file, write_file,
+    is_likely_long_running_command, is_read_only_command, read_file, write_file,
 };
 use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
 
@@ -246,12 +246,14 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         })?,
         "write_file" => run_builtin_tool("write_file", || {
             let args: WriteFileArgs = parse_tool_args("write_file", &call.function.arguments)?;
+            reject_parent_file_write("write_file", &args.path)?;
             run_with_classified_error("write_file", BuiltinToolErrorKind::FileSystem, || {
                 write_file(&args)
             })
         })?,
         "edit_file" => run_builtin_tool("edit_file", || {
             let args: EditFileArgs = parse_tool_args("edit_file", &call.function.arguments)?;
+            reject_parent_file_write("edit_file", &args.path)?;
             run_with_classified_error("edit_file", BuiltinToolErrorKind::FileSystem, || {
                 edit_file(&args)
             })
@@ -274,28 +276,69 @@ fn reject_blocking_parent_execution(tool: &str, command: &str) -> anyhow::Result
     if !current_node_is_parent().unwrap_or(false) {
         return Ok(());
     }
+    // 白名单：root/parent 只允许只读命令直接执行
+    if is_read_only_command(command) {
+        return Ok(());
+    }
+    // 给长耗时命令提供更具体的委托建议
     if is_likely_long_running_command(command) {
         anyhow::bail!(
-            "{} refused: long-running commands must be delegated to a child agent/worker-owned terminal session; use delegate_long_running instead. Suggested recovery: call delegate_long_running with a concise goal plus this command: `{}`",
+            "{} refused: root/parent coordinator may only run read-only commands directly. \
+             Long-running commands must be delegated. Choose the appropriate path:\n\
+             Option A — single child task: use delegate_long_running if one worker can own this process end-to-end. \
+             Include the goal and this command: `{}`\n\
+             Option B — team: if this process is one step in a larger workflow requiring planning, \
+             implementation, and verification by different roles, create multiple tasks with task_create \
+             (one per role or phase) and coordinate via team_send.",
             tool,
             command.trim()
         );
     }
-    if is_likely_expensive_command(command) {
-        anyhow::bail!(
-            "{} refused: expensive commands must be delegated when this node is acting as a parent; create a child task instead of blocking the parent. Suggested recovery: call task_create with a concise task/deliverable for this command: `{}`",
-            tool,
-            command.trim()
-        );
+    // 其余一切（包括任意 shell 脚本、web 自动化、任何非只读操作）都必须委托
+    anyhow::bail!(
+        "{} refused: root/parent coordinator may only run read-only shell commands directly \
+         (git status/diff/log, ls, cat, grep, find, rg, etc.). \
+         This command must be delegated. Choose the appropriate path:\n\
+         Option A — single child task: if this is a self-contained action one agent can complete, \
+         use task_create with the goal, expected deliverable, and success condition. Command: `{}`\n\
+         Option B — team: if this requires coordinated effort across multiple roles or phases \
+         (e.g., plan → implement → verify, or parallel workstreams), \
+         create one task_create per role/phase and use team_send to coordinate between them.",
+        tool,
+        command.trim()
+    )
+}
+
+fn reject_parent_file_write(tool: &str, path: &str) -> anyhow::Result<()> {
+    if !current_node_is_parent().unwrap_or(false) {
+        return Ok(());
     }
-    Ok(())
+    let normalized = path.trim().replace('\\', "/");
+    let allowed_prefixes = [".tasks/", ".team/", "decisions.jsonl"];
+    if allowed_prefixes
+        .iter()
+        .any(|prefix| normalized.contains(prefix))
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} refused: root/parent coordinator must not write source files directly. Path: {}. \
+         Choose the appropriate path:\n\
+         Option A — single child task: if this is an isolated file change one agent can own, \
+         use task_create with the exact file path, expected content/diff, and success condition.\n\
+         Option B — team: if this file change is part of a larger feature or refactor spanning \
+         multiple files or roles, create one task_create per phase/role and coordinate via team_send.\n\
+         Exception: writing to .tasks/ and .team/ planning directories is allowed.",
+        tool,
+        path
+    )
 }
 
 fn current_agent_id() -> String {
     std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
 }
 
-fn current_node_is_parent() -> anyhow::Result<bool> {
+pub(crate) fn current_node_is_parent() -> anyhow::Result<bool> {
     if current_task_id().is_none() && current_agent_id() == "lead" {
         return Ok(true);
     }

@@ -24,6 +24,9 @@ pub struct TaskRecord {
     pub depth: u32,
     #[serde(rename = "blockedBy")]
     pub blocked_by: Vec<u64>,
+    /// 已消耗的自愈尝试次数，超过上限后不再自愈，直接 failed
+    #[serde(default)]
+    pub recovery_attempts: u32,
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -109,6 +112,7 @@ impl TaskManager {
                 parent_task_id: options.parent_task_id,
                 depth: options.depth.unwrap_or(0),
                 blocked_by: Vec::new(),
+                recovery_attempts: 0,
                 created_at: now,
                 updated_at: now,
             };
@@ -153,6 +157,18 @@ impl TaskManager {
             task.updated_at = now_secs_f64();
             self.save(&task)?;
             Ok(serde_json::to_string_pretty(&task)?)
+        })
+    }
+
+    /// 增加任务的自愈尝试计数，返回更新后的次数
+    pub fn increment_recovery_attempts(&self, task_id: u64) -> anyhow::Result<u32> {
+        self.with_lock(|| {
+            let mut task = self.load(task_id)?;
+            task.recovery_attempts = task.recovery_attempts.saturating_add(1);
+            task.updated_at = now_secs_f64();
+            let count = task.recovery_attempts;
+            self.save(&task)?;
+            Ok(count)
         })
     }
 
