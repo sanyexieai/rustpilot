@@ -100,6 +100,16 @@ impl LaunchSettingsManager {
         ))
     }
 
+    pub fn mode_for_kind(&self, kind: &str) -> anyhow::Result<LaunchPresentationMode> {
+        let settings = self.get()?;
+        Ok(match (settings.mode, kind.trim()) {
+            (LaunchPresentationMode::MultiWindow, "resident") => {
+                LaunchPresentationMode::ImplicitMultiWindow
+            }
+            (mode, _) => mode,
+        })
+    }
+
     fn ensure_defaults(&self) -> anyhow::Result<()> {
         if !self.path.exists() {
             self.save(&LaunchSettings::default())?;
@@ -165,5 +175,15 @@ mod tests {
             .expect("set mode");
         let settings = manager.get().expect("settings");
         assert_eq!(settings.mode, LaunchPresentationMode::ImplicitMultiWindow);
+    }
+
+    #[test]
+    fn resident_launches_default_to_background_when_global_mode_is_multi_window() {
+        let temp = TestDir::new();
+        let manager = LaunchSettingsManager::new(temp.path.clone()).expect("manager");
+        let mode = manager.mode_for_kind("resident").expect("resident mode");
+        assert_eq!(mode, LaunchPresentationMode::ImplicitMultiWindow);
+        let worker_mode = manager.mode_for_kind("worker").expect("worker mode");
+        assert_eq!(worker_mode, LaunchPresentationMode::MultiWindow);
     }
 }

@@ -398,7 +398,7 @@ fn launch_record_process(
         command_line,
         record,
     );
-    let mode = project.launch_settings().get()?.mode;
+    let mode = project.launch_settings().mode_for_kind(&record.kind)?;
     let launched = launch_backend::launch(&plan, mode)?;
     Ok((
         launched.pid,

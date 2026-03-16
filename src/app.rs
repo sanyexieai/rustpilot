@@ -185,9 +185,9 @@ pub async fn run() -> anyhow::Result<()> {
         .get(1)
         .is_some_and(|value| value == "root-runtime-run")
     {
-        let repo_root = parse_root_runtime_repo_root(&args[2..])?;
+        let (repo_root, parent_pid) = parse_root_runtime_args(&args[2..])?;
         load_repo_env(&repo_root);
-        return run_root_runtime(repo_root).await;
+        return run_root_runtime(repo_root, parent_pid).await;
     }
 
     run_root_console().await
@@ -309,7 +309,7 @@ async fn run_root_console() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_root_runtime(repo_root: std::path::PathBuf) -> anyhow::Result<()> {
+async fn run_root_runtime(repo_root: std::path::PathBuf, parent_pid: Option<u32>) -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
     }
@@ -375,6 +375,7 @@ async fn run_root_runtime(repo_root: std::path::PathBuf) -> anyhow::Result<()> {
     }
 
     let request_rx = spawn_request_reader_thread();
+    let parent_exit_rx = start_parent_exit_watch(parent_pid);
     let mut stdout = BufWriter::new(io::stdout());
     let mut last_mailbox_poll = Instant::now()
         .checked_sub(MAILBOX_POLL_INTERVAL)
@@ -384,6 +385,9 @@ async fn run_root_runtime(repo_root: std::path::PathBuf) -> anyhow::Result<()> {
         .unwrap_or_else(Instant::now);
 
     loop {
+        if parent_exit_rx.try_recv().is_ok() {
+            break;
+        }
         let now = Instant::now();
         if now.duration_since(last_reconcile) >= RECONCILE_INTERVAL {
             supervisor.reconcile()?;
@@ -531,19 +535,35 @@ async fn process_console_input(
     Ok(outcome)
 }
 
-fn parse_root_runtime_repo_root(args: &[String]) -> anyhow::Result<std::path::PathBuf> {
+fn parse_root_runtime_args(args: &[String]) -> anyhow::Result<(std::path::PathBuf, Option<u32>)> {
     let mut idx = 0usize;
+    let mut repo_root = None::<std::path::PathBuf>;
+    let mut parent_pid = None::<u32>;
     while idx < args.len() {
-        if args[idx] == "--repo-root" {
-            idx += 1;
-            return Ok(std::path::PathBuf::from(
-                args.get(idx)
-                    .ok_or_else(|| anyhow::anyhow!("missing --repo-root value"))?,
-            ));
+        match args[idx].as_str() {
+            "--repo-root" => {
+                idx += 1;
+                repo_root = Some(std::path::PathBuf::from(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --repo-root value"))?,
+                ));
+            }
+            "--parent-pid" => {
+                idx += 1;
+                parent_pid = Some(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --parent-pid value"))?
+                        .parse::<u32>()?,
+                );
+            }
+            _ => {}
         }
         idx += 1;
     }
-    anyhow::bail!("missing --repo-root");
+    Ok((
+        repo_root.ok_or_else(|| anyhow::anyhow!("missing --repo-root"))?,
+        parent_pid,
+    ))
 }
 
 fn spawn_root_runtime_process(
@@ -554,6 +574,8 @@ fn spawn_root_runtime_process(
         .arg("root-runtime-run")
         .arg("--repo-root")
         .arg(repo_root)
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -582,6 +604,50 @@ fn spawn_root_runtime_process(
         }
     });
     Ok((child, stdin, rx))
+}
+
+fn start_parent_exit_watch(parent_pid: Option<u32>) -> Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    let Some(parent_pid) = parent_pid else {
+        return rx;
+    };
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(500));
+        if !process_is_alive(parent_pid) {
+            let _ = tx.send(());
+            break;
+        }
+    });
+    rx
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$p = Get-Process -Id {} -ErrorAction SilentlyContinue; if ($null -ne $p) {{ exit 0 }} else {{ exit 1 }}",
+                    pid
+                ),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("sh")
+            .args(["-c", &format!("kill -0 {} >/dev/null 2>&1", pid)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 fn spawn_request_reader_thread() -> Receiver<String> {
