@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::{ProjectContext, classify_energy};
+use crate::launch_backend;
 use crate::resident_agents::resident_listen_port;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,11 @@ pub struct SystemModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemSummary {
+    pub launch_mode: String,
+    pub launch_mode_description: String,
+    pub launch_effective_mode: String,
+    pub launch_backend: String,
+    pub launch_backend_note: String,
     pub resident_count: usize,
     pub pending_tasks: usize,
     pub running_tasks: usize,
@@ -191,6 +197,8 @@ impl SystemModelManager {
         let decisions = project.decisions().list_recent_records(12)?;
         let prompt_changes = project.prompt_history().list_recent(8)?;
         let enabled_residents = project.residents().enabled_agents()?;
+        let launch_settings = project.launch_settings().get()?;
+        let launch_backend_status = launch_backend::backend_status(launch_settings.mode);
 
         let pending_tasks = tasks.iter().filter(|item| item.status == "pending").count();
         let running_tasks = tasks
@@ -420,6 +428,11 @@ impl SystemModelManager {
         let model = SystemModel {
             generated_at: crate::project_tools::util::now_secs_f64(),
             summary: SystemSummary {
+                launch_mode: launch_settings.mode.as_str().to_string(),
+                launch_mode_description: launch_settings.mode.description().to_string(),
+                launch_effective_mode: launch_backend_status.effective_mode.as_str().to_string(),
+                launch_backend: launch_backend_status.backend,
+                launch_backend_note: launch_backend_status.note,
                 resident_count: residents.len(),
                 pending_tasks,
                 running_tasks,

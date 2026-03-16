@@ -132,6 +132,8 @@ impl LaunchRegistryManager {
         launch_id: &str,
         pid: u32,
         process_started_at: Option<f64>,
+        channel: &str,
+        target: &str,
         window_title: &str,
     ) -> anyhow::Result<Option<LaunchRecord>> {
         let _guard = FileLock::acquire(self.path.clone())?;
@@ -143,8 +145,11 @@ impl LaunchRegistryManager {
                 item.status = "running".to_string();
                 item.pid = Some(pid);
                 item.process_started_at = process_started_at;
+                item.channel = channel.trim().to_string();
                 item.window_title = window_title.trim().to_string();
-                item.target = if item.window_title.is_empty() {
+                item.target = if !target.trim().is_empty() {
+                    target.trim().to_string()
+                } else if item.window_title.is_empty() {
                     format!("pid:{pid}")
                 } else {
                     item.window_title.clone()

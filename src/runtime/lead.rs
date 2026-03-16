@@ -2,7 +2,9 @@ use crate::abort_control::begin_session_request;
 use crate::activity::{ActivityHandle, set_activity};
 use crate::agent::{diagnose_agent_failure, run_agent_loop, tool_definitions};
 use crate::app_commands::AppRuntime;
-use crate::app_support::{InteractionMode, current_agent_id, pump_lead_mailbox, trim_messages};
+use crate::app_support::{
+    InteractionMode, current_agent_id, pump_lead_mailbox_silent, trim_messages,
+};
 use crate::config::LlmConfig;
 use crate::openai_compat::Message;
 use crate::project_tools::{EnergyMode, ProjectContext};
@@ -42,7 +44,7 @@ pub(crate) async fn run_root_turn(
     .await?;
     *messages = lead_messages;
     supervisor.reconcile()?;
-    pump_lead_mailbox(project, lead_cursor, messages)?;
+    pump_lead_mailbox_silent(project, lead_cursor, messages)?;
     println!();
     Ok(())
 }

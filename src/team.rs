@@ -8,6 +8,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::app_support::root_actor_id;
 use crate::agent::{AgentProgressReport, run_agent_loop, tool_definitions};
 use crate::config::LlmConfig;
 use crate::config::default_llm_user_agent;
@@ -594,6 +595,11 @@ pub async fn run_teammate_once(
     let task: TaskRecord = serde_json::from_str(&raw_task)?;
     let trace_id = format!("task-{}", task_id);
     let task_subject = task.subject.clone();
+    let notification_targets = task_notification_targets(&project, &task, &owner);
+    let primary_notification_target = notification_targets
+        .first()
+        .cloned()
+        .unwrap_or_else(root_actor_id);
     if task.worktree.is_empty() {
         anyhow::bail!("任务 {} 没有绑定 worktree", task_id);
     }
@@ -605,15 +611,15 @@ pub async fn run_teammate_once(
     project
         .tasks()
         .update(task_id, Some("in_progress"), Some(&owner), None)?;
-    let _ = project.mailbox().send_typed(
+    let _ = send_task_notifications(
+        &project,
+        &notification_targets,
         &owner,
-        "lead",
         "task.started",
         &format!("任务 #{} 已启动：{}", task_id, task_subject),
         Some(task_id),
         Some(&trace_id),
         false,
-        None,
     );
 
     let config = worker_role_config(&role_hint);
@@ -660,15 +666,15 @@ pub async fn run_teammate_once(
             "[worker] task={} entering timer mode interval={}s",
             task_id, seconds
         ));
-        let _ = project.mailbox().send_typed(
+        let _ = send_task_notifications(
+            &project,
+            &notification_targets,
             &owner,
-            "lead",
             "task.progress",
             &format!("定时器任务 #{} 已进入长运行，间隔={}s", task_id, seconds),
             Some(task_id),
             Some(&trace_id),
             false,
-            None,
         );
         run_timer_agent(task_id, &owner, seconds);
         return Ok(());
@@ -692,10 +698,15 @@ pub async fn run_teammate_once(
 
     let tools = tools_for_role_and_priority(&role_hint, &task.priority);
     let progress = crate::activity::new_activity_handle();
-    let heartbeat = WorkerHeartbeat::start(owner.clone(), task_id, progress.clone());
+    let heartbeat = WorkerHeartbeat::start(
+        repo_root.clone(),
+        owner.clone(),
+        task_id,
+        progress.clone(),
+    );
     let report = AgentProgressReport {
         from: owner.clone(),
-        to: "lead".to_string(),
+        to: primary_notification_target.clone(),
         task_id: Some(task_id),
         trace_id: Some(trace_id.clone()),
     };
@@ -749,15 +760,15 @@ pub async fn run_teammate_once(
                     let _ = project
                         .tasks()
                         .update(task_id, Some("blocked"), Some(&owner), None);
-                    let _ = project.mailbox().send_typed(
+                    let _ = send_task_notifications(
+                        &project,
+                        &notification_targets,
                         &owner,
-                        "lead",
                         "task.request_clarification",
                         &question,
                         Some(task_id),
                         Some(&trace_id),
                         true,
-                        None,
                     );
                     let clarification = wait_for_clarification(
                         &project,
@@ -811,15 +822,25 @@ pub async fn run_teammate_once(
                     Some(task_id),
                     "worker 完成任务后检查预算状态。",
                 );
-                let _ = project.mailbox().send_typed(
+                let _ = send_task_notifications(
+                    &project,
+                    &notification_targets,
                     &owner,
-                    "lead",
+                    "task.completed",
+                    &format!("任务 #{} 已完成：{}", task_id, task_subject),
+                    Some(task_id),
+                    Some(&trace_id),
+                    true,
+                );
+                let _ = send_task_notifications(
+                    &project,
+                    &notification_targets,
+                    &owner,
                     "task.result",
                     &format!("任务 #{} 已完成：{}", task_id, task_subject),
                     Some(task_id),
                     Some(&trace_id),
                     true,
-                    None,
                 );
                 drop(heartbeat);
                 launch_log::emit(format!("[worker] task={} completed", task_id));
@@ -921,15 +942,15 @@ pub async fn run_teammate_once(
                     Some(task_id),
                     "worker 失败后检查预算状态。",
                 );
-                let _ = project.mailbox().send_typed(
+                let _ = send_task_notifications(
+                    &project,
+                    &notification_targets,
                     &owner,
-                    "lead",
                     "task.failed",
                     &format!("任务 #{} 失败：{}", task_id, err),
                     Some(task_id),
                     Some(&trace_id),
                     true,
-                    None,
                 );
                 drop(heartbeat);
                 launch_log::emit(format!("[worker] task={} failed", task_id));
@@ -1080,17 +1101,68 @@ fn run_timer_agent(task_id: u64, owner: &str, seconds: u64) {
     }
 }
 
+fn task_notification_targets(project: &ProjectContext, task: &TaskRecord, owner: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    if let Some(parent_task_id) = task.parent_task_id
+        && let Ok(parent_task) = project.tasks().get_record(parent_task_id)
+        && !parent_task.owner.trim().is_empty()
+        && parent_task.owner != owner
+    {
+        targets.push(parent_task.owner);
+    }
+
+    let root_actor = root_actor_id();
+    if root_actor != owner && !targets.iter().any(|item| item == &root_actor) {
+        targets.push(root_actor);
+    }
+    targets
+}
+
+fn send_task_notifications(
+    project: &ProjectContext,
+    recipients: &[String],
+    from: &str,
+    msg_type: &str,
+    message: &str,
+    task_id: Option<u64>,
+    trace_id: Option<&str>,
+    requires_ack: bool,
+) -> anyhow::Result<()> {
+    for recipient in recipients {
+        let _ = project.mailbox().send_typed(
+            from,
+            recipient,
+            msg_type,
+            message,
+            task_id,
+            trace_id,
+            requires_ack,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 struct WorkerHeartbeat {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl WorkerHeartbeat {
-    fn start(owner: String, task_id: u64, progress: crate::activity::ActivityHandle) -> Self {
+    fn start(
+        repo_root: PathBuf,
+        owner: String,
+        task_id: u64,
+        progress: crate::activity::ActivityHandle,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let handle = thread::spawn(move || {
             let started = Instant::now();
+            let mut mailbox_cursor = ProjectContext::new(repo_root.clone())
+                .ok()
+                .and_then(|project| project.mailbox().pending_count(&owner).ok())
+                .unwrap_or(0);
             while !stop_flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_secs(5));
                 if stop_flag.load(Ordering::Relaxed) {
@@ -1103,6 +1175,7 @@ impl WorkerHeartbeat {
                     started.elapsed().as_secs_f64(),
                     crate::activity::render_activity(&progress)
                 ));
+                emit_parent_mailbox_updates(&repo_root, &owner, &mut mailbox_cursor);
             }
         });
         Self {
@@ -1177,6 +1250,61 @@ fn load_task_status(project: &ProjectContext, task_id: u64) -> anyhow::Result<St
     let raw = project.tasks().get(task_id)?;
     let task: TaskRecord = serde_json::from_str(&raw)?;
     Ok(task.status)
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerParentMailPoll {
+    next_cursor: usize,
+    items: Vec<WorkerParentMailItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerParentMailItem {
+    msg_id: String,
+    msg_type: String,
+    from: String,
+    message: String,
+    task_id: Option<u64>,
+    #[serde(default)]
+    requires_ack: bool,
+}
+
+fn emit_parent_mailbox_updates(repo_root: &Path, owner: &str, cursor: &mut usize) {
+    let Ok(project) = ProjectContext::new(repo_root.to_path_buf()) else {
+        return;
+    };
+    let Ok(raw) = project.mailbox().poll(owner, *cursor, 20) else {
+        return;
+    };
+    let Ok(polled) = serde_json::from_str::<WorkerParentMailPoll>(&raw) else {
+        return;
+    };
+    *cursor = polled.next_cursor;
+    for item in polled.items {
+        if !matches!(
+            item.msg_type.as_str(),
+            "task.started"
+                | "task.progress"
+                | "task.completed"
+                | "task.result"
+                | "task.failed"
+                | "task.request_clarification"
+        ) {
+            continue;
+        }
+        launch_log::emit(format!(
+            "[parent-mail][task={}][type={}][from={}] {}",
+            item.task_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            item.msg_type,
+            item.from,
+            item.message
+        ));
+        if item.requires_ack {
+            let _ = project.mailbox().ack(owner, &item.msg_id, "received by parent worker");
+        }
+    }
 }
 
 pub(crate) fn reconcile_parent_after_child_exit(
@@ -2089,7 +2217,7 @@ fn maybe_reflect_energy(
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile_parent_after_child_exit;
+    use super::{reconcile_parent_after_child_exit, send_task_notifications, task_notification_targets};
     use crate::project_tools::{ProjectContext, TaskCreateOptions, TaskRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2260,5 +2388,77 @@ mod tests {
             parent_state.note.as_deref(),
             Some("子任务已结束，但存在失败或阻塞，等待父任务处理")
         );
+    }
+
+    #[test]
+    fn child_completion_notifies_parent_owner_and_root_actor() {
+        let temp = TestDir::new("child_completion_notifies_parent");
+        let project = project_context(temp.path());
+        unsafe {
+            std::env::set_var("RUSTPILOT_ROOT_AGENT_ID", "root-node");
+        }
+
+        let parent_raw = project
+            .tasks()
+            .create_detailed(
+                "parent task",
+                "coordinate child work",
+                TaskCreateOptions::default(),
+            )
+            .expect("create parent");
+        let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
+        project
+            .tasks()
+            .update(parent.id, Some("in_progress"), Some("teammate-parent"), None)
+            .expect("claim parent");
+
+        let child_raw = project
+            .tasks()
+            .create_detailed(
+                "child task",
+                "complete work",
+                TaskCreateOptions {
+                    parent_task_id: Some(parent.id),
+                    depth: Some(1),
+                    ..TaskCreateOptions::default()
+                },
+            )
+            .expect("create child");
+        let child: TaskRecord = serde_json::from_str(&child_raw).expect("parse child");
+        let targets = task_notification_targets(&project, &child, "teammate-child");
+        assert_eq!(
+            targets,
+            vec!["teammate-parent".to_string(), "root-node".to_string()]
+        );
+
+        send_task_notifications(
+            &project,
+            &targets,
+            "teammate-child",
+            "task.completed",
+            "任务 #2 已完成：child task",
+            Some(child.id),
+            Some("task-2"),
+            true,
+        )
+        .expect("send notifications");
+
+        let parent_inbox = project
+            .mailbox()
+            .poll("teammate-parent", 0, 20)
+            .expect("poll parent inbox");
+        assert!(parent_inbox.contains("\"msg_type\": \"task.completed\""));
+        assert!(parent_inbox.contains("任务 #2 已完成"));
+
+        let root_inbox = project
+            .mailbox()
+            .poll("root-node", 0, 20)
+            .expect("poll root inbox");
+        assert!(root_inbox.contains("\"msg_type\": \"task.completed\""));
+        assert!(root_inbox.contains("任务 #2 已完成"));
+
+        unsafe {
+            std::env::remove_var("RUSTPILOT_ROOT_AGENT_ID");
+        }
     }
 }

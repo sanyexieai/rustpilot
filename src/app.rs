@@ -1,9 +1,8 @@
 use crate::activity::new_activity_handle;
 use crate::app_commands::{CliRuntime, LoopDirective, process_cli_action};
 use crate::app_support::{
-    InteractionMode, current_agent_id, load_repo_env, open_browser, parse_resident_args,
-    parse_teammate_args, parse_ui_intent, pump_lead_mailbox, resolve_ui_port, root_actor_id,
-    ui_base_url,
+    InteractionMode, collect_lead_mailbox_events, current_agent_id, load_repo_env,
+    parse_resident_args, parse_teammate_args, resolve_ui_port, root_actor_id,
 };
 use crate::cli::handle_cli_command;
 use crate::config::{LlmConfig, default_llm_user_agent};
@@ -18,14 +17,134 @@ use crate::runtime_env::{
 use crate::skills::SkillRegistry;
 use crate::team::run_teammate_once;
 use crate::ui_server::spawn_ui_server;
-use crate::wire::{WireEvent, WireFrame, WireResponse};
+use crate::wire::{WireEnvelope, WireEvent, WireFrame, WireRequest, WireResponse};
 use crate::wire_exec::{WireRuntime, execute_wire_request};
-use anyhow::Context;
-use std::io::{self, Write};
+use crossterm::cursor::MoveToColumn;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::style::Print;
+use crossterm::terminal::{self, Clear, ClearType};
+use crossterm::{execute, queue};
+use std::io::{self, BufRead, BufReader, BufWriter, Stdout, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const AUTO_TEAM_MAX_PARALLEL: usize = 2;
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const MAILBOX_POLL_INTERVAL: Duration = Duration::from_millis(400);
+const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
+
+struct InteractiveConsole {
+    stdout: Stdout,
+    prompt: String,
+    buffer: String,
+    raw_enabled: bool,
+    dirty: bool,
+}
+
+impl InteractiveConsole {
+    fn new(prompt: String) -> anyhow::Result<Self> {
+        terminal::enable_raw_mode()?;
+        Ok(Self {
+            stdout: io::stdout(),
+            prompt,
+            buffer: String::new(),
+            raw_enabled: true,
+            dirty: true,
+        })
+    }
+
+    fn set_prompt(&mut self, prompt: String) {
+        if self.prompt != prompt {
+            self.prompt = prompt;
+            self.dirty = true;
+        }
+    }
+
+    fn render_prompt(&mut self) -> anyhow::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        queue!(
+            self.stdout,
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            Print(format!("{}> {}", self.prompt, self.buffer))
+        )?;
+        self.stdout.flush()?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn print_lines(&mut self, lines: &[String]) -> anyhow::Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        queue!(self.stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        for line in lines {
+            queue!(self.stdout, Print(line), Print("\r\n"))?;
+        }
+        self.dirty = true;
+        self.render_prompt()
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<String>> {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                anyhow::bail!("interrupted");
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(Some(String::new()));
+            }
+            KeyCode::Enter => {
+                let line = self.buffer.clone();
+                queue!(
+                    self.stdout,
+                    MoveToColumn(0),
+                    Clear(ClearType::CurrentLine),
+                    Print(format!("{}> {}", self.prompt, self.buffer)),
+                    Print("\r\n")
+                )?;
+                self.stdout.flush()?;
+                self.buffer.clear();
+                self.dirty = true;
+                return Ok(Some(line));
+            }
+            KeyCode::Backspace => {
+                if self.buffer.pop().is_some() {
+                    self.dirty = true;
+                }
+            }
+            KeyCode::Char(ch) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.buffer.push(ch);
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        self.render_prompt()?;
+        Ok(None)
+    }
+
+    fn suspend_raw(&mut self) -> anyhow::Result<()> {
+        if self.raw_enabled {
+            terminal::disable_raw_mode()?;
+            self.raw_enabled = false;
+        }
+        Ok(())
+    }
+
+}
+
+impl Drop for InteractiveConsole {
+    fn drop(&mut self) {
+        let _ = self.suspend_raw();
+        let _ = execute!(self.stdout, MoveToColumn(0), Clear(ClearType::CurrentLine));
+    }
+}
 
 pub async fn run() -> anyhow::Result<()> {
     let root_actor = root_actor_id();
@@ -62,7 +181,19 @@ pub async fn run() -> anyhow::Result<()> {
             resident.max_parallel,
         );
     }
+    if args
+        .get(1)
+        .is_some_and(|value| value == "root-runtime-run")
+    {
+        let repo_root = parse_root_runtime_repo_root(&args[2..])?;
+        load_repo_env(&repo_root);
+        return run_root_runtime(repo_root).await;
+    }
 
+    run_root_console().await
+}
+
+async fn run_root_console() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let env_update = ensure_env_guidance(&cwd)?;
     dotenvy::from_path(cwd.join(".env")).ok();
@@ -80,8 +211,9 @@ pub async fn run() -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
     }
-    let llm = match LlmConfig::from_repo_root(&repo_root) {
-        Ok(cfg) => cfg,
+
+    match LlmConfig::from_repo_root(&repo_root) {
+        Ok(_) => {}
         Err(err)
             if err.to_string().contains("LLM_API_KEY is required")
                 || err.to_string().contains("No API key found for provider") =>
@@ -96,10 +228,92 @@ pub async fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
             dotenvy::from_path_override(cwd.join(".env")).ok();
-            LlmConfig::from_repo_root(&repo_root)?
+            let _ = LlmConfig::from_repo_root(&repo_root)?;
         }
         Err(err) => return Err(err),
-    };
+    }
+
+    let project = ProjectContext::new(repo_root.clone())?;
+    let ui_port = resolve_ui_port(&project);
+    let root_actor = root_actor_id();
+    let default_session =
+        project
+            .sessions()
+            .ensure_session("cli-main", Some("primary"), &root_actor, "active")?;
+
+    println!("repo root: {}", repo_root.display());
+    println!("focus: root");
+    println!("session: {}", default_session.session_id);
+    println!("ui: http://127.0.0.1:{ui_port}");
+    if !project.worktrees().git_available {
+        println!("warning: current directory is not a git repository");
+    }
+
+    let (mut child, mut child_stdin, frame_rx) = spawn_root_runtime_process(&repo_root)?;
+    let mut console = InteractiveConsole::new("root".to_string())?;
+    console.render_prompt()?;
+
+    loop {
+        let mut lines = Vec::new();
+        let mut should_exit = false;
+        while let Ok(frame) = frame_rx.try_recv() {
+            match frame {
+                Ok(frame) => {
+                    apply_frame_to_console(&frame, &mut console, &mut lines);
+                    if is_exit_ack(&frame) {
+                        should_exit = true;
+                    }
+                }
+                Err(err) => lines.push(format!("error: runtime stream {}", err)),
+            }
+        }
+        console.print_lines(&lines)?;
+
+        if should_exit {
+            break;
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+
+        if !event::poll(INPUT_POLL_INTERVAL)? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            continue;
+        }
+        let Some(input) = console.handle_key(key)? else {
+            continue;
+        };
+        if input.is_empty() {
+            break;
+        }
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            console.render_prompt()?;
+            continue;
+        }
+        write_wire_request(
+            &mut child_stdin,
+            &WireRequest::ConsoleInput {
+                input: trimmed.to_string(),
+            },
+        )?;
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+async fn run_root_runtime(repo_root: std::path::PathBuf) -> anyhow::Result<()> {
+    unsafe {
+        std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
+    }
+    let llm = LlmConfig::from_repo_root(&repo_root)?;
     let client = reqwest::Client::builder()
         .user_agent(default_llm_user_agent())
         .timeout(Duration::from_secs(llm_timeout_secs_for_provider(
@@ -108,6 +322,7 @@ pub async fn run() -> anyhow::Result<()> {
         .build()?;
 
     let project = ProjectContext::new(repo_root.clone())?;
+    let root_actor = root_actor_id();
     project.agents().ensure_profile(
         &root_actor,
         "scheduler",
@@ -159,107 +374,305 @@ pub async fn run() -> anyhow::Result<()> {
             .save_messages(&current_session_id, &messages)?;
     }
 
-    println!("repo root: {}", repo_root.display());
-    println!("focus: {}", interaction_mode.label());
-    println!("session: {}", current_session_id);
-    println!("ui: http://127.0.0.1:{ui_port}");
-    if !project.worktrees().git_available {
-        println!("warning: current directory is not a git repository");
-    }
+    let request_rx = spawn_request_reader_thread();
+    let mut stdout = BufWriter::new(io::stdout());
+    let mut last_mailbox_poll = Instant::now()
+        .checked_sub(MAILBOX_POLL_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let mut last_reconcile = Instant::now()
+        .checked_sub(RECONCILE_INTERVAL)
+        .unwrap_or_else(Instant::now);
 
     loop {
-        supervisor.reconcile()?;
-        pump_lead_mailbox(&project, &mut lead_cursor, &mut messages)?;
+        let now = Instant::now();
+        if now.duration_since(last_reconcile) >= RECONCILE_INTERVAL {
+            supervisor.reconcile()?;
+            last_reconcile = now;
+        }
+        if now.duration_since(last_mailbox_poll) >= MAILBOX_POLL_INTERVAL {
+            let lines = collect_lead_mailbox_events(&project, &mut lead_cursor, &mut messages)?;
+            emit_mailbox_lines(&mut stdout, &lines)?;
+            last_mailbox_poll = now;
+        }
 
-        let mut input = String::new();
-        print!("{}> ", interaction_mode.label());
-        io::stdout().flush().ok();
-        let bytes = io::stdin()
-            .read_line(&mut input)
-            .context("failed to read input")?;
-        if bytes == 0 {
+        let Ok(request_text) = request_rx.recv_timeout(INPUT_POLL_INTERVAL) else {
+            continue;
+        };
+        let request: WireRequest = serde_json::from_str(&request_text)?;
+        let outcome = match request {
+            WireRequest::ConsoleInput { input } => {
+                process_console_input(
+                    &input,
+                    &repo_root,
+                    &client,
+                    &llm,
+                    &project,
+                    &mut messages,
+                    &progress,
+                    &mut supervisor,
+                    &mut skills,
+                    &mut lead_cursor,
+                    &mut interaction_mode,
+                    &system_prompt,
+                    &mut current_session_id,
+                    &mut current_session_label,
+                )
+                .await?
+            }
+            other => {
+                execute_wire_request(
+                    other,
+                    WireRuntime {
+                        repo_root: &repo_root,
+                        client: &client,
+                        llm: &llm,
+                        project: &project,
+                        messages: &mut messages,
+                        progress: &progress,
+                        supervisor: &mut supervisor,
+                        lead_cursor: &mut lead_cursor,
+                        interaction_mode: &interaction_mode,
+                        sessions: project.sessions(),
+                        current_session_id: &mut current_session_id,
+                        current_session_label: &mut current_session_label,
+                    },
+                )
+                .await?
+            }
+        };
+
+        for frame in &outcome.frames {
+            emit_wire_frame(&mut stdout, frame)?;
+        }
+        stdout.flush()?;
+        if matches!(outcome.directive, LoopDirective::Exit) {
             break;
         }
-
-        let trimmed = input.trim();
-        if parse_ui_intent(trimmed).is_some() {
-            let url = ui_base_url(&project);
-            match open_browser(&url) {
-                Ok(()) => println!("opened management page: {url}"),
-                Err(err) => println!("management page: {url} (browser launch failed: {err})"),
-            }
-            continue;
-        }
-        if let Some(action) = handle_cli_command(trimmed, &project, &progress, &skills)? {
-            let outcome = process_cli_action(
-                action,
-                CliRuntime {
-                    repo_root: &repo_root,
-                    project: &project,
-                    supervisor: &mut supervisor,
-                    skills: &mut skills,
-                    current_session_id: &mut current_session_id,
-                    current_session_label: &mut current_session_label,
-                    messages: &mut messages,
-                    system_prompt: &system_prompt,
-                    interaction_mode: &mut interaction_mode,
-                    auto_team_max_parallel: AUTO_TEAM_MAX_PARALLEL,
-                },
-            )
-            .await?;
-            emit_wire_frames(&outcome.frames);
-            project.sessions().update_state(
-                &current_session_id,
-                current_session_label.as_deref(),
-                &interaction_mode.label(),
-                "active",
-            )?;
-            project
-                .sessions()
-                .save_messages(&current_session_id, &messages)?;
-            skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
-            match outcome.directive {
-                LoopDirective::Continue => continue,
-                LoopDirective::Exit => break,
-            }
-        }
-
-        let outcome = execute_wire_request(
-            crate::wire::WireRequest::ChatSend {
-                input: trimmed.to_string(),
-                focus: Some(interaction_mode.label()),
-            },
-            WireRuntime {
-                repo_root: &repo_root,
-                client: &client,
-                llm: &llm,
-                project: &project,
-                messages: &mut messages,
-                progress: &progress,
-                supervisor: &mut supervisor,
-                lead_cursor: &mut lead_cursor,
-                interaction_mode: &interaction_mode,
-                sessions: project.sessions(),
-                current_session_id: &mut current_session_id,
-                current_session_label: &mut current_session_label,
-            },
-        )
-        .await?;
-        emit_wire_frames(&outcome.frames);
-        project.sessions().update_state(
-            &current_session_id,
-            current_session_label.as_deref(),
-            &interaction_mode.label(),
-            "active",
-        )?;
-        project
-            .sessions()
-            .save_messages(&current_session_id, &messages)?;
-        skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
     }
 
     supervisor.stop_all();
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_console_input(
+    trimmed: &str,
+    repo_root: &std::path::Path,
+    client: &reqwest::Client,
+    llm: &LlmConfig,
+    project: &ProjectContext,
+    messages: &mut Vec<Message>,
+    progress: &crate::activity::ActivityHandle,
+    supervisor: &mut AgentSupervisor,
+    skills: &mut SkillRegistry,
+    lead_cursor: &mut usize,
+    interaction_mode: &mut InteractionMode,
+    system_prompt: &str,
+    current_session_id: &mut String,
+    current_session_label: &mut Option<String>,
+) -> anyhow::Result<crate::app_commands::CommandOutcome> {
+    if let Some(action) = handle_cli_command(trimmed, project, progress, skills)? {
+        let outcome = process_cli_action(
+            action,
+            CliRuntime {
+                repo_root,
+                project,
+                supervisor,
+                skills,
+                current_session_id,
+                current_session_label,
+                messages,
+                system_prompt,
+                interaction_mode,
+                auto_team_max_parallel: AUTO_TEAM_MAX_PARALLEL,
+            },
+        )
+        .await?;
+        project.sessions().update_state(
+            current_session_id,
+            current_session_label.as_deref(),
+            &interaction_mode.label(),
+            "active",
+        )?;
+        project.sessions().save_messages(current_session_id, messages)?;
+        *skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+        return Ok(outcome);
+    }
+
+    let outcome = execute_wire_request(
+        WireRequest::ChatSend {
+            input: trimmed.to_string(),
+            focus: Some(interaction_mode.label()),
+        },
+        WireRuntime {
+            repo_root,
+            client,
+            llm,
+            project,
+            messages,
+            progress,
+            supervisor,
+            lead_cursor,
+            interaction_mode,
+            sessions: project.sessions(),
+            current_session_id,
+            current_session_label,
+        },
+    )
+    .await?;
+    project.sessions().update_state(
+        current_session_id,
+        current_session_label.as_deref(),
+        &interaction_mode.label(),
+        "active",
+    )?;
+    project.sessions().save_messages(current_session_id, messages)?;
+    *skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
+    Ok(outcome)
+}
+
+fn parse_root_runtime_repo_root(args: &[String]) -> anyhow::Result<std::path::PathBuf> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if args[idx] == "--repo-root" {
+            idx += 1;
+            return Ok(std::path::PathBuf::from(
+                args.get(idx)
+                    .ok_or_else(|| anyhow::anyhow!("missing --repo-root value"))?,
+            ));
+        }
+        idx += 1;
+    }
+    anyhow::bail!("missing --repo-root");
+}
+
+fn spawn_root_runtime_process(
+    repo_root: &std::path::Path,
+) -> anyhow::Result<(Child, ChildStdin, Receiver<anyhow::Result<WireFrame>>)> {
+    let exe = std::env::current_exe()?;
+    let mut child = Command::new(exe)
+        .arg("root-runtime-run")
+        .arg("--repo-root")
+        .arg(repo_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("runtime stdin missing"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("runtime stdout missing"))?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let result = match line {
+                Ok(text) => serde_json::from_str::<WireFrame>(&text)
+                    .map_err(anyhow::Error::from)
+                    .map_err(|err| anyhow::anyhow!("frame parse failed: {}", err)),
+                Err(err) => Err(anyhow::anyhow!("runtime read failed: {}", err)),
+            };
+            if tx.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    Ok((child, stdin, rx))
+}
+
+fn spawn_request_reader_thread() -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let reader = BufReader::new(stdin.lock());
+        for line in reader.lines() {
+            match line {
+                Ok(text) => {
+                    if tx.send(text).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+fn write_wire_request(stdin: &mut ChildStdin, request: &WireRequest) -> anyhow::Result<()> {
+    writeln!(stdin, "{}", serde_json::to_string(request)?)?;
+    stdin.flush()?;
+    Ok(())
+}
+
+fn emit_wire_frame(stdout: &mut BufWriter<io::Stdout>, frame: &WireFrame) -> anyhow::Result<()> {
+    writeln!(stdout, "{}", serde_json::to_string(frame)?)?;
+    Ok(())
+}
+
+fn emit_mailbox_lines(stdout: &mut BufWriter<io::Stdout>, lines: &[String]) -> anyhow::Result<()> {
+    for line in lines {
+        emit_wire_frame(
+            stdout,
+            &WireFrame::Event {
+                event: WireEnvelope::new(
+                    "event",
+                    WireEvent::MessageDelta {
+                        role: "system".to_string(),
+                        content: line.clone(),
+                    },
+                ),
+            },
+        )?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+fn apply_frame_to_console(frame: &WireFrame, console: &mut InteractiveConsole, lines: &mut Vec<String>) {
+    match frame {
+        WireFrame::Response { response } => match &response.payload {
+            WireResponse::Ack { message } => lines.push(message.clone()),
+            WireResponse::Error { message } => lines.push(format!("error: {}", message)),
+            other => lines.push(serde_json::to_string(other).unwrap_or_default()),
+        },
+        WireFrame::Event { event } => match &event.payload {
+            WireEvent::Error { message } => lines.push(format!("error: {}", message)),
+            WireEvent::SessionUpdated {
+                focus,
+                status,
+                abortable,
+            } => {
+                console.set_prompt(focus.clone());
+                if let Some(abortable) = abortable {
+                    lines.push(format!(
+                        "[session] focus={} status={} abortable={}",
+                        focus, status, abortable
+                    ));
+                } else {
+                    lines.push(format!("[session] focus={} status={}", focus, status));
+                }
+            }
+            WireEvent::MessageDelta { content, .. } => lines.push(content.clone()),
+            other => lines.push(serde_json::to_string(other).unwrap_or_default()),
+        },
+    }
+}
+
+fn is_exit_ack(frame: &WireFrame) -> bool {
+    matches!(
+        frame,
+        WireFrame::Response {
+            response: WireEnvelope {
+                payload: WireResponse::Ack { message },
+                ..
+            }
+        } if message == "exit"
+    )
 }
 
 fn start_main_ui_server(repo_root: std::path::PathBuf, port: u16) -> Option<JoinHandle<()>> {
@@ -271,41 +684,11 @@ fn start_main_ui_server(repo_root: std::path::PathBuf, port: u16) -> Option<Join
                 .filter_map(|item| item.downcast_ref::<std::io::Error>())
                 .any(|io_err| io_err.kind() == std::io::ErrorKind::AddrInUse);
             if address_in_use {
-                println!("ui server already available on http://127.0.0.1:{port}");
+                eprintln!("ui server already available on http://127.0.0.1:{port}");
             } else {
-                println!("warning: failed to start ui server on port {port}: {err}");
+                eprintln!("warning: failed to start ui server on port {port}: {err}");
             }
             None
-        }
-    }
-}
-
-fn emit_wire_frames(frames: &[WireFrame]) {
-    for frame in frames {
-        match frame {
-            WireFrame::Response { response } => match &response.payload {
-                WireResponse::Ack { message } => println!("{}", message),
-                WireResponse::Error { message } => println!("error: {}", message),
-                other => println!("{}", serde_json::to_string(other).unwrap_or_default()),
-            },
-            WireFrame::Event { event } => match &event.payload {
-                WireEvent::Error { message } => println!("error: {}", message),
-                WireEvent::SessionUpdated {
-                    focus,
-                    status,
-                    abortable,
-                } => {
-                    if let Some(abortable) = abortable {
-                        println!(
-                            "[session] focus={} status={} abortable={}",
-                            focus, status, abortable
-                        )
-                    } else {
-                        println!("[session] focus={} status={}", focus, status)
-                    }
-                }
-                other => println!("{}", serde_json::to_string(other).unwrap_or_default()),
-            },
         }
     }
 }

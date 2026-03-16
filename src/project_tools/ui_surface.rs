@@ -748,6 +748,14 @@ mod tests {
         let model = SystemModel {
             generated_at: 0.0,
             summary: SystemSummary {
+                launch_mode: "multi_window".to_string(),
+                launch_mode_description: "each launch opens a dedicated visible OS window"
+                    .to_string(),
+                launch_effective_mode: "multi_window".to_string(),
+                launch_backend: "windows_start_process".to_string(),
+                launch_backend_note:
+                    "visible windows are launched through Start-Process cmd.exe hosts"
+                        .to_string(),
                 resident_count: 1,
                 pending_tasks: 0,
                 running_tasks: 1,

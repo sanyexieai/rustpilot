@@ -114,6 +114,18 @@ pub(crate) async fn execute_wire_request(
         decision_action: None,
     };
     match request {
+        WireRequest::ConsoleInput { .. } => Ok(CommandOutcome {
+            directive: LoopDirective::Continue,
+            frames: vec![WireFrame::Response {
+                response: WireEnvelope::new(
+                    "response",
+                    WireResponse::Error {
+                        message: "console_input is only supported by the root runtime process"
+                            .to_string(),
+                    },
+                ),
+            }],
+        }),
         WireRequest::ChatSend { input, focus } => {
             let focus_override = focus
                 .as_deref()
@@ -442,6 +454,9 @@ pub(crate) fn execute_ui_wire_request(
         decision_action: Some(decision_action.to_string()),
     };
     match request {
+        WireRequest::ConsoleInput { .. } => Ok(WireResponse::Error {
+            message: "console_input is only supported by the root runtime process".to_string(),
+        }),
         WireRequest::ChatSend { input, focus } => {
             let message = input.trim();
             if message.is_empty() {

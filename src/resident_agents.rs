@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::app_support::{parse_ui_intent, ui_base_url, ui_intent_to_memory};
+use crate::launch_backend;
 use crate::launch_log;
 use crate::project_tools::{LaunchRecord, LaunchRequest, ProjectContext, ResidentAgentConfig};
 use crate::team::{TeamRuntime, mark_worker_stopped, reconcile_parent_after_child_exit};
@@ -349,9 +350,10 @@ pub(crate) fn restart_launch(
 }
 
 fn launch_record_process(
+    project: &ProjectContext,
     repo_root: &PathBuf,
     record: &LaunchRecord,
-) -> anyhow::Result<(u32, Option<f64>, String)> {
+) -> anyhow::Result<(u32, Option<f64>, String, String, String)> {
     let exe = std::env::current_exe()?;
     let (window_title, command_line) = if record.kind == "resident" {
         let max_parallel = record.max_parallel.unwrap_or(1).to_string();
@@ -390,22 +392,21 @@ fn launch_record_process(
             ],
         )
     };
-    #[cfg(windows)]
-    {
-        let pid = spawn_windows_agent_window(repo_root, &window_title, &command_line, record)?;
-        return Ok((pid, query_process_started_at(pid), window_title));
-    }
-    #[cfg(not(windows))]
-    {
-        let mut command = launch_host_command(&window_title, &command_line, record);
-        if !record.log_path.trim().is_empty() {
-            command.env("RUSTPILOT_LAUNCH_LOG", &record.log_path);
-        }
-        command.env("RUSTPILOT_LAUNCH_ID", &record.launch_id);
-        let child = spawn_new_console(command)?;
-        let pid = child.id();
-        Ok((pid, query_process_started_at(pid), window_title))
-    }
+    let plan = launch_backend::plan_for_record(
+        repo_root.clone(),
+        window_title.clone(),
+        command_line,
+        record,
+    );
+    let mode = project.launch_settings().get()?.mode;
+    let launched = launch_backend::launch(&plan, mode)?;
+    Ok((
+        launched.pid,
+        query_process_started_at(launched.pid),
+        launched.window_title,
+        launched.channel,
+        launched.target,
+    ))
 }
 
 fn process_is_running(pid: u32, expected_started_at: Option<f64>) -> bool {
@@ -503,129 +504,11 @@ fn kill_process(pid: u32) -> anyhow::Result<()> {
     }
 }
 
-fn spawn_new_console(mut command: Command) -> anyhow::Result<Child> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        command.creation_flags(CREATE_NEW_CONSOLE);
-    }
-    Ok(command.spawn()?)
-}
-
-#[cfg(windows)]
-fn spawn_windows_agent_window(
-    repo_root: &PathBuf,
-    window_title: &str,
-    command_line: &[String],
-    record: &LaunchRecord,
-) -> anyhow::Result<u32> {
-    let script = build_windows_launch_script(window_title, command_line, record);
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "$proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','{}') -WorkingDirectory '{}' -WindowStyle Normal -PassThru; $proc.Id",
-                powershell_quote(&script),
-                powershell_quote(&repo_root.display().to_string())
-            ),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "failed to launch window host: {}",
-            if stderr.is_empty() {
-                "unknown windows start-process error".to_string()
-            } else {
-                stderr
-            }
-        );
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pid = stdout
-        .lines()
-        .rev()
-        .find_map(|line| line.trim().parse::<u32>().ok())
-        .ok_or_else(|| anyhow::anyhow!("failed to parse launched window pid from '{}'", stdout.trim()))?;
-    Ok(pid)
-}
-
-#[cfg(not(windows))]
-fn launch_host_command(
-    window_title: &str,
-    command_line: &[String],
-    record: &LaunchRecord,
-) -> Command {
-    let _ = window_title;
-    let _ = record;
-    let mut iter = command_line.iter();
-    let program = iter.next().cloned().unwrap_or_default();
-    let mut command = Command::new(program);
-    command.args(iter);
-    command
-}
-
-#[cfg(windows)]
-fn build_windows_launch_script(
-    window_title: &str,
-    command_line: &[String],
-    record: &LaunchRecord,
-) -> String {
-    let title = sanitize_cmd_text(window_title);
-    let launch_id = sanitize_cmd_text(&record.launch_id);
-    let agent_id = sanitize_cmd_text(&record.agent_id);
-    let kind = sanitize_cmd_text(&record.kind);
-    let log_path = sanitize_cmd_text(&record.log_path);
-    let command = command_line
-        .iter()
-        .map(|item| cmd_quote(item))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "title {title} & set \"RUSTPILOT_LAUNCH_LOG={log_path}\" & set \"RUSTPILOT_LAUNCH_ID={launch_id}\" & echo [launch] id={launch_id} agent={agent_id} kind={kind} & echo [launch] log={log_path} & echo [launch] command={command} & {command}"
-    )
-}
-
-#[cfg(windows)]
-fn sanitize_cmd_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            '\r' | '\n' | '&' | '|' | '<' | '>' | '^' => ' ',
-            _ => ch,
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn cmd_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "\"\"".to_string();
-    }
-    if value
-        .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '&' | '|' | '<' | '>' | '^' | '(' | ')'))
-    {
-        return format!("\"{}\"", value.replace('"', "\\\""));
-    }
-    value.to_string()
-}
-
-#[cfg(windows)]
-fn powershell_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 #[cfg(test)]
 mod tests {
     use super::stop_launch;
     use crate::project_tools::{
-        LaunchRecord, LaunchRequest, ProjectContext, TaskCreateOptions, TaskRecord,
+        LaunchRequest, ProjectContext, TaskCreateOptions, TaskRecord,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -728,6 +611,8 @@ mod tests {
                 &launch.launch_id,
                 999_999,
                 Some(1_700_000_000.0),
+                "window",
+                "fake window",
                 "fake window",
             )
             .expect("running launch");
@@ -746,50 +631,6 @@ mod tests {
         assert_eq!(parent_state.status, "idle");
     }
 
-    #[test]
-    #[cfg(windows)]
-    fn windows_launch_script_prints_launch_metadata_before_exec() {
-        let record = LaunchRecord {
-            launch_id: "launch-123".to_string(),
-            agent_id: "concierge".to_string(),
-            role: "concierge".to_string(),
-            kind: "resident".to_string(),
-            owner: "concierge".to_string(),
-            status: "requested".to_string(),
-            pid: None,
-            process_started_at: None,
-            task_id: None,
-            parent_task_id: None,
-            parent_agent_id: Some("root".to_string()),
-            channel: "resident".to_string(),
-            target: "concierge-loop".to_string(),
-            window_title: String::new(),
-            error: None,
-            exit_code: None,
-            max_parallel: Some(1),
-            log_path: "D:\\code\\rustpilot\\rustpilot\\.team\\launch_logs\\launch-123.log"
-                .to_string(),
-            created_at: 1_700_000_000.0,
-            updated_at: 1_700_000_000.0,
-            started_at: None,
-            stopped_at: None,
-        };
-        let script = super::build_windows_launch_script(
-            "Rustpilot resident concierge",
-            &[
-                "D:\\code\\rustpilot\\rustpilot\\target\\debug\\rustpilot.exe".to_string(),
-                "resident-agent-run".to_string(),
-            ],
-            &record,
-        );
-        assert!(script.contains("echo [launch] id=launch-123 agent=concierge kind=resident"));
-        assert!(script.contains(
-            "echo [launch] log=D:\\code\\rustpilot\\rustpilot\\.team\\launch_logs\\launch-123.log"
-        ));
-        assert!(script.contains(
-            "D:\\code\\rustpilot\\rustpilot\\target\\debug\\rustpilot.exe resident-agent-run"
-        ));
-    }
 }
 
 pub fn run_resident_agent(
@@ -856,14 +697,16 @@ fn run_launcher_loop(
 
         for record in requested {
             if record.status == "requested" {
-                match launch_record_process(&repo_root, &record) {
-                    Ok((pid, process_started_at, window_title)) => {
+                match launch_record_process(&project, &repo_root, &record) {
+                    Ok((pid, process_started_at, window_title, channel, target)) => {
                         let _ = project
                             .launches()
                             .update_running(
                                 &record.launch_id,
                                 pid,
                                 process_started_at,
+                                &channel,
+                                &target,
                                 &window_title,
                             );
                     }

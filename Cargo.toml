@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 axum = { version = "0.7", features = ["ws"] }
+crossterm = "0.28"
 dotenvy = "0.15"
 futures-util = "0.3"
 portable-pty = "0.8"

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{
     AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, LaunchRegistryManager, Mailbox,
-    PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
+    LaunchSettingsManager, PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
     ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiPageManager,
     UiSchemaManager, UiSurfaceManager, WorktreeManager,
 };
@@ -15,6 +15,7 @@ pub struct ProjectContext {
     approval: Arc<ApprovalManager>,
     events: Arc<EventBus>,
     launches: Arc<LaunchRegistryManager>,
+    launch_settings: Arc<LaunchSettingsManager>,
     mailbox: Arc<Mailbox>,
     agents: Arc<AgentManager>,
     budgets: Arc<BudgetManager>,
@@ -40,6 +41,7 @@ impl ProjectContext {
             repo_root.join(".worktrees").join("events.jsonl"),
         )?);
         let launches = Arc::new(LaunchRegistryManager::new(repo_root.join(".team"))?);
+        let launch_settings = Arc::new(LaunchSettingsManager::new(repo_root.join(".team"))?);
         let mailbox = Arc::new(Mailbox::new(repo_root.join(".team").join("mailbox"))?);
         let agents = Arc::new(AgentManager::new(repo_root.join(".team"))?);
         let budgets = Arc::new(BudgetManager::new(repo_root.join(".team"))?);
@@ -65,6 +67,7 @@ impl ProjectContext {
             approval,
             events,
             launches,
+            launch_settings,
             mailbox,
             agents,
             budgets,
@@ -105,6 +108,10 @@ impl ProjectContext {
 
     pub fn launches(&self) -> &LaunchRegistryManager {
         self.launches.as_ref()
+    }
+
+    pub fn launch_settings(&self) -> &LaunchSettingsManager {
+        self.launch_settings.as_ref()
     }
 
     pub fn mailbox(&self) -> &Mailbox {

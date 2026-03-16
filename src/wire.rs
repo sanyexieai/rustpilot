@@ -9,6 +9,9 @@ pub struct WireEnvelope<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireRequest {
+    ConsoleInput {
+        input: String,
+    },
     ChatSend {
         input: String,
         focus: Option<String>,
@@ -201,6 +204,16 @@ mod tests {
 
     #[test]
     fn request_serializes_with_tagged_type() {
+        let request = WireRequest::ConsoleInput {
+            input: "hello".to_string(),
+        };
+        let text = serde_json::to_string(&request).expect("serialize request");
+        assert!(text.contains("\"type\":\"console_input\""));
+        assert!(text.contains("\"input\":\"hello\""));
+    }
+
+    #[test]
+    fn chat_request_serializes_with_tagged_type() {
         let request = WireRequest::ChatSend {
             input: "hello".to_string(),
             focus: Some("lead".to_string()),

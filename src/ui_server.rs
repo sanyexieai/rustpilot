@@ -314,6 +314,13 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
     Ok(json!({
         "agent_id": state.agent_id,
         "port": state.port,
+        "launch_mode": {
+            "requested_mode": model.summary.launch_mode,
+            "description": model.summary.launch_mode_description,
+            "effective_mode": model.summary.launch_effective_mode,
+            "backend": model.summary.launch_backend,
+            "note": model.summary.launch_backend_note,
+        },
         "approval_mode": approval_mode_name(approval.mode),
         "approval_summary": approval_mode_summary(approval.mode),
         "approval_allowed_tools": crate::runtime::approval::approval_allowed_tools(approval.mode),
@@ -603,6 +610,13 @@ fn build_chat_ui_payload(
                 "tool_name": "launch_log_read"
             }
         ],
+        "launch_mode": {
+            "requested_mode": model.summary.launch_mode,
+            "description": model.summary.launch_mode_description,
+            "effective_mode": model.summary.launch_effective_mode,
+            "backend": model.summary.launch_backend,
+            "note": model.summary.launch_backend_note,
+        },
         "launches": launches,
         "agents": agents,
         "agent_details": agent_details,

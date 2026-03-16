@@ -44,6 +44,10 @@ pub enum CliAction {
         priority: Option<String>,
     },
     LaunchList,
+    LaunchModeStatus,
+    LaunchModeSet {
+        mode: String,
+    },
     LaunchControl {
         launch_id: String,
         action: String,
@@ -275,6 +279,26 @@ pub fn handle_cli_command(
     }
     if trimmed == "/launches" || trimmed == "/launches list" {
         return Ok(Some(CliAction::LaunchList));
+    }
+    if trimmed == "/launch-mode" || trimmed == "/launch-mode status" {
+        return Ok(Some(CliAction::LaunchModeStatus));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/launch-mode ").map(str::trim) {
+        if let Some(mode) = rest.strip_prefix("set").map(str::trim) {
+            if mode.is_empty() {
+                println!(
+                    "usage: /launch-mode | /launch-mode status | /launch-mode set <multi_window|single_window|implicit_multi_window>"
+                );
+                return Ok(Some(CliAction::Continue));
+            }
+            return Ok(Some(CliAction::LaunchModeSet {
+                mode: mode.to_string(),
+            }));
+        }
+        println!(
+            "usage: /launch-mode | /launch-mode status | /launch-mode set <multi_window|single_window|implicit_multi_window>"
+        );
+        return Ok(Some(CliAction::Continue));
     }
     if let Some(rest) = trimmed.strip_prefix("/launch ").map(str::trim) {
         let mut parts = rest.split_whitespace();

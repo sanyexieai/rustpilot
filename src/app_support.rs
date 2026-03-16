@@ -362,37 +362,61 @@ fn priority_execution_notes(priority: &str) -> &'static str {
     }
 }
 
-pub(crate) fn pump_lead_mailbox(
+pub(crate) fn pump_lead_mailbox_silent(
     project: &ProjectContext,
     cursor: &mut usize,
     messages: &mut Vec<Message>,
 ) -> anyhow::Result<()> {
     let root_actor = root_actor_id();
-    pump_agent_mailbox(project, &root_actor, cursor, messages)
+    let _ = collect_agent_mailbox_events(project, &root_actor, cursor, messages)?;
+    Ok(())
 }
 
-pub(crate) fn pump_agent_mailbox(
+pub(crate) fn collect_lead_mailbox_events(
+    project: &ProjectContext,
+    cursor: &mut usize,
+    messages: &mut Vec<Message>,
+) -> anyhow::Result<Vec<String>> {
+    let root_actor = root_actor_id();
+    collect_agent_mailbox_events(project, &root_actor, cursor, messages)
+}
+
+fn collect_agent_mailbox_events(
     project: &ProjectContext,
     agent_id: &str,
     cursor: &mut usize,
     messages: &mut Vec<Message>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     let raw = project.mailbox().poll(agent_id, *cursor, 50)?;
     let polled: MailPoll = serde_json::from_str(&raw)?;
     *cursor = polled.next_cursor;
+    let mut display_lines = Vec::new();
     for item in polled.items {
-        println!(
+        display_lines.push(format!(
             "[mail][{}][{}][from={}] {}",
             item.cursor, item.msg_type, item.from, item.message
-        );
+        ));
+        if matches!(item.msg_type.as_str(), "task.completed" | "task.failed")
+            && let Some(task_id) = item.task_id
+        {
+            display_lines.push(format!(
+                "[parent-notify] task {} {}",
+                task_id,
+                if item.msg_type == "task.completed" {
+                    "finished in child process"
+                } else {
+                    "failed in child process"
+                }
+            ));
+        }
         if item.msg_type == "task.request_clarification"
             && let Some(task_id) = item.task_id
         {
             let _ = project.tasks().update(task_id, Some("blocked"), None, None);
-            println!(
+            display_lines.push(format!(
                 "[clarification] task {} blocked, use /reply {} <message>",
                 task_id, task_id
-            );
+            ));
         }
         if item.requires_ack {
             let _ = project.mailbox().ack(agent_id, &item.msg_id, "received");
@@ -401,6 +425,7 @@ pub(crate) fn pump_agent_mailbox(
             item.msg_type.as_str(),
             "task.started"
                 | "task.progress"
+                | "task.completed"
                 | "task.result"
                 | "task.failed"
                 | "task.blocked"
@@ -417,7 +442,7 @@ pub(crate) fn pump_agent_mailbox(
             });
         }
     }
-    Ok(())
+    Ok(display_lines)
 }
 
 pub(crate) fn parse_teammate_args(args: &[String]) -> anyhow::Result<TeammateArgs> {

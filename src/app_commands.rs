@@ -8,7 +8,7 @@ use crate::cli::CliAction;
 use crate::config::LlmConfig;
 use crate::external_tools::import_external_tool;
 use crate::openai_compat::Message;
-use crate::project_tools::{ApprovalMode, ProjectContext};
+use crate::project_tools::{ApprovalMode, LaunchPresentationMode, ProjectContext};
 use crate::resident_agents::AgentSupervisor;
 use crate::runtime::approval::render_approval_status;
 use crate::runtime::lead::{
@@ -342,11 +342,12 @@ pub(crate) async fn process_cli_action(
                     .into_iter()
                     .map(|item| {
                         format!(
-                            "- {} kind={} agent={} status={} pid={} task={} target={}",
+                            "- {} kind={} agent={} status={} channel={} pid={} task={} target={}",
                             item.launch_id,
                             item.kind,
                             item.agent_id,
                             item.status,
+                            item.channel,
                             item.pid
                                 .map(|value| value.to_string())
                                 .unwrap_or_else(|| "-".to_string()),
@@ -364,6 +365,27 @@ pub(crate) async fn process_cli_action(
                     .join("\n")
             };
             frames.push(WireFrame::ack(text));
+        }
+        CliAction::LaunchModeStatus => {
+            frames.push(WireFrame::ack(
+                runtime.project.launch_settings().render_summary()?,
+            ));
+        }
+        CliAction::LaunchModeSet { mode } => {
+            let Some(parsed) = LaunchPresentationMode::parse(&mode) else {
+                frames.push(WireFrame::error(format!(
+                    "unsupported launch mode: {} (expected multi_window|single_window|implicit_multi_window)",
+                    mode
+                )));
+                return Ok(CommandOutcome {
+                    directive: LoopDirective::Continue,
+                    frames,
+                });
+            };
+            runtime.project.launch_settings().set_mode(parsed)?;
+            frames.push(WireFrame::ack(
+                runtime.project.launch_settings().render_summary()?,
+            ));
         }
         CliAction::LaunchControl { launch_id, action } => {
             let message = match action.as_str() {
@@ -537,6 +559,54 @@ fn persist_session(
     project.sessions().save_messages(session_id, messages)
 }
 
+fn is_root_implementation_file_task(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || looks_like_question(trimmed) {
+        return false;
+    }
+    let lowered = trimmed.to_lowercase();
+    let has_build_verb = [
+        "write ",
+        "create ",
+        "generate ",
+        "implement ",
+        "build ",
+        "make ",
+        "scaffold ",
+        "写",
+        "创建",
+        "生成",
+        "实现",
+        "做一个",
+        "做个",
+    ]
+    .iter()
+    .any(|token| lowered.contains(token));
+    let has_file_or_ui_target = [
+        "html",
+        "css",
+        "javascript",
+        "typescript",
+        "react",
+        "vue",
+        "component",
+        "page",
+        "login page",
+        "single file",
+        "file",
+        "页面",
+        "登录页",
+        "单文件",
+        "组件",
+        "网页",
+        "脚本",
+        "文件",
+    ]
+    .iter()
+    .any(|token| lowered.contains(token));
+    has_build_verb && has_file_or_ui_target
+}
+
 pub(crate) async fn process_user_input(
     trimmed: &str,
     runtime: AppRuntime<'_>,
@@ -666,6 +736,29 @@ pub(crate) async fn process_user_input(
                 )));
             }
             InteractionMode::Lead => {
+                if is_root_implementation_file_task(trimmed) {
+                    let (priority, goal) = parse_priority_prefixed_goal(trimmed);
+                    let _ = runtime
+                        .project
+                        .budgets()
+                        .record_usage(&actor_id, estimate_text_tokens(trimmed).saturating_add(20));
+                    maybe_reflect_energy(
+                        runtime.project,
+                        &actor_id,
+                        "task.enqueue",
+                        None,
+                        "delegated implementation-style file generation request from root",
+                    );
+                    let task = team_run(runtime.project, runtime.supervisor, &goal, &priority)?;
+                    frames.push(WireFrame::ack(format!(
+                        "root delegated implementation request to child task\n{}",
+                        task
+                    )));
+                    return Ok(CommandOutcome {
+                        directive: LoopDirective::Continue,
+                        frames,
+                    });
+                }
                 let _ = runtime
                     .project
                     .budgets()
@@ -761,9 +854,15 @@ fn run_shell_mode_input(project: &ProjectContext, command: &str) -> CommandOutco
 
 #[cfg(test)]
 mod tests {
-    use super::{CliRuntime, process_cli_action, run_shell_mode_input};
+    use super::{
+        AppRuntime, CliRuntime, is_root_implementation_file_task, process_cli_action, process_user_input,
+        run_shell_mode_input,
+    };
+    use crate::activity::new_activity_handle;
     use crate::app_support::InteractionMode;
     use crate::cli::CliAction;
+    use crate::config::LlmConfig;
+    use crate::llm_profiles::LlmApiKind;
     use crate::openai_compat::Message;
     use crate::project_tools::ProjectContext;
     use crate::resident_agents::AgentSupervisor;
@@ -832,6 +931,18 @@ mod tests {
 
     fn project_context(repo_root: &Path) -> ProjectContext {
         ProjectContext::new(repo_root.to_path_buf()).expect("project context")
+    }
+
+    fn dummy_llm() -> LlmConfig {
+        LlmConfig {
+            provider: "test".to_string(),
+            profile_id: "test".to_string(),
+            api_key: "test".to_string(),
+            api_base_url: "http://localhost".to_string(),
+            model: "test".to_string(),
+            api_kind: LlmApiKind::OpenAiChatCompletions,
+            source: "test".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -982,6 +1093,63 @@ mod tests {
             Some(WireFrame::Response { response }) => match &response.payload {
                 WireResponse::Ack { message } => {
                     assert_eq!(message, "no active chat request to abort")
+                }
+                other => panic!("unexpected response: {:?}", other),
+            },
+            other => panic!("unexpected frame: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn implementation_file_requests_are_detected_for_root_delegation() {
+        assert!(is_root_implementation_file_task(
+            r"D:\tmp 在这个目录下 写一个html的单文件的登录页面"
+        ));
+        assert!(!is_root_implementation_file_task("为什么这个页面打不开？"));
+    }
+
+    #[tokio::test]
+    async fn root_implementation_file_request_is_delegated_to_task() {
+        let temp = TestDir::new("root_delegate_file_request");
+        init_git_repo(temp.path());
+        let project = project_context(temp.path());
+        let mut supervisor =
+            AgentSupervisor::start_defaults(temp.path().to_path_buf(), 1).expect("supervisor");
+        let mut messages = vec![Message {
+            role: "system".to_string(),
+            content: Some("system".to_string()),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let client = reqwest::Client::new();
+        let llm = dummy_llm();
+        let progress = new_activity_handle();
+        let mut lead_cursor = 0usize;
+        let outcome = process_user_input(
+            r"D:\tmp 在这个目录下 写一个html的单文件的登录页面",
+            AppRuntime {
+                session_id: "cli-main",
+                repo_root: temp.path(),
+                client: &client,
+                llm: &llm,
+                project: &project,
+                messages: &mut messages,
+                progress: &progress,
+                supervisor: &mut supervisor,
+                lead_cursor: &mut lead_cursor,
+                interaction_mode: &InteractionMode::Lead,
+            },
+        )
+        .await
+        .expect("process input");
+
+        let tasks = project.tasks().list_records().expect("list tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, "pending");
+        match outcome.frames.first() {
+            Some(WireFrame::Response { response }) => match &response.payload {
+                WireResponse::Ack { message } => {
+                    assert!(message.contains("root delegated implementation request to child task"));
                 }
                 other => panic!("unexpected response: {:?}", other),
             },
