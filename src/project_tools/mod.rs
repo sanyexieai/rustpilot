@@ -4,6 +4,7 @@ mod budget;
 mod context;
 mod decision;
 mod event;
+mod launch_registry;
 mod mailbox;
 mod prompt_history;
 mod proposal;
@@ -26,6 +27,7 @@ pub use budget::{BudgetLedger, BudgetManager, EnergyMode, classify_energy};
 pub use context::ProjectContext;
 pub use decision::{DecisionManager, DecisionRecord};
 pub use event::{EventBus, EventRecord};
+pub use launch_registry::{LaunchRecord, LaunchRegistryManager, LaunchRequest};
 pub use mailbox::{MailRecord, Mailbox};
 pub use prompt_history::{PromptChangeRecord, PromptHistoryManager};
 pub use proposal::{ProposalManager, ProposalRecord};
@@ -34,7 +36,7 @@ pub use resident_config::{ResidentAgentConfig, ResidentConfigManager};
 pub use resident_runtime::{ResidentRuntimeManager, ResidentRuntimeState};
 pub use session::{SessionManager, SessionRecord};
 pub use system_model::{
-    SystemAlert, SystemDecision, SystemModel, SystemModelManager, SystemPromptChange,
+    SystemAlert, SystemDecision, SystemLaunch, SystemModel, SystemModelManager, SystemPromptChange,
     SystemProposal, SystemProtocol, SystemResident, SystemSummary, SystemTask,
 };
 pub use task::{TaskCreateOptions, TaskManager, TaskRecord, task_priority_rank};

@@ -429,7 +429,8 @@ When the user asks to create a skill, prefer the dedicated `skill_create` tool s
 
 fn long_running_work_protocol() -> &'static str {
     "Long-Running Work Protocol:\n\
-If a request involves starting a dev server, watch process, background service, tailing logs, or any command that may not exit promptly, do not execute it directly from a parent node. Use `delegate_long_running` to create a child task and let the child own the terminal session."
+If a request involves starting a dev server, watch process, background service, tailing logs, or any command that may not exit promptly, do not execute it directly from a parent node. Use `delegate_long_running` to create a child task and let the child own the terminal session.\n\
+If a request involves an expensive build, test, install, or other potentially slow command, do not run it directly from a parent node either. Create a child task so the parent stays responsive while the child executes and reports back."
 }
 
 #[cfg(test)]

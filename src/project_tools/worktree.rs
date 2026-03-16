@@ -4,7 +4,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::shell_file_tools::{is_dangerous_command, run_shell_command};
+use crate::shell_file_tools::{
+    is_dangerous_command, is_likely_expensive_command, is_likely_long_running_command,
+    run_shell_command,
+};
 
 use super::event::EventBus;
 use super::task::{TaskManager, TaskRecord};
@@ -22,6 +25,45 @@ pub struct WorktreeRecord {
     pub removed_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_at: Option<f64>,
+}
+
+fn reject_blocking_parent_worktree_run(command: &str) -> anyhow::Result<()> {
+    if !current_node_is_parent()? {
+        return Ok(());
+    }
+    if is_likely_long_running_command(command) {
+        anyhow::bail!(
+            "worktree_run refused: long-running commands must be delegated to a child agent/worker-owned terminal session; use delegate_long_running instead. Suggested recovery: call delegate_long_running with a concise goal plus this command: `{}`",
+            command.trim()
+        );
+    }
+    if is_likely_expensive_command(command) {
+        anyhow::bail!(
+            "worktree_run refused: expensive commands must be delegated when this node is acting as a parent; create a child task instead of blocking the parent. Suggested recovery: call task_create with a concise task/deliverable for this command: `{}`",
+            command.trim()
+        );
+    }
+    Ok(())
+}
+
+fn current_node_is_parent() -> anyhow::Result<bool> {
+    let agent_id = std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string());
+    let current_task_id = std::env::var("RUSTPILOT_TASK_ID")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if current_task_id.is_none() && agent_id == "lead" {
+        return Ok(true);
+    }
+    let repo_root = std::env::var("RUSTPILOT_REPO_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let tasks_dir = repo_root.join(".tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(agent_id == "lead");
+    }
+    let tasks = TaskManager::new(tasks_dir)?;
+    Ok(tasks.active_child_count(current_task_id)? > 0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -246,6 +288,7 @@ impl WorktreeManager {
             return Ok("错误: 已拦截危险命令".to_string());
         }
 
+        reject_blocking_parent_worktree_run(command)?;
         let wt = self
             .find(name)?
             .ok_or_else(|| anyhow::anyhow!("未知的 worktree '{}'", name))?;

@@ -88,6 +88,50 @@ pub fn is_likely_long_running_command(command: &str) -> bool {
         || normalized.ends_with(" serve")
 }
 
+pub fn is_likely_expensive_command(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if is_likely_long_running_command(&normalized) {
+        return true;
+    }
+
+    const EXPENSIVE_PATTERNS: &[&str] = &[
+        "cargo test",
+        "cargo bench",
+        "cargo build",
+        "cargo clippy",
+        "cargo doc",
+        "npm install",
+        "npm ci",
+        "npm run build",
+        "npm test",
+        "pnpm install",
+        "pnpm build",
+        "pnpm test",
+        "yarn install",
+        "yarn build",
+        "yarn test",
+        "bun install",
+        "bun test",
+        "pytest",
+        "playwright test",
+        "vitest",
+        "jest",
+        "go test",
+        "mvn test",
+        "gradle test",
+        "docker build",
+        "docker compose up",
+        "git clone",
+    ];
+
+    EXPENSIVE_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+}
+
 pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<String> {
     let normalized = normalize_command(command);
     let output = shell_command(&normalized, current_dir)?.output()?;
@@ -297,7 +341,9 @@ $OutputEncoding = [Console]::OutputEncoding; {}",
 
 #[cfg(test)]
 mod tests {
-    use super::{is_likely_long_running_command, is_read_only_command};
+    use super::{
+        is_likely_expensive_command, is_likely_long_running_command, is_read_only_command,
+    };
 
     #[test]
     fn read_only_command_detection_accepts_common_queries() {
@@ -322,5 +368,14 @@ mod tests {
         assert!(is_likely_long_running_command("vite --watch"));
         assert!(!is_likely_long_running_command("cargo test"));
         assert!(!is_likely_long_running_command("git status"));
+    }
+
+    #[test]
+    fn expensive_command_detection_flags_builds_and_tests() {
+        assert!(is_likely_expensive_command("cargo test"));
+        assert!(is_likely_expensive_command("npm install"));
+        assert!(is_likely_expensive_command("docker build ."));
+        assert!(!is_likely_expensive_command("git status"));
+        assert!(!is_likely_expensive_command("Get-Content README.md"));
     }
 }

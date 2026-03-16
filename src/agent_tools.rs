@@ -9,7 +9,7 @@ use crate::openai_compat::{Tool, ToolCall, ToolFunction};
 use crate::project_tools::TaskManager;
 use crate::shell_file_tools::{
     BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file,
-    is_likely_long_running_command, read_file, write_file,
+    is_likely_expensive_command, is_likely_long_running_command, read_file, write_file,
 };
 use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
 
@@ -162,7 +162,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
     let output = match call.function.name.as_str() {
         "bash" => run_builtin_tool("bash", || {
             let args: BashArgs = parse_tool_args("bash", &call.function.arguments)?;
-            reject_long_running_for_lead("bash", &args.command)?;
+            reject_blocking_parent_execution("bash", &args.command)?;
             run_with_classified_error("bash", BuiltinToolErrorKind::Execution, || {
                 BashTool::run(&args.command)
             })
@@ -189,7 +189,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         "terminal_write" => run_builtin_tool("terminal_write", || {
             let args: TerminalWriteArgs =
                 parse_tool_args("terminal_write", &call.function.arguments)?;
-            reject_long_running_for_lead("terminal_write", &args.input)?;
+            reject_blocking_parent_execution("terminal_write", &args.input)?;
             run_with_classified_error("terminal_write", BuiltinToolErrorKind::Session, || {
                 terminal_manager().write(&args.session_id, &args.input)?;
                 Ok(format!("已写入会话 {}", args.session_id))
@@ -270,10 +270,20 @@ pub fn clear_terminal_manager_live_sessions() -> anyhow::Result<()> {
     terminal_manager().clear_live_sessions()
 }
 
-fn reject_long_running_for_lead(tool: &str, command: &str) -> anyhow::Result<()> {
-    if current_node_is_parent().unwrap_or(false) && is_likely_long_running_command(command) {
+fn reject_blocking_parent_execution(tool: &str, command: &str) -> anyhow::Result<()> {
+    if !current_node_is_parent().unwrap_or(false) {
+        return Ok(());
+    }
+    if is_likely_long_running_command(command) {
         anyhow::bail!(
             "{} refused: long-running commands must be delegated to a child agent/worker-owned terminal session; use delegate_long_running instead. Suggested recovery: call delegate_long_running with a concise goal plus this command: `{}`",
+            tool,
+            command.trim()
+        );
+    }
+    if is_likely_expensive_command(command) {
+        anyhow::bail!(
+            "{} refused: expensive commands must be delegated when this node is acting as a parent; create a child task instead of blocking the parent. Suggested recovery: call task_create with a concise task/deliverable for this command: `{}`",
             tool,
             command.trim()
         );

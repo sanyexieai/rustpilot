@@ -134,6 +134,97 @@ impl UiSchemaManager {
         if page
             .supported_sections
             .iter()
+            .any(|item| item == "main_chat")
+        {
+            sections.push(UiSection {
+                id: "main-chat".to_string(),
+                title: "main".to_string(),
+                kind: "main_chat".to_string(),
+                source: "main_friend".to_string(),
+                description: "Primary direct conversation for the current root actor.".to_string(),
+                empty_text: String::new(),
+                columns: 2,
+                target_options: Vec::new(),
+                labels: Vec::new(),
+            });
+        }
+
+        if page
+            .supported_sections
+            .iter()
+            .any(|item| item == "group_chat")
+        {
+            sections.push(UiSection {
+                id: "group-chat".to_string(),
+                title: "agent team".to_string(),
+                kind: "group_chat".to_string(),
+                source: "group_chat".to_string(),
+                description: "Shared team thread and coordination timeline.".to_string(),
+                empty_text: String::new(),
+                columns: 2,
+                target_options: Vec::new(),
+                labels: Vec::new(),
+            });
+        }
+
+        if page
+            .supported_sections
+            .iter()
+            .any(|item| item == "agent_details")
+        {
+            sections.push(UiSection {
+                id: "agent-details".to_string(),
+                title: "agent detail".to_string(),
+                kind: "agent_details".to_string(),
+                source: "agent_details".to_string(),
+                description: "Selected agent transcript and runtime detail.".to_string(),
+                empty_text: String::new(),
+                columns: 1,
+                target_options: Vec::new(),
+                labels: Vec::new(),
+            });
+        }
+
+        if page
+            .supported_sections
+            .iter()
+            .any(|item| item == "process_tree")
+        {
+            sections.push(UiSection {
+                id: "process-tree".to_string(),
+                title: "process tree".to_string(),
+                kind: "process_tree".to_string(),
+                source: "process_tree".to_string(),
+                description: "Parent-child execution hierarchy for agents, tasks, and launches."
+                    .to_string(),
+                empty_text: String::new(),
+                columns: 1,
+                target_options: Vec::new(),
+                labels: Vec::new(),
+            });
+        }
+
+        if page
+            .supported_sections
+            .iter()
+            .any(|item| item == "launches")
+        {
+            sections.push(UiSection {
+                id: "launches".to_string(),
+                title: "launches".to_string(),
+                kind: "launches".to_string(),
+                source: "launches".to_string(),
+                description: "Live launch registry with per-window lifecycle controls.".to_string(),
+                empty_text: String::new(),
+                columns: 1,
+                target_options: Vec::new(),
+                labels: Vec::new(),
+            });
+        }
+
+        if page
+            .supported_sections
+            .iter()
             .any(|item| item == "residents")
         {
             sections.push(UiSection {
@@ -265,10 +356,11 @@ Rules:\n\
 2. You may only use sections, sources, and targets that are supported by backend protocols.\n\
 3. Do not invent pages, APIs, events, actions, or data sources.\n\
 4. Required sections metrics, residents, and composer must remain. If alerts exist, alerts must appear.\n\
-5. You may optimize title, subtitle, section order, descriptions, empty states, labels, target_options, columns, and theme_name.\n\
-6. Any language or copy preference must come from the prompt text and surface spec, not from hardcoded defaults.\n\
-7. The goal is to evolve UI expression when system capability or prompt text changes, without breaking protocol constraints.\n\
-8. The desired view should influence section emphasis and ordering.\n\
+5. When supported by backend protocols, preserve chat-oriented sections for main chat, group chat, agent details, process tree, and launches.\n\
+6. You may optimize title, subtitle, section order, descriptions, empty states, labels, target_options, columns, and theme_name.\n\
+7. Any language or copy preference must come from the prompt text and surface spec, not from hardcoded defaults.\n\
+8. The goal is to evolve UI expression when system capability or prompt text changes, without breaking protocol constraints.\n\
+9. The desired view should influence section emphasis and ordering.\n\
 \n\
 System model:\n{model_json}\n\
 \n\
@@ -549,6 +641,11 @@ fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()>
         "metrics",
         "alerts",
         "residents",
+        "main_chat",
+        "group_chat",
+        "agent_details",
+        "process_tree",
+        "launches",
         "composer",
         "tasks",
         "proposals",
@@ -558,6 +655,11 @@ fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()>
         "summary",
         "alerts",
         "residents",
+        "main_friend",
+        "group_chat",
+        "agent_details",
+        "process_tree",
+        "launches",
         "composer",
         "tasks",
         "proposals",
@@ -608,6 +710,16 @@ fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()>
     let mut has_residents = false;
     let mut has_composer = false;
     let mut has_alerts = false;
+    let chat_contract_available = source_support.contains("main_friend")
+        && source_support.contains("group_chat")
+        && source_support.contains("agent_details");
+    let process_tree_available = source_support.contains("process_tree");
+    let launches_available = source_support.contains("launches");
+    let mut has_main_chat = false;
+    let mut has_group_chat = false;
+    let mut has_agent_details = false;
+    let mut has_process_tree = false;
+    let mut has_launches = false;
 
     for section in &schema.sections {
         if !ids.insert(section.id.clone()) {
@@ -640,6 +752,11 @@ fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()>
         match section.kind.as_str() {
             "metrics" => has_summary = true,
             "residents" => has_residents = true,
+            "main_chat" => has_main_chat = true,
+            "group_chat" => has_group_chat = true,
+            "agent_details" => has_agent_details = true,
+            "process_tree" => has_process_tree = true,
+            "launches" => has_launches = true,
             "composer" => {
                 has_composer = true;
                 if !composer_writable {
@@ -666,6 +783,17 @@ fn validate_schema(schema: &UiSchema, model: &SystemModel) -> anyhow::Result<()>
     }
     if !model.alerts.is_empty() && !has_alerts {
         anyhow::bail!("ui schema must include alerts section when alerts exist");
+    }
+    if chat_contract_available && (!has_main_chat || !has_group_chat || !has_agent_details) {
+        anyhow::bail!(
+            "ui schema must include main_chat, group_chat, and agent_details when chat contracts are available"
+        );
+    }
+    if process_tree_available && !has_process_tree {
+        anyhow::bail!("ui schema must include process_tree when process tree data is available");
+    }
+    if launches_available && !has_launches {
+        anyhow::bail!("ui schema must include launches when launch data is available");
     }
     for required in ["metrics", "residents"] {
         if !section_support.get(required).copied().unwrap_or(false) {
@@ -699,7 +827,9 @@ fn extract_json_object(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::UiSchemaManager;
-    use crate::project_tools::{SystemModel, SystemSummary, UiAction, UiSurface, UiSurfacePage};
+    use crate::project_tools::{
+        SystemLaunch, SystemModel, SystemSummary, UiAction, UiSurface, UiSurfacePage,
+    };
 
     #[test]
     fn generate_from_surface_respects_desired_view() {
@@ -736,11 +866,21 @@ mod tests {
                     response_fields: Vec::new(),
                     supported_sections: vec![
                         "metrics".to_string(),
+                        "main_chat".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
                         "residents".to_string(),
                         "tasks".to_string(),
                     ],
                     supported_sources: vec![
                         "summary".to_string(),
+                        "main_friend".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
                         "residents".to_string(),
                         "tasks".to_string(),
                     ],
@@ -762,6 +902,7 @@ mod tests {
                     event_types: Vec::new(),
                 },
             ],
+            launches: Vec::new(),
             residents: Vec::new(),
             recent_prompt_changes: Vec::new(),
             tasks: vec![crate::project_tools::SystemTask {
@@ -789,11 +930,21 @@ mod tests {
                 audience: "operator".to_string(),
                 data_sources: vec![
                     "summary".to_string(),
+                    "main_friend".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
                     "residents".to_string(),
                     "tasks".to_string(),
                 ],
                 supported_sections: vec![
                     "metrics".to_string(),
+                    "main_chat".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
                     "residents".to_string(),
                     "composer".to_string(),
                     "tasks".to_string(),
@@ -818,6 +969,161 @@ mod tests {
             schema.sections.first().map(|item| item.id.as_str()),
             Some("tasks")
         );
+        assert!(schema.sections.iter().any(|item| item.kind == "main_chat"));
+        assert!(schema.sections.iter().any(|item| item.kind == "group_chat"));
+        assert!(schema.sections.iter().any(|item| item.kind == "agent_details"));
+        assert!(schema.sections.iter().any(|item| item.kind == "process_tree"));
+        assert!(schema.sections.iter().any(|item| item.kind == "launches"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn fallback_schema_preserves_chat_and_tree_sections_when_supported() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rustpilot-ui-schema-chat-test-{}-{}",
+            std::process::id(),
+            crate::project_tools::util::now_secs_f64()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let manager = UiSchemaManager::new(temp_dir.clone()).expect("manager");
+        let model = SystemModel {
+            generated_at: 0.0,
+            summary: SystemSummary {
+                resident_count: 1,
+                pending_tasks: 0,
+                running_tasks: 1,
+                blocked_tasks: 0,
+                completed_tasks: 0,
+                open_proposals: 0,
+                recent_decisions: 0,
+            },
+            alerts: Vec::new(),
+            protocols: vec![
+                crate::project_tools::SystemProtocol {
+                    id: "ui.status".to_string(),
+                    transport: "http".to_string(),
+                    method: "GET".to_string(),
+                    path: "/api/status".to_string(),
+                    purpose: "status".to_string(),
+                    readonly: true,
+                    requires_confirmation: false,
+                    targets: Vec::new(),
+                    request_fields: Vec::new(),
+                    response_fields: Vec::new(),
+                    supported_sections: vec![
+                        "metrics".to_string(),
+                        "residents".to_string(),
+                        "main_chat".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
+                    ],
+                    supported_sources: vec![
+                        "summary".to_string(),
+                        "residents".to_string(),
+                        "main_friend".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
+                    ],
+                    event_types: Vec::new(),
+                },
+                crate::project_tools::SystemProtocol {
+                    id: "ui.wire.dispatch".to_string(),
+                    transport: "http".to_string(),
+                    method: "POST".to_string(),
+                    path: "/api/wire".to_string(),
+                    purpose: "write".to_string(),
+                    readonly: false,
+                    requires_confirmation: false,
+                    targets: vec!["ui".to_string()],
+                    request_fields: Vec::new(),
+                    response_fields: Vec::new(),
+                    supported_sections: vec!["composer".to_string()],
+                    supported_sources: vec!["composer".to_string()],
+                    event_types: Vec::new(),
+                },
+            ],
+            launches: vec![SystemLaunch {
+                launch_id: "launch-1".to_string(),
+                agent_id: "ui".to_string(),
+                owner: "ui".to_string(),
+                role: "ui".to_string(),
+                kind: "resident".to_string(),
+                status: "running".to_string(),
+                pid: Some(42),
+                process_started_at: Some(1_700_000_000.0),
+                task_id: None,
+                parent_task_id: None,
+                parent_agent_id: Some("root".to_string()),
+                channel: "launch".to_string(),
+                target: "window".to_string(),
+                window_title: "UI".to_string(),
+                log_path: "launch-1.log".to_string(),
+                error: String::new(),
+            }],
+            residents: Vec::new(),
+            recent_prompt_changes: Vec::new(),
+            tasks: Vec::new(),
+            proposals: Vec::new(),
+            decisions: Vec::new(),
+        };
+        let surface = UiSurface {
+            generated_at: 0.0,
+            source_fingerprint: "surface".to_string(),
+            title: "Surface".to_string(),
+            summary: "Summary".to_string(),
+            pages: vec![UiSurfacePage {
+                id: "system-overview".to_string(),
+                title: "System Overview".to_string(),
+                purpose: "Operate".to_string(),
+                audience: "operator".to_string(),
+                data_sources: vec![
+                    "summary".to_string(),
+                    "residents".to_string(),
+                    "main_friend".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
+                ],
+                supported_sections: vec![
+                    "metrics".to_string(),
+                    "residents".to_string(),
+                    "main_chat".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
+                    "composer".to_string(),
+                ],
+                actions: vec![UiAction {
+                    id: "dispatch-ui".to_string(),
+                    title: "Dispatch".to_string(),
+                    protocol_id: "ui.wire.dispatch".to_string(),
+                    target: "ui".to_string(),
+                    description: "Send".to_string(),
+                }],
+                notes: Vec::new(),
+            }],
+        };
+
+        let schema = manager
+            .generate_from_surface(&model, &surface, "project_state", "fp")
+            .expect("schema");
+        let kinds = schema
+            .sections
+            .iter()
+            .map(|item| item.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"main_chat"));
+        assert!(kinds.contains(&"group_chat"));
+        assert!(kinds.contains(&"agent_details"));
+        assert!(kinds.contains(&"process_tree"));
+        assert!(kinds.contains(&"launches"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

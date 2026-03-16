@@ -105,7 +105,9 @@ impl UiSurfaceManager {
         if !self.ui_prompt_path.exists() {
             fs::write(&self.ui_prompt_path, default_ui_prompt())?;
         }
-        Ok(fs::read_to_string(&self.ui_prompt_path)?)
+        Ok(with_managed_ui_prompt_appendix(&fs::read_to_string(
+            &self.ui_prompt_path,
+        )?))
     }
 
     pub fn prompt_fingerprint(&self) -> anyhow::Result<String> {
@@ -116,7 +118,9 @@ impl UiSurfaceManager {
         if !self.planner_prompt_path.exists() {
             fs::write(&self.planner_prompt_path, default_planner_prompt())?;
         }
-        Ok(fs::read_to_string(&self.planner_prompt_path)?)
+        Ok(with_managed_planner_prompt_appendix(&fs::read_to_string(
+            &self.planner_prompt_path,
+        )?))
     }
 
     pub fn planner_prompt_fingerprint(&self) -> anyhow::Result<String> {
@@ -184,6 +188,11 @@ impl UiSurfaceManager {
                 "summary".to_string(),
                 "alerts".to_string(),
                 "residents".to_string(),
+                "main_friend".to_string(),
+                "group_chat".to_string(),
+                "agent_details".to_string(),
+                "process_tree".to_string(),
+                "launches".to_string(),
                 "tasks".to_string(),
                 "proposals".to_string(),
                 "decisions".to_string(),
@@ -192,6 +201,11 @@ impl UiSurfaceManager {
                 "metrics".to_string(),
                 "alerts".to_string(),
                 "residents".to_string(),
+                "main_chat".to_string(),
+                "group_chat".to_string(),
+                "agent_details".to_string(),
+                "process_tree".to_string(),
+                "launches".to_string(),
                 "composer".to_string(),
                 "tasks".to_string(),
                 "proposals".to_string(),
@@ -431,6 +445,9 @@ Constraints:
 - If alerts exist, alerts must still be represented
 - Prefer operational clarity over decorative polish
 - Represent system workflow and collaboration state, not just a single agent
+- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs
+- The generated UI must show process hierarchy and launch controls when those contracts are present
+- Do not push the real product interface back into Rust bootstrap HTML
 
 Evolution goals:
 - Adapt page structure when system capabilities change
@@ -452,12 +469,31 @@ Constraints:
 - Do not invent protocols, interfaces, events, roles, or data sources
 - Reflect system workflow, not just one agent's point of view
 - Keep the output structured, cacheable, and easy to audit
+- Preserve chat/process-tree/launch oriented sections when the backend exposes them
 
 Evolution goals:
 - Adjust pages, actions, and supported sections when capabilities change
 - Keep the surface spec aligned with protocol changes
 - Provide stable planning input for downstream schema and page generation
 "#
+}
+
+fn with_managed_ui_prompt_appendix(base: &str) -> String {
+    let appendix = "\n\nManaged appendix:\n- Treat chat/process-tree/launch contracts as first-class UI inputs when present in the backend model.\n- Keep the generated interface in the UI agent output; do not push the real product UI back into Rust bootstrap HTML.\n";
+    if base.contains("Managed appendix:") {
+        base.to_string()
+    } else {
+        format!("{}{}", base.trim_end(), appendix)
+    }
+}
+
+fn with_managed_planner_prompt_appendix(base: &str) -> String {
+    let appendix = "\n\nManaged appendix:\n- Preserve supported sections and data sources for main chat, group chat, agent details, process tree, and launches when the backend exposes them.\n- Plan for a generated UI product surface, not a Rust-owned fallback dashboard.\n";
+    if base.contains("Managed appendix:") {
+        base.to_string()
+    } else {
+        format!("{}{}", base.trim_end(), appendix)
+    }
 }
 
 fn model_fingerprint(model: &SystemModel) -> anyhow::Result<String> {
@@ -693,4 +729,112 @@ fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     text.get(start..=end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UiSurfaceManager;
+    use crate::project_tools::{SystemModel, SystemProtocol, SystemSummary};
+
+    #[test]
+    fn rebuild_from_model_includes_chat_tree_and_launch_contracts() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rustpilot-ui-surface-test-{}-{}",
+            std::process::id(),
+            crate::project_tools::util::now_secs_f64()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let manager = UiSurfaceManager::new(temp_dir.clone()).expect("manager");
+        let model = SystemModel {
+            generated_at: 0.0,
+            summary: SystemSummary {
+                resident_count: 1,
+                pending_tasks: 0,
+                running_tasks: 1,
+                blocked_tasks: 0,
+                completed_tasks: 0,
+                open_proposals: 0,
+                recent_decisions: 0,
+            },
+            alerts: Vec::new(),
+            protocols: vec![SystemProtocol {
+                id: "ui.status".to_string(),
+                transport: "http".to_string(),
+                method: "GET".to_string(),
+                path: "/api/status".to_string(),
+                purpose: "status".to_string(),
+                readonly: true,
+                requires_confirmation: false,
+                targets: Vec::new(),
+                request_fields: Vec::new(),
+                response_fields: Vec::new(),
+                supported_sections: vec![
+                    "metrics".to_string(),
+                    "residents".to_string(),
+                    "main_chat".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
+                ],
+                supported_sources: vec![
+                    "summary".to_string(),
+                    "residents".to_string(),
+                    "main_friend".to_string(),
+                    "group_chat".to_string(),
+                    "agent_details".to_string(),
+                    "process_tree".to_string(),
+                    "launches".to_string(),
+                ],
+                event_types: Vec::new(),
+            }],
+            residents: Vec::new(),
+            launches: Vec::new(),
+            recent_prompt_changes: Vec::new(),
+            tasks: Vec::new(),
+            proposals: Vec::new(),
+            decisions: Vec::new(),
+        };
+
+        let surface = manager
+            .rebuild_from_model(&model, "project_state")
+            .expect("surface");
+        let page = surface.pages.first().expect("page");
+        for source in [
+            "main_friend",
+            "group_chat",
+            "agent_details",
+            "process_tree",
+            "launches",
+        ] {
+            assert!(page.data_sources.iter().any(|item| item == source));
+        }
+        for section in [
+            "main_chat",
+            "group_chat",
+            "agent_details",
+            "process_tree",
+            "launches",
+        ] {
+            assert!(page.supported_sections.iter().any(|item| item == section));
+        }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn prompt_text_appends_managed_ui_appendix() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rustpilot-ui-surface-prompt-test-{}-{}",
+            std::process::id(),
+            crate::project_tools::util::now_secs_f64()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let manager = UiSurfaceManager::new(temp_dir.clone()).expect("manager");
+        std::fs::write(temp_dir.join("ui_agent_prompt.md"), "short prompt").expect("write");
+        let prompt = manager.prompt_text().expect("prompt");
+        assert!(prompt.contains("Managed appendix:"));
+        assert!(prompt.contains("chat/process-tree/launch"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
 }

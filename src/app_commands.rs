@@ -23,6 +23,7 @@ use crate::runtime::team::{
     reply_task, resident_send, team_run, team_start, team_stop,
 };
 use crate::runtime::usage::render_usage_text;
+use crate::resident_agents::{restart_launch, stop_launch};
 use crate::shell_file_tools::{is_dangerous_command, run_shell_command};
 use crate::skills::SkillRegistry;
 use crate::team::send_input_to_worker;
@@ -331,6 +332,77 @@ pub(crate) async fn process_cli_action(
         }
         CliAction::TaskTree => {
             frames.push(WireFrame::ack(render_task_tree(runtime.project)?));
+        }
+        CliAction::LaunchList => {
+            let launches = runtime.project.launches().list()?;
+            let text = if launches.is_empty() {
+                "no launches".to_string()
+            } else {
+                launches
+                    .into_iter()
+                    .map(|item| {
+                        format!(
+                            "- {} kind={} agent={} status={} pid={} task={} target={}",
+                            item.launch_id,
+                            item.kind,
+                            item.agent_id,
+                            item.status,
+                            item.pid
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            item.task_id
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            if item.target.is_empty() {
+                                "-".to_string()
+                            } else {
+                                item.target
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            frames.push(WireFrame::ack(text));
+        }
+        CliAction::LaunchControl { launch_id, action } => {
+            let message = match action.as_str() {
+                "stop" => {
+                    stop_launch(runtime.project, &launch_id)?;
+                    format!("stopped launch {}", launch_id)
+                }
+                "restart" => {
+                    let restarted = restart_launch(runtime.project, &launch_id)?;
+                    format!(
+                        "restarted launch {} as {}",
+                        launch_id, restarted.launch_id
+                    )
+                }
+                _ => format!("unsupported launch action: {}", action),
+            };
+            frames.push(WireFrame::ack(message));
+        }
+        CliAction::LaunchLogs { launch_id, lines } => {
+            let Some(launch) = runtime.project.launches().get(&launch_id)? else {
+                frames.push(WireFrame::error(format!("launch not found: {}", launch_id)));
+                return Ok(CommandOutcome {
+                    directive: LoopDirective::Continue,
+                    frames,
+                });
+            };
+            if launch.log_path.trim().is_empty() {
+                frames.push(WireFrame::error(format!(
+                    "launch {} has no log path",
+                    launch_id
+                )));
+            } else {
+                let tail = crate::launch_log::read_tail(&launch.log_path, lines);
+                frames.push(WireFrame::ack(if tail.trim().is_empty() {
+                    format!("no log output for launch {}", launch_id)
+                } else {
+                    tail
+                }));
+            }
         }
         CliAction::TaskControl {
             task_id,

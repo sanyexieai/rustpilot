@@ -5,6 +5,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::launch_log;
+
 #[derive(Debug, Clone)]
 pub struct ActivityState {
     round: usize,
@@ -79,12 +81,12 @@ impl WaitHeartbeat {
                     break;
                 }
                 let elapsed = (now_secs_f64() - started).max(0.0);
-                println!(
-                    "> [心跳] {} 仍在运行，已持续 {:.1}s\n{}",
+                launch_log::emit(format!(
+                    "> [heartbeat] {} still running for {:.1}s\n{}",
                     label,
                     elapsed,
                     render_activity(&progress)
-                );
+                ));
             }
         });
         Self {

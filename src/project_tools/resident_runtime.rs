@@ -105,11 +105,65 @@ impl ResidentRuntimeManager {
         if content.trim().is_empty() {
             return Ok(Vec::new());
         }
-        Ok(serde_json::from_str(&content)?)
+        match serde_json::from_str(&content) {
+            Ok(items) => Ok(items),
+            Err(_) => {
+                let repaired = recover_runtime_states(&content)?;
+                let _ = self.save_all(&repaired);
+                Ok(repaired)
+            }
+        }
     }
 
     fn save_all(&self, items: &[ResidentRuntimeState]) -> anyhow::Result<()> {
         fs::write(&self.path, serde_json::to_string_pretty(items)?)?;
         Ok(())
     }
+}
+
+fn recover_runtime_states(content: &str) -> anyhow::Result<Vec<ResidentRuntimeState>> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(candidate) = first_complete_json_array(trimmed)
+        && let Ok(items) = serde_json::from_str::<Vec<ResidentRuntimeState>>(candidate)
+    {
+        return Ok(items);
+    }
+    anyhow::bail!("failed to parse resident runtime state")
+}
+
+fn first_complete_json_array(text: &str) -> Option<&str> {
+    let start = text.find('[')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + idx + ch.len_utf8();
+                    return text.get(start..end);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

@@ -174,6 +174,30 @@ fn default_loop_interval_ms() -> u64 {
 fn default_resident_agents() -> Vec<ResidentAgentConfig> {
     vec![
         ResidentAgentConfig {
+            agent_id: "launcher".to_string(),
+            role: "launcher".to_string(),
+            runtime_mode: "launcher".to_string(),
+            behavior_mode: "passive".to_string(),
+            enabled: true,
+            mission: "Launch and reconcile agent processes in dedicated command windows."
+                .to_string(),
+            scope: vec![
+                "launch resident agents".to_string(),
+                "launch worker agents".to_string(),
+                "reconcile window-backed processes".to_string(),
+            ],
+            forbidden: vec![
+                "do not execute task content".to_string(),
+                "do not bypass launch registry".to_string(),
+            ],
+            daily_limit: 60_000,
+            period_limit: 15_000,
+            task_soft_limit: 6_000,
+            loop_interval_ms: 800,
+            max_parallel_override: None,
+            listen_port: None,
+        },
+        ResidentAgentConfig {
             agent_id: "scheduler".to_string(),
             role: "scheduler".to_string(),
             runtime_mode: "scheduler".to_string(),

@@ -43,6 +43,15 @@ pub enum CliAction {
         action: String,
         priority: Option<String>,
     },
+    LaunchList,
+    LaunchControl {
+        launch_id: String,
+        action: String,
+    },
+    LaunchLogs {
+        launch_id: String,
+        lines: usize,
+    },
     TeamRun {
         goal: String,
         priority: String,
@@ -264,6 +273,43 @@ pub fn handle_cli_command(
         println!("{}", project.tasks().list_all()?);
         return Ok(Some(CliAction::Continue));
     }
+    if trimmed == "/launches" || trimmed == "/launches list" {
+        return Ok(Some(CliAction::LaunchList));
+    }
+    if let Some(rest) = trimmed.strip_prefix("/launch ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let Some(action) = parts.next() else {
+            println!("usage: /launch stop|restart|logs <launch_id> [lines]");
+            return Ok(Some(CliAction::Continue));
+        };
+        let Some(launch_id) = parts.next() else {
+            println!("usage: /launch stop|restart|logs <launch_id> [lines]");
+            return Ok(Some(CliAction::Continue));
+        };
+        match action {
+            "stop" | "restart" => {
+                return Ok(Some(CliAction::LaunchControl {
+                    launch_id: launch_id.to_string(),
+                    action: action.to_string(),
+                }));
+            }
+            "logs" => {
+                let lines = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(80)
+                    .max(1);
+                return Ok(Some(CliAction::LaunchLogs {
+                    launch_id: launch_id.to_string(),
+                    lines,
+                }));
+            }
+            _ => {
+                println!("usage: /launch stop|restart|logs <launch_id> [lines]");
+                return Ok(Some(CliAction::Continue));
+            }
+        }
+    }
     if trimmed == "/tasks tree" {
         return Ok(Some(CliAction::TaskTree));
     }
@@ -310,6 +356,29 @@ pub fn handle_cli_command(
             }
             _ => {
                 println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+                return Ok(Some(CliAction::Continue));
+            }
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("/launch ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let Some(action) = parts.next() else {
+            println!("usage: /launch stop|restart <launch_id>");
+            return Ok(Some(CliAction::Continue));
+        };
+        let Some(launch_id) = parts.next() else {
+            println!("usage: /launch stop|restart <launch_id>");
+            return Ok(Some(CliAction::Continue));
+        };
+        match action {
+            "stop" | "restart" => {
+                return Ok(Some(CliAction::LaunchControl {
+                    launch_id: launch_id.to_string(),
+                    action: action.to_string(),
+                }));
+            }
+            _ => {
+                println!("usage: /launch stop|restart <launch_id>");
                 return Ok(Some(CliAction::Continue));
             }
         }

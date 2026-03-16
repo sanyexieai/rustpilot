@@ -378,6 +378,34 @@ fn lead_long_running_bash_is_rejected_with_delegate_hint() {
 }
 
 #[test]
+fn parent_expensive_bash_is_rejected_with_task_create_hint() {
+    let _guard = lock_global();
+    let temp = TestDir::new("parent_expensive_bash");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
+
+    let error = handle_tool_call(
+        &project,
+        &tool_call("bash", json!({ "command": "cargo test" })),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("expensive commands must be delegated"));
+    assert!(error.contains("task_create"));
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
+}
+
+#[test]
 fn worker_delegate_long_running_inherits_parent_task() {
     let _guard = lock_global();
     let temp = TestDir::new("worker_delegate_long_running");
@@ -464,6 +492,42 @@ fn parent_worker_long_running_bash_is_rejected() {
     unsafe {
         std::env::remove_var("RUSTPILOT_AGENT_ID");
         std::env::remove_var("RUSTPILOT_TASK_ID");
+        std::env::remove_var("RUSTPILOT_REPO_ROOT");
+    }
+}
+
+#[test]
+fn parent_worktree_run_for_expensive_command_is_rejected() {
+    let _guard = lock_global();
+    let temp = TestDir::new("parent_worktree_run_expensive");
+    init_git_repo(temp.path());
+    let project = project_context(temp.path());
+
+    unsafe {
+        std::env::set_var("RUSTPILOT_AGENT_ID", "lead");
+        std::env::set_var("RUSTPILOT_REPO_ROOT", temp.path().display().to_string());
+    }
+
+    project
+        .worktrees()
+        .create("expensive-run", None, "HEAD")
+        .expect("create worktree");
+
+    let error = handle_tool_call(
+        &project,
+        &tool_call(
+            "worktree_run",
+            json!({ "name": "expensive-run", "command": "cargo test" }),
+        ),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("expensive commands must be delegated"));
+    assert!(error.contains("task_create"));
+
+    unsafe {
+        std::env::remove_var("RUSTPILOT_AGENT_ID");
         std::env::remove_var("RUSTPILOT_REPO_ROOT");
     }
 }

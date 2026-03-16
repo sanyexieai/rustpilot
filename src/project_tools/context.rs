@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, Mailbox,
+    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, LaunchRegistryManager, Mailbox,
     PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
     ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiPageManager,
     UiSchemaManager, UiSurfaceManager, WorktreeManager,
@@ -14,6 +14,7 @@ pub struct ProjectContext {
     tasks: Arc<TaskManager>,
     approval: Arc<ApprovalManager>,
     events: Arc<EventBus>,
+    launches: Arc<LaunchRegistryManager>,
     mailbox: Arc<Mailbox>,
     agents: Arc<AgentManager>,
     budgets: Arc<BudgetManager>,
@@ -38,6 +39,7 @@ impl ProjectContext {
         let events = Arc::new(EventBus::new(
             repo_root.join(".worktrees").join("events.jsonl"),
         )?);
+        let launches = Arc::new(LaunchRegistryManager::new(repo_root.join(".team"))?);
         let mailbox = Arc::new(Mailbox::new(repo_root.join(".team").join("mailbox"))?);
         let agents = Arc::new(AgentManager::new(repo_root.join(".team"))?);
         let budgets = Arc::new(BudgetManager::new(repo_root.join(".team"))?);
@@ -62,6 +64,7 @@ impl ProjectContext {
             tasks,
             approval,
             events,
+            launches,
             mailbox,
             agents,
             budgets,
@@ -98,6 +101,10 @@ impl ProjectContext {
 
     pub fn worktrees(&self) -> &WorktreeManager {
         self.worktrees.as_ref()
+    }
+
+    pub fn launches(&self) -> &LaunchRegistryManager {
+        self.launches.as_ref()
     }
 
     pub fn mailbox(&self) -> &Mailbox {

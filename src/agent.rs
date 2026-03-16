@@ -12,6 +12,7 @@ use crate::external_tools::{
     external_tool_definitions, external_tool_summaries, handle_external_tool_call,
 };
 use crate::llm_profiles::LlmApiKind;
+use crate::launch_log;
 use crate::mcp::{handle_mcp_tool_call, mcp_tool_definitions};
 use crate::openai_compat::{ChatRequest, ChatResponse, Message, Tool, ToolCall, ToolChoice};
 use crate::project_tools::{
@@ -21,6 +22,7 @@ use crate::shell_file_tools::{is_dangerous_command, is_read_only_command};
 use crate::tool_capability::{ToolCapabilityLevel, ToolRuntimeKind};
 use crate::wire::WireToolSummary;
 use serde_json::Value;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct AgentProgressReport {
@@ -97,10 +99,10 @@ async fn send_llm_request(
                 if !should_retry || attempt >= RETRY_MAX_ATTEMPTS {
                     return Err(err).context("LLM request failed");
                 }
-                println!(
+                launch_log::emit(format!(
                     "> [retry] transport error ({}), retrying in {}ms ({}/{})...",
                     err, delay_ms, attempt, RETRY_MAX_ATTEMPTS
-                );
+                ));
                 let jitter = (rand_u32() % 500) as u64;
                 sleep_with_abort(tokio::time::Duration::from_millis(delay_ms + jitter), abort)
                     .await?;
@@ -131,10 +133,10 @@ async fn send_llm_request(
             );
         }
 
-        println!(
+        launch_log::emit(format!(
             "> [retry] request failed ({}), retrying in {}ms ({}/{})...",
             status, delay_ms, attempt, RETRY_MAX_ATTEMPTS
-        );
+        ));
 
         let jitter = (rand_u32() % 500) as u64;
         sleep_with_abort(tokio::time::Duration::from_millis(delay_ms + jitter), abort).await?;
@@ -214,6 +216,7 @@ pub async fn run_agent_loop(
     report: Option<&AgentProgressReport>,
     abort: Option<&SessionAbortLease>,
 ) -> anyhow::Result<()> {
+    let agent_label = current_agent_log_label();
     for turn in 0..MAX_AGENT_TURNS {
         if abort.as_ref().is_some_and(|lease| lease.is_cancelled()) {
             anyhow::bail!("request aborted");
@@ -234,7 +237,7 @@ pub async fn run_agent_loop(
             temperature: Some(0.2),
         };
 
-        println!("> [model] turn {}", turn + 1);
+        launch_log::emit(format!("> [{}] [model] turn {}", agent_label, turn + 1));
         let heartbeat = WaitHeartbeat::start(progress.clone(), format!("model turn {}", turn + 1));
         let response = send_llm_request(client, config, &request, abort).await?;
         drop(heartbeat);
@@ -252,7 +255,7 @@ pub async fn run_agent_loop(
                 &format!("turn {}: model returned final result", turn + 1),
             );
             if let Some(content) = assistant.content {
-                println!("{}", content);
+                launch_log::emit(format!("> [{}] [final]\n{}", agent_label, content));
             }
             return Ok(());
         }
@@ -270,12 +273,22 @@ pub async fn run_agent_loop(
                 "task.progress",
                 &format!("turn {}: executing tool {}", turn + 1, call.function.name),
             );
-            println!("> [activity] running tool {}", call.function.name);
+            launch_log::emit(format!(
+                "> [{}] [activity] running tool {}",
+                agent_label, call.function.name
+            ));
+            let tool_started = Instant::now();
             let output = match handle_tool_call(project, &call) {
                 Ok(output) => output,
                 Err(err) => format!("error: {}", err),
             };
-            println!("> {}: {}", call.function.name, truncate_for_print(&output));
+            launch_log::emit(format!(
+                "> [{}] [{}] {:.2}s {}",
+                agent_label,
+                call.function.name,
+                tool_started.elapsed().as_secs_f64(),
+                truncate_for_print(&output)
+            ));
             messages.push(Message {
                 role: "tool".to_string(),
                 content: Some(output),
@@ -302,6 +315,19 @@ pub async fn run_agent_loop(
         "agent loop exceeded {} turns, stop the request or reduce prompt scope",
         MAX_AGENT_TURNS
     )
+}
+
+fn current_agent_log_label() -> String {
+    let agent_id = std::env::var("RUSTPILOT_AGENT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "root".to_string());
+    let task_suffix = std::env::var("RUSTPILOT_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" task={}", value))
+        .unwrap_or_default();
+    format!("{}{}", agent_id, task_suffix)
 }
 
 fn emit_progress(

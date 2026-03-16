@@ -117,6 +117,48 @@ pub fn project_tool_definitions() -> Vec<Tool> {
             }),
         ),
         tool(
+            "launch_list",
+            "List launch registry entries for agent windows and launch-backed processes.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        tool(
+            "launch_stop",
+            "Stop a launch-backed agent process by launch id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "launch_id": { "type": "string" }
+                },
+                "required": ["launch_id"]
+            }),
+        ),
+        tool(
+            "launch_restart",
+            "Restart a launch-backed resident or worker process by launch id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "launch_id": { "type": "string" }
+                },
+                "required": ["launch_id"]
+            }),
+        ),
+        tool(
+            "launch_log_read",
+            "Read the recent log tail for a launch-backed process by launch id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "launch_id": { "type": "string" },
+                    "lines": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["launch_id"]
+            }),
+        ),
+        tool(
             "task_get",
             "Get task details by id.",
             json!({
@@ -333,6 +375,68 @@ pub fn handle_project_tool_call(
             let created = create_prompt_skill(&args.name, &args.description, &args.body)?;
             format!("skill created: {}", created.join("SKILL.md").display())
         }
+        "launch_list" => {
+            let launches = context.launches().list()?;
+            if launches.is_empty() {
+                "no launches".to_string()
+            } else {
+                launches
+                    .into_iter()
+                    .map(|item| {
+                        format!(
+                            "- {} kind={} agent={} status={} pid={} task={} target={}",
+                            item.launch_id,
+                            item.kind,
+                            item.agent_id,
+                            item.status,
+                            item.pid
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            item.task_id
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            if item.target.is_empty() {
+                                "-".to_string()
+                            } else {
+                                item.target
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        "launch_stop" => {
+            let args: LaunchIdArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid launch_stop arguments")?;
+            crate::resident_agents::stop_launch(context, &args.launch_id)?;
+            format!("stopped launch {}", args.launch_id)
+        }
+        "launch_restart" => {
+            let args: LaunchIdArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid launch_restart arguments")?;
+            let restarted = crate::resident_agents::restart_launch(context, &args.launch_id)?;
+            format!(
+                "restarted launch {} as {}",
+                args.launch_id, restarted.launch_id
+            )
+        }
+        "launch_log_read" => {
+            let args: LaunchLogReadArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid launch_log_read arguments")?;
+            let Some(launch) = context.launches().get(&args.launch_id)? else {
+                anyhow::bail!("launch not found: {}", args.launch_id);
+            };
+            if launch.log_path.trim().is_empty() {
+                anyhow::bail!("launch {} has no log path", args.launch_id);
+            }
+            let tail = crate::launch_log::read_tail(&launch.log_path, args.lines.unwrap_or(80));
+            if tail.trim().is_empty() {
+                format!("no log output for launch {}", args.launch_id)
+            } else {
+                tail
+            }
+        }
         "task_list" => tasks.list_all()?,
         "task_get" => {
             let args: TaskIdArgs = serde_json::from_str(&call.function.arguments)
@@ -449,6 +553,18 @@ struct TaskCreateArgs {
     parent_task_id: Option<u64>,
     #[serde(default)]
     depth: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LaunchIdArgs {
+    launch_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LaunchLogReadArgs {
+    launch_id: String,
+    #[serde(default)]
+    lines: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

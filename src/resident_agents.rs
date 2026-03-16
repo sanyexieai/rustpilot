@@ -7,14 +7,20 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::app_support::{parse_ui_intent, ui_base_url, ui_intent_to_memory};
-use crate::project_tools::{ProjectContext, ResidentAgentConfig};
-use crate::team::TeamRuntime;
+use crate::launch_log;
+use crate::project_tools::{LaunchRecord, LaunchRequest, ProjectContext, ResidentAgentConfig};
+use crate::team::{TeamRuntime, mark_worker_stopped, reconcile_parent_after_child_exit};
 use crate::ui_server::spawn_ui_server;
 
 pub struct AgentSupervisor {
     repo_root: PathBuf,
     max_parallel: usize,
-    children: HashMap<String, Child>,
+    children: HashMap<String, ResidentHandle>,
+}
+
+enum ResidentHandle {
+    DirectChild(Child),
+    LaunchManaged { launch_id: String },
 }
 
 impl AgentSupervisor {
@@ -24,6 +30,10 @@ impl AgentSupervisor {
             max_parallel: max_parallel.max(1),
             children: HashMap::new(),
         };
+        if cfg!(test) {
+            return Ok(supervisor);
+        }
+        supervisor.ensure_launcher_running()?;
         supervisor.reconcile()?;
         Ok(supervisor)
     }
@@ -47,15 +57,21 @@ impl AgentSupervisor {
         }
 
         for config in configs {
+            if config.agent_id == "launcher" {
+                self.ensure_launcher_running()?;
+                continue;
+            }
             let agent_id = config.agent_id.clone();
             let should_spawn = match self.children.get_mut(&agent_id) {
-                Some(child) => child.try_wait()?.is_some(),
+                Some(handle) => !resident_handle_running(&project, handle)?,
                 None => true,
             };
             if should_spawn {
                 self.children.remove(&agent_id);
-                let child = spawn_resident_agent(&self.repo_root, &config, self.max_parallel)?;
-                self.children.insert(agent_id, child);
+                let launch_id = request_resident_launch(&project, &config, self.max_parallel)?;
+                wait_for_launch_running(&project, &launch_id, Duration::from_secs(8))?;
+                self.children
+                    .insert(agent_id, ResidentHandle::LaunchManaged { launch_id });
             }
         }
         Ok(())
@@ -69,30 +85,49 @@ impl AgentSupervisor {
         if !config.enabled {
             anyhow::bail!("resident agent '{}' is disabled", agent_id);
         }
+        if config.agent_id == "launcher" {
+            return self.ensure_launcher_running();
+        }
         let should_spawn = match self.children.get_mut(agent_id) {
-            Some(child) => child.try_wait()?.is_some(),
+            Some(handle) => !resident_handle_running(&project, handle)?,
             None => true,
         };
         if should_spawn {
             self.children.remove(agent_id);
-            let child = spawn_resident_agent(&self.repo_root, &config, self.max_parallel)?;
-            self.children.insert(agent_id.to_string(), child);
+            let launch_id = request_resident_launch(&project, &config, self.max_parallel)?;
+            wait_for_launch_running(&project, &launch_id, Duration::from_secs(8))?;
+            self.children.insert(
+                agent_id.to_string(),
+                ResidentHandle::LaunchManaged { launch_id },
+            );
         }
         Ok(())
     }
 
     pub fn stop_agent(&mut self, agent_id: &str) {
-        if let Some(mut child) = self.children.remove(agent_id) {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(handle) = self.children.remove(agent_id) {
+            match handle {
+                ResidentHandle::DirectChild(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                ResidentHandle::LaunchManaged { launch_id } => {
+                    if let Ok(project) = ProjectContext::new(self.repo_root.clone()) {
+                        let _ = stop_launch(&project, &launch_id);
+                    }
+                }
+            }
         }
     }
 
     pub fn is_running(&mut self, agent_id: &str) -> bool {
-        let Some(child) = self.children.get_mut(agent_id) else {
+        let Some(handle) = self.children.get_mut(agent_id) else {
             return false;
         };
-        matches!(child.try_wait(), Ok(None))
+        let Ok(project) = ProjectContext::new(self.repo_root.clone()) else {
+            return false;
+        };
+        resident_handle_running(&project, handle).unwrap_or(false)
     }
 
     pub fn stop_all(&mut self) {
@@ -106,6 +141,27 @@ impl AgentSupervisor {
 impl Drop for AgentSupervisor {
     fn drop(&mut self) {
         self.stop_all();
+    }
+}
+
+impl AgentSupervisor {
+    fn ensure_launcher_running(&mut self) -> anyhow::Result<()> {
+        let project = ProjectContext::new(self.repo_root.clone())?;
+        let Some(config) = project.residents().get("launcher")? else {
+            return Ok(());
+        };
+        let should_spawn = match self.children.get_mut("launcher") {
+            Some(ResidentHandle::DirectChild(child)) => child.try_wait()?.is_some(),
+            Some(ResidentHandle::LaunchManaged { .. }) => true,
+            None => true,
+        };
+        if should_spawn {
+            self.children.remove("launcher");
+            let child = spawn_resident_agent(&self.repo_root, &config, self.max_parallel)?;
+            self.children
+                .insert("launcher".to_string(), ResidentHandle::DirectChild(child));
+        }
+        Ok(())
     }
 }
 
@@ -135,12 +191,620 @@ fn spawn_resident_agent(
         .spawn()?)
 }
 
+fn resident_handle_running(
+    project: &ProjectContext,
+    handle: &mut ResidentHandle,
+) -> anyhow::Result<bool> {
+    Ok(match handle {
+        ResidentHandle::DirectChild(child) => child.try_wait()?.is_none(),
+        ResidentHandle::LaunchManaged { launch_id } => project
+            .launches()
+            .get(launch_id)?
+            .and_then(|record| {
+                record
+                    .pid
+                    .map(|pid| (record.status, pid, record.process_started_at))
+            })
+            .is_some_and(|(status, pid, process_started_at)| {
+                status == "running" && process_is_running(pid, process_started_at)
+            }),
+    })
+}
+
+fn request_resident_launch(
+    project: &ProjectContext,
+    config: &ResidentAgentConfig,
+    max_parallel: usize,
+) -> anyhow::Result<String> {
+    let request = LaunchRequest {
+        agent_id: config.agent_id.clone(),
+        role: config.role.clone(),
+        kind: "resident".to_string(),
+        owner: Some(config.agent_id.clone()),
+        task_id: None,
+        parent_task_id: None,
+        parent_agent_id: Some("root".to_string()),
+        max_parallel: Some(
+            config
+                .max_parallel_override
+                .unwrap_or(max_parallel.max(1)),
+        ),
+    };
+    Ok(project.launches().request(request)?.launch_id)
+}
+
+pub(crate) fn request_worker_launch(
+    project: &ProjectContext,
+    owner: &str,
+    role_hint: &str,
+    task_id: u64,
+    parent_task_id: Option<u64>,
+    parent_agent_id: Option<String>,
+) -> anyhow::Result<String> {
+    let request = LaunchRequest {
+        agent_id: owner.to_string(),
+        role: role_hint.to_string(),
+        kind: "worker".to_string(),
+        owner: Some(owner.to_string()),
+        task_id: Some(task_id),
+        parent_task_id,
+        parent_agent_id,
+        max_parallel: None,
+    };
+    Ok(project.launches().request(request)?.launch_id)
+}
+
+pub(crate) fn wait_for_launch_running(
+    project: &ProjectContext,
+    launch_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<LaunchRecord> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if let Some(record) = project.launches().get(launch_id)? {
+            match record.status.as_str() {
+                "running" => return Ok(record),
+                "failed" => {
+                    anyhow::bail!(
+                        "launch {} failed: {}",
+                        launch_id,
+                        record.error.unwrap_or_else(|| "unknown error".to_string())
+                    );
+                }
+                "stopped" => {
+                    anyhow::bail!("launch {} stopped before becoming ready", launch_id);
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+    anyhow::bail!("timed out waiting for launch {}", launch_id)
+}
+
+pub(crate) fn stop_launch(project: &ProjectContext, launch_id: &str) -> anyhow::Result<()> {
+    if let Some(record) = project.launches().get(launch_id)? {
+        if let Some(pid) = record.pid {
+            let _ = kill_process(pid);
+        }
+        let _ = project
+            .launches()
+            .mark_stopped(launch_id, None)?;
+        if record.kind == "worker" {
+            if let Some(task_id) = record.task_id {
+                let _ = mark_worker_stopped(project.repo_root(), task_id);
+                let _ = project.tasks().update(task_id, Some("cancelled"), None, None);
+                let _ = project.agents().set_state(
+                    &record.owner,
+                    "idle",
+                    Some(task_id),
+                    Some(&record.channel),
+                    Some(if record.target.is_empty() {
+                        "-"
+                    } else {
+                        &record.target
+                    }),
+                    Some("worker launch stopped"),
+                );
+                let _ = reconcile_parent_after_child_exit(project, task_id);
+            }
+        } else {
+            let _ = project.agents().set_state(
+                &record.agent_id,
+                "idle",
+                record.task_id,
+                Some(&record.channel),
+                Some(if record.target.is_empty() {
+                    "-"
+                } else {
+                    &record.target
+                }),
+                Some("launch stopped"),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn restart_launch(
+    project: &ProjectContext,
+    launch_id: &str,
+) -> anyhow::Result<LaunchRecord> {
+    let record = project
+        .launches()
+        .get(launch_id)?
+        .ok_or_else(|| anyhow::anyhow!("launch not found: {}", launch_id))?;
+    stop_launch(project, launch_id)?;
+    let request = LaunchRequest {
+        agent_id: record.agent_id.clone(),
+        role: record.role.clone(),
+        kind: record.kind.clone(),
+        owner: Some(record.owner.clone()),
+        task_id: record.task_id,
+        parent_task_id: record.parent_task_id,
+        parent_agent_id: record.parent_agent_id.clone(),
+        max_parallel: record.max_parallel,
+    };
+    project.launches().request(request)
+}
+
+fn launch_record_process(
+    repo_root: &PathBuf,
+    record: &LaunchRecord,
+) -> anyhow::Result<(u32, Option<f64>, String)> {
+    let exe = std::env::current_exe()?;
+    let (window_title, command_line) = if record.kind == "resident" {
+        let max_parallel = record.max_parallel.unwrap_or(1).to_string();
+        (
+            format!("Rustpilot resident {}", record.agent_id),
+            vec![
+                exe.display().to_string(),
+                "resident-agent-run".to_string(),
+                "--repo-root".to_string(),
+                repo_root.display().to_string(),
+                "--agent-id".to_string(),
+                record.agent_id.clone(),
+                "--role".to_string(),
+                record.role.clone(),
+                "--max-parallel".to_string(),
+                max_parallel,
+            ],
+        )
+    } else {
+        let task_id = record
+            .task_id
+            .ok_or_else(|| anyhow::anyhow!("worker launch missing task_id"))?;
+        (
+            format!("Rustpilot worker {} task {}", record.owner, task_id),
+            vec![
+                exe.display().to_string(),
+                "teammate-run".to_string(),
+                "--repo-root".to_string(),
+                repo_root.display().to_string(),
+                "--task-id".to_string(),
+                task_id.to_string(),
+                "--owner".to_string(),
+                record.owner.clone(),
+                "--role-hint".to_string(),
+                record.role.clone(),
+            ],
+        )
+    };
+    #[cfg(windows)]
+    {
+        let pid = spawn_windows_agent_window(repo_root, &window_title, &command_line, record)?;
+        return Ok((pid, query_process_started_at(pid), window_title));
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = launch_host_command(&window_title, &command_line, record);
+        if !record.log_path.trim().is_empty() {
+            command.env("RUSTPILOT_LAUNCH_LOG", &record.log_path);
+        }
+        command.env("RUSTPILOT_LAUNCH_ID", &record.launch_id);
+        let child = spawn_new_console(command)?;
+        let pid = child.id();
+        Ok((pid, query_process_started_at(pid), window_title))
+    }
+}
+
+fn process_is_running(pid: u32, expected_started_at: Option<f64>) -> bool {
+    #[cfg(windows)]
+    {
+        let output = Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$p = Get-Process -Id {} -ErrorAction SilentlyContinue; if ($null -ne $p) {{ exit 0 }} else {{ exit 1 }}",
+                    pid
+                ),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !output.is_ok_and(|status| status.success()) {
+            return false;
+        }
+        if let Some(expected) = expected_started_at {
+            return query_process_started_at(pid)
+                .map(|actual| (actual - expected).abs() < 0.01)
+                .unwrap_or(false);
+        }
+        return true;
+    }
+    #[cfg(not(windows))]
+    {
+        let output = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        output.is_ok_and(|status| status.success())
+    }
+}
+
+fn query_process_started_at(pid: u32) -> Option<f64> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$p = Get-Process -Id {} -ErrorAction SilentlyContinue; if ($null -eq $p) {{ exit 1 }}; [DateTimeOffset]::new($p.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()",
+                    pid
+                ),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let millis = text.trim().parse::<i64>().ok()?;
+        return Some(millis as f64 / 1000.0);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn kill_process(pid: u32) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("taskkill failed for pid {}", pid);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("kill failed for pid {}", pid);
+        }
+        Ok(())
+    }
+}
+
+fn spawn_new_console(mut command: Command) -> anyhow::Result<Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        command.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn spawn_windows_agent_window(
+    repo_root: &PathBuf,
+    window_title: &str,
+    command_line: &[String],
+    record: &LaunchRecord,
+) -> anyhow::Result<u32> {
+    let script = build_windows_launch_script(window_title, command_line, record);
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "$proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','{}') -WorkingDirectory '{}' -WindowStyle Normal -PassThru; $proc.Id",
+                powershell_quote(&script),
+                powershell_quote(&repo_root.display().to_string())
+            ),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "failed to launch window host: {}",
+            if stderr.is_empty() {
+                "unknown windows start-process error".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<u32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("failed to parse launched window pid from '{}'", stdout.trim()))?;
+    Ok(pid)
+}
+
+#[cfg(not(windows))]
+fn launch_host_command(
+    window_title: &str,
+    command_line: &[String],
+    record: &LaunchRecord,
+) -> Command {
+    let _ = window_title;
+    let _ = record;
+    let mut iter = command_line.iter();
+    let program = iter.next().cloned().unwrap_or_default();
+    let mut command = Command::new(program);
+    command.args(iter);
+    command
+}
+
+#[cfg(windows)]
+fn build_windows_launch_script(
+    window_title: &str,
+    command_line: &[String],
+    record: &LaunchRecord,
+) -> String {
+    let title = sanitize_cmd_text(window_title);
+    let launch_id = sanitize_cmd_text(&record.launch_id);
+    let agent_id = sanitize_cmd_text(&record.agent_id);
+    let kind = sanitize_cmd_text(&record.kind);
+    let log_path = sanitize_cmd_text(&record.log_path);
+    let command = command_line
+        .iter()
+        .map(|item| cmd_quote(item))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "title {title} & set \"RUSTPILOT_LAUNCH_LOG={log_path}\" & set \"RUSTPILOT_LAUNCH_ID={launch_id}\" & echo [launch] id={launch_id} agent={agent_id} kind={kind} & echo [launch] log={log_path} & echo [launch] command={command} & {command}"
+    )
+}
+
+#[cfg(windows)]
+fn sanitize_cmd_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' | '&' | '|' | '<' | '>' | '^' => ' ',
+            _ => ch,
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn cmd_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "\"\"".to_string();
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '&' | '|' | '<' | '>' | '^' | '(' | ')'))
+    {
+        return format!("\"{}\"", value.replace('"', "\\\""));
+    }
+    value.to_string()
+}
+
+#[cfg(windows)]
+fn powershell_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_launch;
+    use crate::project_tools::{
+        LaunchRecord, LaunchRequest, ProjectContext, TaskCreateOptions, TaskRecord,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = format!("{}_{}_{}", name, std::process::id(), now_nanos());
+            let path = std::env::temp_dir().join("tests").join(unique);
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn now_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    }
+
+    fn project_context(repo_root: &Path) -> ProjectContext {
+        ProjectContext::new(repo_root.to_path_buf()).expect("project context")
+    }
+
+    #[test]
+    fn stop_launch_reconciles_parent_task_immediately() {
+        let temp = TestDir::new("stop_launch_reconcile");
+        let project = project_context(temp.path());
+
+        let parent_raw = project
+            .tasks()
+            .create_detailed("parent", "coordinate", TaskCreateOptions::default())
+            .expect("create parent");
+        let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
+        project
+            .tasks()
+            .update(parent.id, Some("in_progress"), Some("teammate-parent"), None)
+            .expect("update parent");
+        project
+            .agents()
+            .set_state(
+                "teammate-parent",
+                "running",
+                Some(parent.id),
+                Some("cli"),
+                Some("main"),
+                Some("parent active"),
+            )
+            .expect("parent state");
+
+        let child_raw = project
+            .tasks()
+            .create_detailed(
+                "child",
+                "worker task",
+                TaskCreateOptions {
+                    parent_task_id: Some(parent.id),
+                    depth: Some(1),
+                    ..TaskCreateOptions::default()
+                },
+            )
+            .expect("create child");
+        let child: TaskRecord = serde_json::from_str(&child_raw).expect("parse child");
+        project
+            .tasks()
+            .update(child.id, Some("in_progress"), Some("teammate-1"), None)
+            .expect("update child");
+
+        let launch = project
+            .launches()
+            .request(LaunchRequest {
+                agent_id: "teammate-1".to_string(),
+                role: "developer".to_string(),
+                kind: "worker".to_string(),
+                owner: Some("teammate-1".to_string()),
+                task_id: Some(child.id),
+                parent_task_id: Some(parent.id),
+                parent_agent_id: Some("teammate-parent".to_string()),
+                max_parallel: None,
+            })
+            .expect("request launch");
+        project
+            .launches()
+            .update_running(
+                &launch.launch_id,
+                999_999,
+                Some(1_700_000_000.0),
+                "fake window",
+            )
+            .expect("running launch");
+
+        stop_launch(&project, &launch.launch_id).expect("stop launch");
+
+        let child_after = project.tasks().get_record(child.id).expect("child after");
+        assert_eq!(child_after.status, "cancelled");
+        let parent_after = project.tasks().get_record(parent.id).expect("parent after");
+        assert_eq!(parent_after.status, "pending");
+        let parent_state = project
+            .agents()
+            .state("teammate-parent")
+            .expect("parent state")
+            .expect("parent state record");
+        assert_eq!(parent_state.status, "idle");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_script_prints_launch_metadata_before_exec() {
+        let record = LaunchRecord {
+            launch_id: "launch-123".to_string(),
+            agent_id: "concierge".to_string(),
+            role: "concierge".to_string(),
+            kind: "resident".to_string(),
+            owner: "concierge".to_string(),
+            status: "requested".to_string(),
+            pid: None,
+            process_started_at: None,
+            task_id: None,
+            parent_task_id: None,
+            parent_agent_id: Some("root".to_string()),
+            channel: "resident".to_string(),
+            target: "concierge-loop".to_string(),
+            window_title: String::new(),
+            error: None,
+            exit_code: None,
+            max_parallel: Some(1),
+            log_path: "D:\\code\\rustpilot\\rustpilot\\.team\\launch_logs\\launch-123.log"
+                .to_string(),
+            created_at: 1_700_000_000.0,
+            updated_at: 1_700_000_000.0,
+            started_at: None,
+            stopped_at: None,
+        };
+        let script = super::build_windows_launch_script(
+            "Rustpilot resident concierge",
+            &[
+                "D:\\code\\rustpilot\\rustpilot\\target\\debug\\rustpilot.exe".to_string(),
+                "resident-agent-run".to_string(),
+            ],
+            &record,
+        );
+        assert!(script.contains("echo [launch] id=launch-123 agent=concierge kind=resident"));
+        assert!(script.contains(
+            "echo [launch] log=D:\\code\\rustpilot\\rustpilot\\.team\\launch_logs\\launch-123.log"
+        ));
+        assert!(script.contains(
+            "D:\\code\\rustpilot\\rustpilot\\target\\debug\\rustpilot.exe resident-agent-run"
+        ));
+    }
+}
+
 pub fn run_resident_agent(
     repo_root: PathBuf,
     agent_id: String,
     role: String,
     max_parallel: usize,
 ) -> anyhow::Result<()> {
+    launch_log::emit(format!(
+        "[resident] agent={} role={} repo={} max_parallel={}",
+        agent_id,
+        role,
+        repo_root.display(),
+        max_parallel
+    ));
     let project = ProjectContext::new(repo_root.clone())?;
     let config = configured_agent(&project, &agent_id, role)?;
     run_resident_agent_with_config(repo_root, config, max_parallel)
@@ -151,6 +815,10 @@ fn run_resident_agent_with_config(
     config: ResidentAgentConfig,
     max_parallel: usize,
 ) -> anyhow::Result<()> {
+    launch_log::emit(format!(
+        "[resident] agent={} runtime_mode={} behavior_mode={} loop_ms={}",
+        config.agent_id, config.runtime_mode, config.behavior_mode, config.loop_interval_ms
+    ));
     let handler = resident_handler(&config.runtime_mode).ok_or_else(|| {
         anyhow::anyhow!("unknown resident runtime mode '{}'", config.runtime_mode)
     })?;
@@ -161,10 +829,106 @@ type ResidentHandler = fn(PathBuf, ResidentAgentConfig, usize) -> anyhow::Result
 
 fn resident_handler(runtime_mode: &str) -> Option<ResidentHandler> {
     match runtime_mode {
+        "launcher" => Some(run_launcher_loop),
         "scheduler" => Some(run_scheduler_loop),
         "critic" => Some(run_critic_loop),
         "mailbox" => Some(run_mailbox_loop),
         _ => None,
+    }
+}
+
+fn run_launcher_loop(
+    repo_root: PathBuf,
+    config: ResidentAgentConfig,
+    _max_parallel: usize,
+) -> anyhow::Result<()> {
+    let agent_id = config.agent_id.clone();
+    let mut last_log = Instant::now();
+    loop {
+        let loop_started = Instant::now();
+        let project = ProjectContext::new(repo_root.clone())?;
+        ensure_resident_profile(&project, &config)?;
+
+        let mut last_error = None::<String>;
+        let requested = project
+            .launches()
+            .list_with_status(&["requested", "running"])?;
+
+        for record in requested {
+            if record.status == "requested" {
+                match launch_record_process(&repo_root, &record) {
+                    Ok((pid, process_started_at, window_title)) => {
+                        let _ = project
+                            .launches()
+                            .update_running(
+                                &record.launch_id,
+                                pid,
+                                process_started_at,
+                                &window_title,
+                            );
+                    }
+                    Err(err) => {
+                        let text = err.to_string();
+                        let _ = project.launches().update_failed(&record.launch_id, &text);
+                        last_error = Some(text);
+                    }
+                }
+            } else if record.status == "running"
+                && let Some(pid) = record.pid
+                && !process_is_running(pid, record.process_started_at)
+            {
+                let _ = project.launches().mark_stopped(&record.launch_id, None);
+            }
+        }
+
+        let note = match last_error.as_deref() {
+            Some(error) => {
+                let _ = project.agents().set_state(
+                    &agent_id,
+                    "blocked",
+                    None,
+                    Some("resident"),
+                    Some("launcher-loop"),
+                    Some(error),
+                );
+                error
+            }
+            None => {
+                let _ = project.agents().set_state(
+                    &agent_id,
+                    "running",
+                    None,
+                    Some("resident"),
+                    Some("launcher-loop"),
+                    Some("launcher reconciling agent windows"),
+                );
+                "ok"
+            }
+        };
+        let _ = project.resident_runtime().update_loop_status(
+            &agent_id,
+            0,
+            None,
+            loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            last_error.as_deref(),
+        );
+        if note == "ok" {
+            if last_log.elapsed() >= Duration::from_secs(5) {
+                launch_log::emit(format!(
+                    "[resident] agent={} mode=launcher status=running",
+                    agent_id
+                ));
+                last_log = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(config.loop_interval_ms.max(200)));
+        } else {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=launcher status=blocked error={}",
+                agent_id, note
+            ));
+            last_log = Instant::now();
+            thread::sleep(Duration::from_millis(config.loop_interval_ms.max(600)));
+        }
     }
 }
 
@@ -175,6 +939,7 @@ fn run_scheduler_loop(
 ) -> anyhow::Result<()> {
     let agent_id = config.agent_id.clone();
     let mut runtime = TeamRuntime::start(repo_root.clone(), max_parallel.max(1));
+    let mut last_log = Instant::now();
     loop {
         let loop_started = Instant::now();
         let mut last_error = None::<String>;
@@ -210,6 +975,10 @@ fn run_scheduler_loop(
             }
         }
         if let Some(error) = last_error.as_deref() {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=scheduler status=blocked error={}",
+                agent_id, error
+            ));
             let project = ProjectContext::new(repo_root.clone())?;
             let _ = project.agents().set_state(
                 &agent_id,
@@ -227,6 +996,18 @@ fn run_scheduler_loop(
                 Some(error),
             );
         }
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            let snapshot = runtime.snapshot();
+            launch_log::emit(format!(
+                "[resident] agent={} mode=scheduler running={} launched={} completed={} failed={}",
+                agent_id,
+                snapshot.running,
+                snapshot.launched,
+                snapshot.completed,
+                snapshot.failed
+            ));
+            last_log = Instant::now();
+        }
         thread::sleep(Duration::from_millis(config.loop_interval_ms.max(200)));
         if runtime.snapshot().max_parallel == 0 {
             runtime.stop();
@@ -241,6 +1022,7 @@ fn run_critic_loop(
     _max_parallel: usize,
 ) -> anyhow::Result<()> {
     let agent_id = config.agent_id.clone();
+    let mut last_log = Instant::now();
     loop {
         let loop_started = Instant::now();
         let mut last_error = None::<String>;
@@ -263,6 +1045,10 @@ fn run_critic_loop(
             }
         }
         if let Some(error) = last_error.as_deref() {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=critic status=blocked error={}",
+                agent_id, error
+            ));
             let project = ProjectContext::new(repo_root.clone())?;
             let _ = project.agents().set_state(
                 &agent_id,
@@ -280,6 +1066,13 @@ fn run_critic_loop(
                 Some(error),
             );
         }
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=critic status=running",
+                agent_id
+            ));
+            last_log = Instant::now();
+        }
         thread::sleep(Duration::from_millis(config.loop_interval_ms.max(200)));
     }
 }
@@ -296,6 +1089,7 @@ fn run_mailbox_loop(
         .resident_runtime()
         .mailbox_cursor(&agent_id)?;
     let mut last_periodic = Instant::now();
+    let mut last_log = Instant::now();
     loop {
         let loop_started = Instant::now();
         let mut last_processed_msg_id = None::<String>;
@@ -393,6 +1187,10 @@ fn run_mailbox_loop(
             }
         }
         if let Some(error) = last_error.as_deref() {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=mailbox status=blocked error={}",
+                agent_id, error
+            ));
             let project = ProjectContext::new(repo_root.clone())?;
             let _ = project.agents().set_state(
                 &agent_id,
@@ -409,6 +1207,13 @@ fn run_mailbox_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 Some(error),
             );
+        }
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            launch_log::emit(format!(
+                "[resident] agent={} mode=mailbox cursor={} had_items={}",
+                agent_id, cursor, had_items
+            ));
+            last_log = Instant::now();
         }
         thread::sleep(Duration::from_millis(config.loop_interval_ms.max(200)));
     }

@@ -6,17 +6,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::agent::{AgentProgressReport, run_agent_loop, tool_definitions};
 use crate::config::LlmConfig;
 use crate::config::default_llm_user_agent;
+use crate::launch_log;
 use crate::openai_compat::Message;
 use crate::openai_compat::Tool;
 use crate::project_tools::{
-    EnergyMode, ProjectContext, TaskRecord, classify_energy, task_priority_rank,
+    EnergyMode, LaunchRecord, ProjectContext, TaskRecord, classify_energy, task_priority_rank,
 };
 use crate::prompt_manager::{adapt_worker_prompt_detailed, render_worker_system_prompt};
+use crate::resident_agents::{request_worker_launch, stop_launch, wait_for_launch_running};
 use crate::runtime_env::llm_timeout_secs_for_provider;
 use crate::terminal_session::{SessionState, TerminalCreateRequest, TerminalManager};
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,11 @@ enum WorkerHandle {
     Child { task_id: u64, child: Child },
     TmuxWindow { task_id: u64, window_name: String },
     TerminalSession { task_id: u64, session_id: String },
+    LaunchManaged {
+        task_id: u64,
+        owner: String,
+        launch_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,20 +265,52 @@ fn scheduler_loop(
                         finished.push(*task_id);
                     }
                 }
+                WorkerHandle::LaunchManaged { task_id, launch_id, .. } => {
+                    let status = &task_status;
+                    if status == "completed" {
+                        completed.fetch_add(1, Ordering::Relaxed);
+                        finished.push(*task_id);
+                    } else if status == "failed" {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        finished.push(*task_id);
+                    } else if matches!(status.as_str(), "blocked" | "paused" | "cancelled") {
+                        finished.push(*task_id);
+                    } else {
+                        match project.launches().get(launch_id) {
+                            Ok(Some(launch)) if launch.status == "running" => {}
+                            Ok(Some(launch))
+                                if matches!(launch.status.as_str(), "failed" | "stopped") =>
+                            {
+                                let _ =
+                                    project.tasks().update(*task_id, Some("failed"), None, None);
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                finished.push(*task_id);
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                eprintln!(
+                                    "team scheduler: read launch status failed for task {task_id}: {err}"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         for task_id in finished {
             if let Some(worker) = workers.remove(&task_id) {
+                let owner = worker_owner(&worker);
                 let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
                 let _ = project.agents().set_state(
-                    &worker_owner(&worker),
+                    &owner,
                     "idle",
                     None,
                     None,
                     None,
                     Some("任务结束"),
                 );
-                cleanup_worker(worker, &terminal_manager);
+                cleanup_worker(worker, &terminal_manager, &repo_root);
+                let _ = reconcile_parent_after_child_exit(&project, task_id);
             }
         }
 
@@ -376,18 +415,20 @@ fn scheduler_loop(
     }
 
     for (_, worker) in workers {
+        let owner = worker_owner(&worker);
         let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
         if let Ok(project) = ProjectContext::new(repo_root.clone()) {
             let _ = project.agents().set_state(
-                &worker_owner(&worker),
+                &owner,
                 "idle",
                 None,
                 None,
                 None,
                 Some("team 停止"),
             );
+            let _ = reconcile_parent_after_child_exit(&project, worker_task_id(&worker));
         }
-        cleanup_worker(worker, &terminal_manager);
+        cleanup_worker(worker, &terminal_manager, &repo_root);
     }
     if let Ok(project) = ProjectContext::new(repo_root) {
         let _ = project.agents().set_state(
@@ -409,6 +450,28 @@ fn spawn_teammate_process(
     spawn_mode: &SpawnMode,
     terminal_manager: &TerminalManager,
 ) -> anyhow::Result<WorkerHandle> {
+    if let Ok(project) = ProjectContext::new(repo_root.to_path_buf()) {
+        let parent_task_id = project
+            .tasks()
+            .get_record(task_id)
+            .ok()
+            .and_then(|task| task.parent_task_id);
+        let launch_id = request_worker_launch(
+            &project,
+            owner,
+            role_hint,
+            task_id,
+            parent_task_id,
+            Some("team-manager".to_string()),
+        )?;
+        let _ = wait_for_launch_running(&project, &launch_id, Duration::from_secs(8))?;
+        return Ok(WorkerHandle::LaunchManaged {
+            task_id,
+            owner: owner.to_string(),
+            launch_id,
+        });
+    }
+
     if matches!(spawn_mode, SpawnMode::Tmux) {
         return spawn_teammate_in_tmux(repo_root, task_id, owner, role_hint);
     }
@@ -510,6 +573,13 @@ pub async fn run_teammate_once(
     owner: String,
     role_hint: String,
 ) -> anyhow::Result<()> {
+    launch_log::emit(format!(
+        "[worker] agent={} task={} role_hint={} repo={}",
+        owner,
+        task_id,
+        role_hint,
+        repo_root.display()
+    ));
     dotenvy::from_path(repo_root.join(".env")).ok();
     let llm = LlmConfig::from_repo_root(&repo_root)?;
     let project = ProjectContext::new(repo_root.clone())?;
@@ -527,6 +597,10 @@ pub async fn run_teammate_once(
     if task.worktree.is_empty() {
         anyhow::bail!("任务 {} 没有绑定 worktree", task_id);
     }
+    launch_log::emit(format!(
+        "[worker] task={} priority={} worktree={} subject={}",
+        task_id, task.priority, task.worktree, task_subject
+    ));
 
     project
         .tasks()
@@ -582,6 +656,10 @@ pub async fn run_teammate_once(
     );
 
     if let Some(seconds) = detect_timer_seconds(&task_prompt) {
+        launch_log::emit(format!(
+            "[worker] task={} entering timer mode interval={}s",
+            task_id, seconds
+        ));
         let _ = project.mailbox().send_typed(
             &owner,
             "lead",
@@ -614,6 +692,7 @@ pub async fn run_teammate_once(
 
     let tools = tools_for_role_and_priority(&role_hint, &task.priority);
     let progress = crate::activity::new_activity_handle();
+    let heartbeat = WorkerHeartbeat::start(owner.clone(), task_id, progress.clone());
     let report = AgentProgressReport {
         from: owner.clone(),
         to: "lead".to_string(),
@@ -622,6 +701,7 @@ pub async fn run_teammate_once(
     };
     let mut clarification_cursor = 0usize;
     loop {
+        launch_log::emit(format!("[worker] task={} running model/tool loop", task_id));
         let result = run_agent_loop(
             &client,
             &llm,
@@ -636,6 +716,10 @@ pub async fn run_teammate_once(
         match result {
             Ok(()) => {
                 if let Some(question) = detect_user_clarification_need(&messages) {
+                    launch_log::emit(format!(
+                        "[worker] task={} blocked waiting for clarification",
+                        task_id
+                    ));
                     let _ = project.budgets().record_usage(&owner, 30);
                     let _ = project.reflections().append(
                         &owner,
@@ -683,6 +767,10 @@ pub async fn run_teammate_once(
                         &mut clarification_cursor,
                     )
                     .await?;
+                    launch_log::emit(format!(
+                        "[worker] task={} clarification received; resuming",
+                        task_id
+                    ));
                     let _ =
                         project
                             .tasks()
@@ -733,9 +821,12 @@ pub async fn run_teammate_once(
                     true,
                     None,
                 );
+                drop(heartbeat);
+                launch_log::emit(format!("[worker] task={} completed", task_id));
                 return Ok(());
             }
             Err(err) => {
+                launch_log::emit(format!("[worker] task={} loop error: {}", task_id, err));
                 let error_text = format!("{err:#}");
                 let adaptation = adapt_worker_prompt_detailed(&repo_root, &error_text)
                     .unwrap_or_else(|_| crate::prompt_manager::PromptAdaptation {
@@ -778,6 +869,10 @@ pub async fn run_teammate_once(
                     .await
                     .is_ok()
                     {
+                        launch_log::emit(format!(
+                            "[worker] task={} recovered after prompt adaptation",
+                            task_id
+                        ));
                         let _ = project.decisions().append(
                             &owner,
                             "task.recovered",
@@ -836,6 +931,8 @@ pub async fn run_teammate_once(
                     true,
                     None,
                 );
+                drop(heartbeat);
+                launch_log::emit(format!("[worker] task={} failed", task_id));
                 return Err(err);
             }
         }
@@ -962,20 +1059,65 @@ fn detect_timer_seconds(text: &str) -> Option<u64> {
 }
 
 fn run_timer_agent(task_id: u64, owner: &str, seconds: u64) {
-    println!(
+    launch_log::emit(format!(
+        "[worker] task={} timer started agent={} interval={}s",
+        task_id, owner, seconds
+    ));
+    launch_log::emit(format!(
         "[timer-agent] task#{} owner={} started, interval={}s",
         task_id, owner, seconds
-    );
+    ));
     loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        println!(
+        launch_log::emit(format!(
             "[timer-agent] task#{} owner={} ts_unix={} interval={}s",
             task_id, owner, now, seconds
-        );
+        ));
         thread::sleep(Duration::from_secs(seconds));
+    }
+}
+
+struct WorkerHeartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl WorkerHeartbeat {
+    fn start(owner: String, task_id: u64, progress: crate::activity::ActivityHandle) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            while !stop_flag.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_secs(5));
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                launch_log::emit(format!(
+                    "[worker-heartbeat] agent={} task={} alive_for={:.1}s\n{}",
+                    owner,
+                    task_id,
+                    started.elapsed().as_secs_f64(),
+                    crate::activity::render_activity(&progress)
+                ));
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for WorkerHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -1037,11 +1179,82 @@ fn load_task_status(project: &ProjectContext, task_id: u64) -> anyhow::Result<St
     Ok(task.status)
 }
 
+pub(crate) fn reconcile_parent_after_child_exit(
+    project: &ProjectContext,
+    child_task_id: u64,
+) -> anyhow::Result<()> {
+    let child = project.tasks().get_record(child_task_id)?;
+    let Some(parent_task_id) = child.parent_task_id else {
+        return Ok(());
+    };
+
+    let parent = project.tasks().get_record(parent_task_id)?;
+    if matches!(
+        parent.status.as_str(),
+        "completed" | "failed" | "cancelled" | "paused"
+    ) {
+        return Ok(());
+    }
+
+    let children: Vec<TaskRecord> = project
+        .tasks()
+        .list_records()?
+        .into_iter()
+        .filter(|task| task.parent_task_id == Some(parent_task_id))
+        .collect();
+    if children.is_empty() {
+        return Ok(());
+    }
+
+    let has_blocked = children.iter().any(|task| task.status == "blocked");
+    let has_failed = children.iter().any(|task| task.status == "failed");
+    let has_active = children.iter().any(|task| {
+        matches!(
+            task.status.as_str(),
+            "pending" | "in_progress" | "paused"
+        )
+    });
+
+    let next_status = if has_failed || has_blocked {
+        "blocked"
+    } else if has_active {
+        "in_progress"
+    } else {
+        "pending"
+    };
+    let _ = project
+        .tasks()
+        .update(parent_task_id, Some(next_status), None, None)?;
+
+    if !parent.owner.trim().is_empty() {
+        let existing_state = project.agents().state(&parent.owner)?;
+        let (agent_status, note) = if has_failed || has_blocked {
+            ("blocked", "子任务已结束，但存在失败或阻塞，等待父任务处理")
+        } else if has_active {
+            ("running", "子任务仍在运行，父任务保持调度中")
+        } else {
+            ("idle", "子任务已回收，等待父任务继续")
+        };
+        let channel = existing_state.as_ref().and_then(|state| state.channel.as_deref());
+        let target = existing_state.as_ref().and_then(|state| state.target.as_deref());
+        let _ = project.agents().set_state(
+            &parent.owner,
+            agent_status,
+            Some(parent_task_id),
+            channel,
+            target,
+            Some(note),
+        );
+    }
+
+    Ok(())
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn cleanup_worker(worker: WorkerHandle, terminal_manager: &TerminalManager) {
+fn cleanup_worker(worker: WorkerHandle, terminal_manager: &TerminalManager, repo_root: &Path) {
     match worker {
         WorkerHandle::Child { mut child, .. } => {
             let _ = child.kill();
@@ -1055,6 +1268,12 @@ fn cleanup_worker(worker: WorkerHandle, terminal_manager: &TerminalManager) {
         WorkerHandle::TerminalSession { session_id, .. } => {
             let _ = terminal_manager.kill(&session_id);
         }
+        WorkerHandle::LaunchManaged { launch_id, .. } => {
+            if let Ok(project) = ProjectContext::new(repo_root.to_path_buf())
+            {
+                let _ = stop_launch(&project, &launch_id);
+            }
+        }
     }
 }
 
@@ -1063,6 +1282,7 @@ fn worker_task_id(worker: &WorkerHandle) -> u64 {
         WorkerHandle::Child { task_id, .. } => *task_id,
         WorkerHandle::TmuxWindow { task_id, .. } => *task_id,
         WorkerHandle::TerminalSession { task_id, .. } => *task_id,
+        WorkerHandle::LaunchManaged { task_id, .. } => *task_id,
     }
 }
 
@@ -1099,6 +1319,34 @@ fn register_worker_endpoint(
             target: session_id.clone(),
             status: "running".to_string(),
         },
+        WorkerHandle::LaunchManaged {
+            task_id,
+            owner,
+            launch_id,
+        } => {
+            let launch = ProjectContext::new(repo_root.to_path_buf())
+                .ok()
+                .and_then(|project| project.launches().get(launch_id).ok().flatten());
+            WorkerEndpoint {
+                task_id: *task_id,
+                owner: owner.clone(),
+                channel: launch
+                    .as_ref()
+                    .map(|item| item.channel.clone())
+                    .unwrap_or_else(|| "window".to_string()),
+                target: launch
+                    .as_ref()
+                    .map(|item| {
+                        if item.target.is_empty() {
+                            format!("launch:{launch_id}")
+                        } else {
+                            item.target.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("launch:{launch_id}")),
+                status: "running".to_string(),
+            }
+        }
     };
     let mut items = load_worker_endpoints(repo_root)?;
     upsert_worker_endpoint(&mut items, endpoint);
@@ -1156,11 +1404,54 @@ fn register_worker_agent(
             Some(session_id),
             Some("worker 运行中"),
         )?,
+        WorkerHandle::LaunchManaged {
+            task_id,
+            launch_id,
+            ..
+        } => {
+            let launch = project.launches().get(launch_id)?.unwrap_or(LaunchRecord {
+                launch_id: launch_id.clone(),
+                agent_id: owner.to_string(),
+                role: role_hint.to_string(),
+                kind: "worker".to_string(),
+                owner: owner.to_string(),
+                task_id: Some(*task_id),
+                parent_task_id: None,
+                parent_agent_id: None,
+                max_parallel: None,
+                status: "running".to_string(),
+                pid: None,
+                process_started_at: None,
+                window_title: String::new(),
+                log_path: String::new(),
+                channel: "window".to_string(),
+                target: format!("launch:{launch_id}"),
+                error: None,
+                exit_code: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                started_at: None,
+                stopped_at: None,
+            });
+            let target = if launch.target.is_empty() {
+                format!("launch:{launch_id}")
+            } else {
+                launch.target.clone()
+            };
+            project.agents().set_state(
+                owner,
+                "running",
+                Some(*task_id),
+                Some(&launch.channel),
+                Some(&target),
+                Some("worker 窗口运行中"),
+            )?
+        }
     }
     Ok(())
 }
 
-fn mark_worker_stopped(repo_root: &Path, task_id: u64) -> anyhow::Result<()> {
+pub(crate) fn mark_worker_stopped(repo_root: &Path, task_id: u64) -> anyhow::Result<()> {
     let mut items = load_worker_endpoints(repo_root)?;
     for item in &mut items {
         if item.task_id == task_id {
@@ -1260,6 +1551,7 @@ fn worker_owner(worker: &WorkerHandle) -> String {
         WorkerHandle::Child { task_id, .. } => format!("teammate-{task_id}"),
         WorkerHandle::TmuxWindow { task_id, .. } => format!("teammate-{task_id}"),
         WorkerHandle::TerminalSession { task_id, .. } => format!("teammate-{task_id}"),
+        WorkerHandle::LaunchManaged { owner, .. } => owner.clone(),
     }
 }
 
@@ -1792,5 +2084,181 @@ fn maybe_reflect_energy(
             );
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_parent_after_child_exit;
+    use crate::project_tools::{ProjectContext, TaskCreateOptions, TaskRecord};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = format!("{}_{}_{}", name, std::process::id(), now_nanos());
+            let path = std::env::temp_dir().join("tests").join(unique);
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn now_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    }
+
+    fn project_context(repo_root: &Path) -> ProjectContext {
+        ProjectContext::new(repo_root.to_path_buf()).expect("project context")
+    }
+
+    #[test]
+    fn reconcile_parent_after_child_completion_sets_parent_pending_and_idle() {
+        let temp = TestDir::new("parent_reconcile_completed");
+        let project = project_context(temp.path());
+
+        let parent_raw = project
+            .tasks()
+            .create_detailed(
+                "parent task",
+                "coordinate child work",
+                TaskCreateOptions::default(),
+            )
+            .expect("create parent");
+        let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
+        project
+            .tasks()
+            .update(parent.id, Some("in_progress"), Some("root-node"), None)
+            .expect("update parent");
+        project
+            .agents()
+            .set_state(
+                "root-node",
+                "running",
+                Some(parent.id),
+                Some("scheduler"),
+                Some("root-loop"),
+                Some("waiting"),
+            )
+            .expect("set parent state");
+
+        let child_raw = project
+            .tasks()
+            .create_detailed(
+                "child task",
+                "do work",
+                TaskCreateOptions {
+                    parent_task_id: Some(parent.id),
+                    depth: Some(1),
+                    ..TaskCreateOptions::default()
+                },
+            )
+            .expect("create child");
+        let child: TaskRecord = serde_json::from_str(&child_raw).expect("parse child");
+        project
+            .tasks()
+            .update(child.id, Some("completed"), Some("teammate-1"), None)
+            .expect("complete child");
+
+        reconcile_parent_after_child_exit(&project, child.id).expect("reconcile");
+
+        let parent_after = project.tasks().get_record(parent.id).expect("parent after");
+        assert_eq!(parent_after.status, "pending");
+
+        let parent_state = project
+            .agents()
+            .state("root-node")
+            .expect("agent state")
+            .expect("parent state exists");
+        assert_eq!(parent_state.status, "idle");
+        assert_eq!(parent_state.current_task_id, Some(parent.id));
+        assert_eq!(parent_state.channel.as_deref(), Some("scheduler"));
+        assert_eq!(parent_state.target.as_deref(), Some("root-loop"));
+        assert_eq!(
+            parent_state.note.as_deref(),
+            Some("子任务已回收，等待父任务继续")
+        );
+    }
+
+    #[test]
+    fn reconcile_parent_after_child_failure_sets_parent_blocked() {
+        let temp = TestDir::new("parent_reconcile_failed");
+        let project = project_context(temp.path());
+
+        let parent_raw = project
+            .tasks()
+            .create_detailed(
+                "parent task",
+                "coordinate child work",
+                TaskCreateOptions::default(),
+            )
+            .expect("create parent");
+        let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
+        project
+            .tasks()
+            .update(parent.id, Some("in_progress"), Some("root-node"), None)
+            .expect("update parent");
+        project
+            .agents()
+            .set_state(
+                "root-node",
+                "running",
+                Some(parent.id),
+                Some("scheduler"),
+                Some("root-loop"),
+                Some("waiting"),
+            )
+            .expect("set parent state");
+
+        let child_raw = project
+            .tasks()
+            .create_detailed(
+                "child task",
+                "do work",
+                TaskCreateOptions {
+                    parent_task_id: Some(parent.id),
+                    depth: Some(1),
+                    ..TaskCreateOptions::default()
+                },
+            )
+            .expect("create child");
+        let child: TaskRecord = serde_json::from_str(&child_raw).expect("parse child");
+        project
+            .tasks()
+            .update(child.id, Some("failed"), Some("teammate-1"), None)
+            .expect("fail child");
+
+        reconcile_parent_after_child_exit(&project, child.id).expect("reconcile");
+
+        let parent_after = project.tasks().get_record(parent.id).expect("parent after");
+        assert_eq!(parent_after.status, "blocked");
+
+        let parent_state = project
+            .agents()
+            .state("root-node")
+            .expect("agent state")
+            .expect("parent state exists");
+        assert_eq!(parent_state.status, "blocked");
+        assert_eq!(
+            parent_state.note.as_deref(),
+            Some("子任务已结束，但存在失败或阻塞，等待父任务处理")
+        );
     }
 }

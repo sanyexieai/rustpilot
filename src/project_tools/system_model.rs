@@ -12,6 +12,7 @@ pub struct SystemModel {
     pub alerts: Vec<SystemAlert>,
     pub protocols: Vec<SystemProtocol>,
     pub residents: Vec<SystemResident>,
+    pub launches: Vec<SystemLaunch>,
     pub recent_prompt_changes: Vec<SystemPromptChange>,
     pub tasks: Vec<SystemTask>,
     pub proposals: Vec<SystemProposal>,
@@ -90,6 +91,26 @@ pub struct SystemResident {
     pub prompt_strategy: String,
     pub prompt_trigger: String,
     pub prompt_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemLaunch {
+    pub launch_id: String,
+    pub agent_id: String,
+    pub owner: String,
+    pub role: String,
+    pub kind: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub process_started_at: Option<f64>,
+    pub task_id: Option<u64>,
+    pub parent_task_id: Option<u64>,
+    pub parent_agent_id: Option<String>,
+    pub channel: String,
+    pub target: String,
+    pub window_title: String,
+    pub log_path: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +299,32 @@ impl SystemModelManager {
             })
             .collect::<Vec<_>>();
 
+        let launches = project
+            .launches()
+            .list()?
+            .into_iter()
+            .rev()
+            .take(64)
+            .map(|item| SystemLaunch {
+                launch_id: item.launch_id,
+                agent_id: item.agent_id,
+                owner: item.owner,
+                role: item.role,
+                kind: item.kind,
+                status: item.status,
+                pid: item.pid,
+                process_started_at: item.process_started_at,
+                task_id: item.task_id,
+                parent_task_id: item.parent_task_id,
+                parent_agent_id: item.parent_agent_id,
+                channel: item.channel,
+                target: item.target,
+                window_title: item.window_title,
+                log_path: item.log_path,
+                error: item.error.unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+
         let task_feed = tasks
             .iter()
             .rev()
@@ -444,11 +491,48 @@ impl SystemModelManager {
                             field_type: "array".to_string(),
                             description: "recent governance decisions".to_string(),
                         },
+                        SystemProtocolField {
+                            name: "chat_ui.main_friend".to_string(),
+                            required: true,
+                            field_type: "object".to_string(),
+                            description: "main direct conversation contract for the primary actor"
+                                .to_string(),
+                        },
+                        SystemProtocolField {
+                            name: "chat_ui.group_chat".to_string(),
+                            required: true,
+                            field_type: "object".to_string(),
+                            description: "agent team group conversation contract".to_string(),
+                        },
+                        SystemProtocolField {
+                            name: "chat_ui.agent_details".to_string(),
+                            required: true,
+                            field_type: "object".to_string(),
+                            description: "per-agent transcript and runtime detail map".to_string(),
+                        },
+                        SystemProtocolField {
+                            name: "chat_ui.launches".to_string(),
+                            required: false,
+                            field_type: "array".to_string(),
+                            description: "launch registry backed process and window metadata"
+                                .to_string(),
+                        },
+                        SystemProtocolField {
+                            name: "chat_ui.process_tree".to_string(),
+                            required: true,
+                            field_type: "object".to_string(),
+                            description: "hierarchical process and task tree".to_string(),
+                        },
                     ],
                     supported_sections: vec![
                         "metrics".to_string(),
                         "alerts".to_string(),
                         "residents".to_string(),
+                        "main_chat".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
                         "tasks".to_string(),
                         "proposals".to_string(),
                         "decisions".to_string(),
@@ -457,6 +541,11 @@ impl SystemModelManager {
                         "summary".to_string(),
                         "alerts".to_string(),
                         "residents".to_string(),
+                        "main_friend".to_string(),
+                        "group_chat".to_string(),
+                        "agent_details".to_string(),
+                        "process_tree".to_string(),
+                        "launches".to_string(),
                         "tasks".to_string(),
                         "proposals".to_string(),
                         "decisions".to_string(),
@@ -520,6 +609,7 @@ impl SystemModelManager {
                 },
             ],
             residents,
+            launches,
             recent_prompt_changes: prompt_change_feed,
             tasks: task_feed,
             proposals: proposal_feed,
