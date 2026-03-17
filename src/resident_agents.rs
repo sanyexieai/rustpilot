@@ -1750,6 +1750,24 @@ fn run_critic_pass(project: &ProjectContext, agent_id: &str) -> anyhow::Result<(
             continue;
         }
 
+        // 同名任务已多次失败，停止重复转换，避免无限循环
+        const MAX_SAME_SUBJECT_FAILURES: usize = 2;
+        if project.tasks().failed_subject_count(&subject)? >= MAX_SAME_SUBJECT_FAILURES {
+            let _ = project.proposals().update_status(proposal.id, "rejected");
+            let _ = project.decisions().append(
+                agent_id,
+                "proposal.rejected_loop",
+                proposal.task_id,
+                Some(proposal.id),
+                &format!("rejected looping proposal {}", proposal.id),
+                &format!(
+                    "task '{}' has already failed {} times, stopping retry loop",
+                    subject, MAX_SAME_SUBJECT_FAILURES
+                ),
+            );
+            continue;
+        }
+
         let description = format!(
             "[PROPOSAL #{}][from={}][trigger={}][priority={}][score={}]\n{}\n\nIssues:\n- {}\n\nSuggested action:\n{}\n\nExecution notes:\n{}",
             proposal.id,

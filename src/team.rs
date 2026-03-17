@@ -972,15 +972,18 @@ pub async fn run_teammate_once(
                     Some("分析失败原因并决定是否重试"),
                     true,
                 );
-                let _ = project.proposals().create(
-                    &owner,
-                    "task.failed",
-                    Some(task_id),
-                    "分析失败原因并形成修复任务",
-                    "worker 执行任务失败。",
-                    &["任务执行失败", "需要检查错误原因"],
-                    Some("分析失败原因并决定是否重试"),
-                );
+                // proposal 类型的任务失败时不再递归创建恢复 proposal，避免无限循环
+                if !task_subject.starts_with("proposal: ") {
+                    let _ = project.proposals().create(
+                        &owner,
+                        "task.failed",
+                        Some(task_id),
+                        "分析失败原因并形成修复任务",
+                        "worker 执行任务失败。",
+                        &["任务执行失败", "需要检查错误原因"],
+                        Some("分析失败原因并决定是否重试"),
+                    );
+                }
                 maybe_reflect_energy(
                     &project,
                     &owner,

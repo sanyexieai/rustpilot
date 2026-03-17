@@ -357,6 +357,21 @@ impl TaskManager {
         })
     }
 
+    /// 统计同名任务的失败次数，用于检测重复失败的循环
+    pub fn failed_subject_count(&self, subject: &str) -> anyhow::Result<usize> {
+        let subject = subject.trim();
+        if subject.is_empty() {
+            return Ok(0);
+        }
+        self.with_lock(|| {
+            Ok(self
+                .load_all()?
+                .into_iter()
+                .filter(|task| task.subject == subject && task.status == "failed")
+                .count())
+        })
+    }
+
     fn path(&self, task_id: u64) -> PathBuf {
         self.dir.join(format!("task_{}.json", task_id))
     }
