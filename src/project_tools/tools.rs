@@ -682,6 +682,7 @@ pub fn handle_project_tool_call(
         "worktree_create" => {
             let args: WorktreeCreateArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid worktree_create arguments")?;
+            reject_child_worktree_create(tasks)?;
             worktrees.create(
                 &args.name,
                 args.task_id,
@@ -726,6 +727,27 @@ pub fn handle_project_tool_call(
 
 fn current_agent_id() -> String {
     std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
+}
+
+fn reject_child_worktree_create(tasks: &super::TaskManager) -> anyhow::Result<()> {
+    let Some(task_id) = std::env::var("RUSTPILOT_TASK_ID")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return Ok(()); // root process — allowed
+    };
+    let Ok(task) = tasks.get_record(task_id) else {
+        return Ok(()); // can't read task record — allow
+    };
+    if let Some(parent_id) = task.parent_task_id {
+        anyhow::bail!(
+            "worktree_create refused: only top-level tasks may create worktrees. \
+             This is a child task (parent task: #{parent_id}). \
+             Each task gets at most one worktree, created by the top-level task. \
+             Use the worktree already assigned to your task, or report completion back to the parent."
+        );
+    }
+    Ok(())
 }
 
 fn current_task_hierarchy(tasks: &super::TaskManager) -> TaskCreateOptions {

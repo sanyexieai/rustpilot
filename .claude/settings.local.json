@@ -5,7 +5,13 @@
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
       "Bash(xargs grep:*)",
-      "Bash(grep -n \"pub fn handle_project_tool_call\" /d/code/rustpilot/rustpilot/src/project_tools/*.rs)"
+      "Bash(grep -n \"pub fn handle_project_tool_call\" /d/code/rustpilot/rustpilot/src/project_tools/*.rs)",
+      "Bash(cargo run:*)",
+      "Bash(python -c \"import sys,json; [print\\(f''''#{d[id]} [{d[status]}] {d[subject]}''''\\) for line in sys.stdin for d in [json.loads\\(line\\)] if d.get\\(''''status''''\\) not in [''''done'''',''''cancelled'''']]\")",
+      "Bash(for f:*)",
+      "Bash(do python:*)",
+      "Bash(done)",
+      "Bash(do python3:*)"
     ]
   }
 }

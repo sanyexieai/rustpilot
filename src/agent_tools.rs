@@ -338,29 +338,52 @@ fn reject_parent_file_write(tool: &str, path: &str) -> anyhow::Result<()> {
 
 fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
     let normalized = path.trim().replace('\\', "/");
-    // Allow writing test cases and integration scripts inside an existing skill's tests/ dir.
-    // Block everything else directly under skills/ — SKILL.md must go through skill_create.
     let in_skills = normalized.contains("/skills/") || normalized.starts_with("skills/");
     if !in_skills {
         return Ok(());
     }
-    // The only allowed direct writes inside skills/ are the integration test script
-    // and the smoke test JSON, but only if the skill directory already exists
-    // (i.e. was already created via skill_create).
-    let allowed = normalized.ends_with("/tests/integration.py")
-        || normalized.ends_with("/tests/smoke.json")
-        || normalized.contains("/tests/");
-    if allowed {
-        return Ok(());
+
+    // Extract the skill name (first path segment inside skills/)
+    let after_skills = if let Some(idx) = normalized.find("/skills/") {
+        &normalized[idx + "/skills/".len()..]
+    } else {
+        &normalized["skills/".len()..]
+    };
+    let skill_name = after_skills.split('/').next().unwrap_or("");
+
+    // Always block direct creation of SKILL.md — must use skill_create
+    let file_name = normalized.split('/').last().unwrap_or("");
+    if file_name == "SKILL.md" {
+        anyhow::bail!(
+            "{} refused: cannot write SKILL.md directly — path: {}.\n\
+             Skills MUST be created via the `skill_create` tool, which:\n\
+             1. Writes SKILL.md with correct frontmatter\n\
+             2. Generates tests/smoke.json with LLM test assertions\n\
+             3. Generates tests/integration.py template\n\
+             4. Immediately runs static + LLM tests and reports results",
+            tool,
+            path
+        );
     }
+
+    // If the skill directory already exists (SKILL.md is present), allow any other file writes.
+    // This lets agents add helper scripts, config files, etc. after skill_create has run.
+    if !skill_name.is_empty() {
+        let repo_root = std::env::var("RUSTPILOT_REPO_ROOT")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let skill_md = repo_root.join("skills").join(skill_name).join("SKILL.md");
+        if skill_md.exists() {
+            return Ok(()); // skill was created via skill_create; additional files are allowed
+        }
+    }
+
     anyhow::bail!(
         "{} refused: cannot write directly to skills/ — path: {}.\n\
-         Skills MUST be created via the `skill_create` tool, which:\n\
-         1. Writes SKILL.md with correct frontmatter\n\
-         2. Generates tests/smoke.json with LLM test assertions\n\
-         3. Generates tests/integration.py template\n\
-         4. Immediately runs static + LLM tests and reports results\n\
-         After creation, use `skill_validate` to run all tests including integration.",
+         The skill directory does not exist yet. Use `skill_create` first to initialise the skill \
+         (writes SKILL.md, generates test templates, and runs LLM tests). \
+         After that you may add helper scripts or other files freely.",
         tool,
         path
     )
