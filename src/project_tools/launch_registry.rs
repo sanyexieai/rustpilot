@@ -264,8 +264,15 @@ impl FileLock {
                 .open(&lock_path)
             {
                 Ok(_) => return Ok(Self { path: lock_path }),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if is_stale_lock(&lock_path, stale_after) {
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::AlreadyExists
+                        || err.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    // On Windows, a locked file can return ACCESS_DENIED (os error 5)
+                    // instead of AlreadyExists — treat both as "lock is busy".
+                    if err.kind() == std::io::ErrorKind::AlreadyExists
+                        && is_stale_lock(&lock_path, stale_after)
+                    {
                         let _ = fs::remove_file(&lock_path);
                         continue;
                     }

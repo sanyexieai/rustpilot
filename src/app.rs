@@ -9,7 +9,7 @@ use crate::config::{LlmConfig, default_llm_user_agent};
 use crate::openai_compat::Message;
 use crate::project_tools::ProjectContext;
 use crate::prompt_manager::render_root_system_prompt;
-use crate::resident_agents::{AgentSupervisor, run_resident_agent};
+use crate::resident_agents::{AgentSupervisor, kill_all_running_launches, run_resident_agent};
 use crate::runtime_env::{
     detect_repo_root, ensure_env_guidance, llm_timeout_secs_for_provider,
     prompt_and_store_llm_api_key,
@@ -21,7 +21,7 @@ use crate::wire::{WireEnvelope, WireEvent, WireFrame, WireRequest, WireResponse}
 use crate::wire_exec::{WireRuntime, execute_wire_request};
 use crossterm::cursor::MoveToColumn;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::Print;
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 use std::io::{self, BufRead, BufReader, BufWriter, Stdout, Write};
@@ -36,12 +36,28 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const MAILBOX_POLL_INTERVAL: Duration = Duration::from_millis(400);
 const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
 
+struct ColoredLine {
+    text: String,
+    color: Option<Color>,
+}
+
+impl ColoredLine {
+    fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), color: None }
+    }
+
+    fn colored(text: impl Into<String>, color: Color) -> Self {
+        Self { text: text.into(), color: Some(color) }
+    }
+}
+
 struct InteractiveConsole {
     stdout: Stdout,
     prompt: String,
     buffer: String,
     raw_enabled: bool,
     dirty: bool,
+    ctrl_d_count: u8,
 }
 
 impl InteractiveConsole {
@@ -53,6 +69,7 @@ impl InteractiveConsole {
             buffer: String::new(),
             raw_enabled: true,
             dirty: true,
+            ctrl_d_count: 0,
         })
     }
 
@@ -78,27 +95,63 @@ impl InteractiveConsole {
         Ok(())
     }
 
-    fn print_lines(&mut self, lines: &[String]) -> anyhow::Result<()> {
+    fn print_lines(&mut self, lines: &[ColoredLine]) -> anyhow::Result<()> {
         if lines.is_empty() {
             return Ok(());
         }
         queue!(self.stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
         for line in lines {
-            queue!(self.stdout, Print(line), Print("\r\n"))?;
+            if let Some(color) = line.color {
+                queue!(
+                    self.stdout,
+                    SetForegroundColor(color),
+                    Print(&line.text),
+                    ResetColor,
+                    Print("\r\n")
+                )?;
+            } else {
+                queue!(self.stdout, Print(&line.text), Print("\r\n"))?;
+            }
         }
         self.dirty = true;
         self.render_prompt()
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<String>> {
+        let is_ctrl_d = matches!(key.code, KeyCode::Char('d'))
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if !is_ctrl_d {
+            self.ctrl_d_count = 0;
+        }
+
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 anyhow::bail!("interrupted");
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(Some(String::new()));
+                self.ctrl_d_count += 1;
+                if self.ctrl_d_count >= 2 {
+                    return Ok(Some(String::new())); // 退出信号
+                }
+                queue!(
+                    self.stdout,
+                    MoveToColumn(0),
+                    Clear(ClearType::CurrentLine),
+                    Print("(再按一次 Ctrl+D 退出)"),
+                    Print("\r\n")
+                )?;
+                self.stdout.flush()?;
+                self.dirty = true;
+                self.render_prompt()?;
+                return Ok(None);
             }
             KeyCode::Enter => {
+                if self.buffer.is_empty() {
+                    // 空回车不退出，仅重绘提示符
+                    self.render_prompt()?;
+                    return Ok(None);
+                }
                 let line = self.buffer.clone();
                 queue!(
                     self.stdout,
@@ -256,8 +309,11 @@ async fn run_root_console() -> anyhow::Result<()> {
     let mut console = InteractiveConsole::new("root".to_string())?;
     console.render_prompt()?;
 
+    // 优雅退出的截止时间：发出 /exit 后等待 runtime 回应，超时则强制退出
+    let mut shutdown_deadline: Option<Instant> = None;
+
     loop {
-        let mut lines = Vec::new();
+        let mut lines: Vec<ColoredLine> = Vec::new();
         let mut should_exit = false;
         while let Ok(frame) = frame_rx.try_recv() {
             match frame {
@@ -267,7 +323,10 @@ async fn run_root_console() -> anyhow::Result<()> {
                         should_exit = true;
                     }
                 }
-                Err(err) => lines.push(format!("error: runtime stream {}", err)),
+                Err(err) => lines.push(ColoredLine::colored(
+                    format!("error: runtime stream {}", err),
+                    Color::Red,
+                )),
             }
         }
         console.print_lines(&lines)?;
@@ -276,6 +335,10 @@ async fn run_root_console() -> anyhow::Result<()> {
             break;
         }
         if child.try_wait()?.is_some() {
+            break;
+        }
+        // 优雅退出超时兜底：runtime 5 秒内没回应则强制退出
+        if shutdown_deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
 
@@ -292,7 +355,16 @@ async fn run_root_console() -> anyhow::Result<()> {
             continue;
         };
         if input.is_empty() {
-            break;
+            // 发送优雅退出请求，让 runtime 先停止所有子节点再退出
+            // 注意：CLI 解析器识别 "exit"，不识别 "/exit"
+            let _ = write_wire_request(
+                &mut child_stdin,
+                &WireRequest::ConsoleInput {
+                    input: "exit".to_string(),
+                },
+            );
+            shutdown_deadline = Some(Instant::now() + Duration::from_secs(5));
+            continue;
         }
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -448,16 +520,25 @@ async fn run_root_runtime(repo_root: std::path::PathBuf, parent_pid: Option<u32>
             }
         };
 
+        if matches!(outcome.directive, LoopDirective::Exit) {
+            // 先清理所有子进程，再发 ack，确保 console 收到 ack 时清理已完成
+            supervisor.stop_all();
+            kill_all_running_launches(&project);
+            for frame in &outcome.frames {
+                emit_wire_frame(&mut stdout, frame)?;
+            }
+            stdout.flush()?;
+            break;
+        }
         for frame in &outcome.frames {
             emit_wire_frame(&mut stdout, frame)?;
         }
         stdout.flush()?;
-        if matches!(outcome.directive, LoopDirective::Exit) {
-            break;
-        }
     }
 
+    // parent_exit_rx 触发的退出路径（root console 被强制关闭）也要清理
     supervisor.stop_all();
+    kill_all_running_launches(&project);
     Ok(())
 }
 
@@ -609,6 +690,7 @@ fn spawn_root_runtime_process(
                                 WireEvent::MessageDelta {
                                     role: "system".to_string(),
                                     content: trimmed.to_string(),
+                                    from: None,
                                 },
                             ),
                         }),
@@ -698,8 +780,11 @@ fn emit_wire_frame(stdout: &mut BufWriter<io::Stdout>, frame: &WireFrame) -> any
     Ok(())
 }
 
-fn emit_mailbox_lines(stdout: &mut BufWriter<io::Stdout>, lines: &[String]) -> anyhow::Result<()> {
-    for line in lines {
+fn emit_mailbox_lines(
+    stdout: &mut BufWriter<io::Stdout>,
+    lines: &[(String, Option<String>)],
+) -> anyhow::Result<()> {
+    for (content, from) in lines {
         emit_wire_frame(
             stdout,
             &WireFrame::Event {
@@ -707,7 +792,8 @@ fn emit_mailbox_lines(stdout: &mut BufWriter<io::Stdout>, lines: &[String]) -> a
                     "event",
                     WireEvent::MessageDelta {
                         role: "system".to_string(),
-                        content: line.clone(),
+                        content: content.clone(),
+                        from: from.clone(),
                     },
                 ),
             },
@@ -717,32 +803,68 @@ fn emit_mailbox_lines(stdout: &mut BufWriter<io::Stdout>, lines: &[String]) -> a
     Ok(())
 }
 
-fn apply_frame_to_console(frame: &WireFrame, console: &mut InteractiveConsole, lines: &mut Vec<String>) {
+/// 将 agent 名稳定映射到一个终端颜色，相同名字总返回相同颜色。
+fn agent_color(agent: &str) -> Color {
+    const PALETTE: &[Color] = &[
+        Color::Green,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Cyan,
+        Color::DarkGreen,
+        Color::DarkYellow,
+        Color::DarkMagenta,
+        Color::DarkCyan,
+    ];
+    let hash: usize = agent.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    PALETTE[hash % PALETTE.len()]
+}
+
+fn apply_frame_to_console(frame: &WireFrame, console: &mut InteractiveConsole, lines: &mut Vec<ColoredLine>) {
     match frame {
         WireFrame::Response { response } => match &response.payload {
-            WireResponse::Ack { message } => lines.push(message.clone()),
-            WireResponse::Error { message } => lines.push(format!("error: {}", message)),
-            other => lines.push(serde_json::to_string(other).unwrap_or_default()),
+            WireResponse::Ack { message } => lines.push(ColoredLine::plain(message.clone())),
+            WireResponse::Error { message } => {
+                lines.push(ColoredLine::colored(format!("error: {}", message), Color::Red));
+            }
+            other => lines.push(ColoredLine::plain(serde_json::to_string(other).unwrap_or_default())),
         },
         WireFrame::Event { event } => match &event.payload {
-            WireEvent::Error { message } => lines.push(format!("error: {}", message)),
-            WireEvent::SessionUpdated {
-                focus,
-                status,
-                abortable,
-            } => {
+            WireEvent::Error { message } => {
+                lines.push(ColoredLine::colored(format!("error: {}", message), Color::Red));
+            }
+            WireEvent::SessionUpdated { focus, status, abortable } => {
                 console.set_prompt(focus.clone());
-                if let Some(abortable) = abortable {
-                    lines.push(format!(
-                        "[session] focus={} status={} abortable={}",
-                        focus, status, abortable
-                    ));
+                let text = if let Some(abortable) = abortable {
+                    format!("[session] focus={} status={} abortable={}", focus, status, abortable)
                 } else {
-                    lines.push(format!("[session] focus={} status={}", focus, status));
+                    format!("[session] focus={} status={}", focus, status)
+                };
+                lines.push(ColoredLine::colored(text, Color::Cyan));
+            }
+            WireEvent::ToolStarted { name } => {
+                lines.push(ColoredLine::colored(format!("[tool] {} ...", name), Color::Magenta));
+            }
+            WireEvent::ToolFinished { name, ok } => {
+                let color = if *ok { Color::Magenta } else { Color::Red };
+                let mark = if *ok { "✓" } else { "✗" };
+                lines.push(ColoredLine::colored(format!("[tool] {} {}", mark, name), color));
+            }
+            WireEvent::TaskUpdated { task_id, status, summary } => {
+                let id_str = task_id.map(|id| format!("#{} ", id)).unwrap_or_default();
+                lines.push(ColoredLine::colored(
+                    format!("[task] {}[{}] {}", id_str, status, summary),
+                    Color::Blue,
+                ));
+            }
+            WireEvent::MessageDelta { role, content, from } => {
+                if role == "system" {
+                    // 按发送方 agent 名字稳定映射到颜色，相同团队始终同色
+                    let color = from.as_deref().map(agent_color).unwrap_or(Color::Yellow);
+                    lines.push(ColoredLine::colored(content.clone(), color));
+                } else {
+                    lines.push(ColoredLine::plain(content.clone()));
                 }
             }
-            WireEvent::MessageDelta { content, .. } => lines.push(content.clone()),
-            other => lines.push(serde_json::to_string(other).unwrap_or_default()),
         },
     }
 }

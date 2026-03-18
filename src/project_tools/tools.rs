@@ -97,15 +97,46 @@ pub fn project_tool_definitions() -> Vec<Tool> {
         ),
         tool(
             "skill_create",
-            "Create a prompt skill under skills/<name>/SKILL.md using the project's canonical format.",
+            "Create a prompt skill under skills/<name>/SKILL.md. After creation, a live LLM test is run: the skill is used as system prompt and `test_prompt` is sent as the user message; the response must contain all strings in `expect_response_contains`.",
             json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
                     "description": { "type": "string" },
-                    "body": { "type": "string" }
+                    "body": { "type": "string" },
+                    "test_prompt": {
+                        "type": "string",
+                        "description": "A representative user request that exercises the skill's core capability."
+                    },
+                    "expect_response_contains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Keywords or phrases that must appear in the LLM response to test_prompt."
+                    }
                 },
-                "required": ["name", "description", "body"]
+                "required": ["name", "description", "body", "test_prompt", "expect_response_contains"]
+            }),
+        ),
+        tool(
+            "skill_validate",
+            "Run all tests for an existing skill: (1) static checks on SKILL.md structure, (2) LLM functional tests using the skill as system prompt, (3) integration test (tests/integration.py) which can run real browser automation and pause for human interaction. Integration tests run in the background — you will be notified via mail when human action is needed or when complete.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Skill name to validate." }
+                },
+                "required": ["name"]
+            }),
+        ),
+        tool(
+            "skill_test_signal",
+            "Resume a paused integration test that is waiting for human action (e.g. QR code scan). Call this after completing the required action.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Skill name whose integration test is waiting." }
+                },
+                "required": ["name"]
             }),
         ),
         tool(
@@ -372,8 +403,194 @@ pub fn handle_project_tool_call(
         "skill_create" => {
             let args: SkillCreateArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid skill_create arguments")?;
-            let created = create_prompt_skill(&args.name, &args.description, &args.body)?;
-            format!("skill created: {}", created.join("SKILL.md").display())
+            let created = create_prompt_skill(
+                &args.name,
+                &args.description,
+                &args.body,
+                Some(&args.test_prompt),
+                &args.expect_response_contains,
+            )?;
+
+            // Static validation
+            let static_result = crate::skills::validate_skill(&created);
+
+            // LLM functional test
+            let llm_result = match crate::config::LlmConfig::from_env() {
+                Ok(config) => {
+                    let client = reqwest::Client::new();
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            crate::skills::run_skill_llm_tests(&created, &client, &config),
+                        )
+                    })
+                }
+                Err(err) => Err(anyhow::anyhow!("LLM config unavailable: {}", err)),
+            };
+
+            match (static_result, llm_result) {
+                (Ok(static_count), Ok(llm_count)) => format!(
+                    "skill created and all tests passed: {}\nstatic tests: {}, llm tests: {}",
+                    created.join("SKILL.md").display(),
+                    static_count,
+                    llm_count
+                ),
+                (Err(err), _) => format!(
+                    "skill created but static validation FAILED: {}\nerror: {}\nFix the skill content or tests.",
+                    created.join("SKILL.md").display(),
+                    err
+                ),
+                (Ok(_), Err(err)) => format!(
+                    "skill created but LLM test FAILED: {}\nerror: {}\nRevise the skill body or the test expectations.",
+                    created.join("SKILL.md").display(),
+                    err
+                ),
+            }
+        }
+        "skill_validate" => {
+            #[derive(Deserialize)]
+            struct SkillValidateArgs {
+                name: String,
+            }
+            let args: SkillValidateArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid skill_validate arguments")?;
+            let registry = crate::skills::SkillRegistry::load()
+                .context("failed to load skill registry")?;
+            let skill_dir = registry.base_dir().join(&args.name);
+            if !skill_dir.is_dir() {
+                format!("skill '{}' not found", args.name)
+            } else {
+                // 1. Static validation
+                let static_result = crate::skills::validate_skill(&skill_dir);
+
+                // 2. LLM functional tests
+                let llm_result = match crate::config::LlmConfig::from_env() {
+                    Ok(config) => {
+                        let client = reqwest::Client::new();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(
+                                crate::skills::run_skill_llm_tests(&skill_dir, &client, &config),
+                            )
+                        })
+                    }
+                    Err(err) => Err(anyhow::anyhow!("LLM config unavailable: {}", err)),
+                };
+
+                let base_summary = match (&static_result, &llm_result) {
+                    (Ok(sc), Ok(lc)) => format!(
+                        "skill '{}': static tests: {}, llm tests: {}",
+                        args.name, sc, lc
+                    ),
+                    (Err(err), _) => {
+                        return Ok(Some(format!(
+                            "skill '{}': static validation FAILED\nerror: {}",
+                            args.name, err
+                        )))
+                    }
+                    (Ok(_), Err(err)) => {
+                        return Ok(Some(format!(
+                            "skill '{}': LLM test FAILED\nerror: {}",
+                            args.name, err
+                        )))
+                    }
+                };
+
+                // 3. Integration test — launch in background if present
+                if crate::skill_integration::has_integration_test(&skill_dir) {
+                    let signal_file = crate::skill_integration::signal_file_path(
+                        context.repo_root(),
+                        &args.name,
+                    );
+                    let mailbox = context.mailbox().clone();
+                    let skill_name = args.name.clone();
+                    let skill_dir2 = skill_dir.clone();
+
+                    // Clone values needed by the on_waiting closure AND the result handler.
+                    let mailbox_waiting = mailbox.clone();
+                    let mailbox_result = mailbox.clone();
+                    let skill_name_waiting = skill_name.clone();
+                    let skill_name_result = skill_name.clone();
+
+                    tokio::spawn(async move {
+                        let agent_id_waiting = std::env::var("RUSTPILOT_AGENT_ID")
+                            .unwrap_or_else(|_| "system".to_string());
+                        let agent_id_result = agent_id_waiting.clone();
+                        let result = crate::skill_integration::run_integration_script(
+                            &skill_dir2,
+                            &signal_file,
+                            move |msg| {
+                                let _ = mailbox_waiting.send(
+                                    "system",
+                                    &agent_id_waiting,
+                                    &format!(
+                                        "[skill-test][{}] 需要人工操作: {}\n完成后调用: skill_test_signal {{\"name\": \"{}\"}}",
+                                        skill_name_waiting, msg, skill_name_waiting
+                                    ),
+                                    None,
+                                );
+                            },
+                        )
+                        .await;
+
+                        let mailbox2 = mailbox_result;
+                        match result {
+                            Ok(out) if out.exit_code == 0 => {
+                                let _ = mailbox2.send(
+                                    "system",
+                                    &agent_id_result,
+                                    &format!("[skill-test][{}] integration test PASSED ✓", skill_name_result),
+                                    None,
+                                );
+                            }
+                            Ok(out) => {
+                                let tail: Vec<_> = out.lines.iter().rev().take(10).rev().collect();
+                                let _ = mailbox2.send(
+                                    "system",
+                                    &agent_id_result,
+                                    &format!(
+                                        "[skill-test][{}] integration test FAILED (exit {})\n{}",
+                                        skill_name_result,
+                                        out.exit_code,
+                                        tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                                    ),
+                                    None,
+                                );
+                            }
+                            Err(e) => {
+                                let _ = mailbox2.send(
+                                    "system",
+                                    &agent_id_result,
+                                    &format!("[skill-test][{}] integration test ERROR: {}", skill_name_result, e),
+                                    None,
+                                );
+                            }
+                        }
+                    });
+
+                    format!(
+                        "{}\nintegration test: started in background — you will receive a mail notification when human action is needed or when complete.",
+                        base_summary
+                    )
+                } else {
+                    format!("{}\nintegration test: none (add tests/integration.py to enable)", base_summary)
+                }
+            }
+        }
+        "skill_test_signal" => {
+            #[derive(Deserialize)]
+            struct SkillTestSignalArgs {
+                name: String,
+            }
+            let args: SkillTestSignalArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid skill_test_signal arguments")?;
+            let signal_file =
+                crate::skill_integration::signal_file_path(context.repo_root(), &args.name);
+            std::fs::create_dir_all(signal_file.parent().unwrap()).ok();
+            std::fs::write(&signal_file, b"")
+                .with_context(|| format!("failed to write signal file: {}", signal_file.display()))?;
+            format!(
+                "signal sent for skill '{}' — integration test will resume shortly.",
+                args.name
+            )
         }
         "launch_list" => {
             let launches = context.launches().list()?;
@@ -584,6 +801,12 @@ struct SkillCreateArgs {
     name: String,
     description: String,
     body: String,
+    /// A representative user request that exercises the skill's core capability.
+    /// Used to run a live LLM test after creation.
+    test_prompt: String,
+    /// Keywords/phrases that must appear in the LLM's response to the test_prompt.
+    #[serde(default)]
+    expect_response_contains: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

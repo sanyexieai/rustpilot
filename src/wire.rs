@@ -81,6 +81,8 @@ pub enum WireEvent {
     MessageDelta {
         role: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     ToolStarted {
         name: String,

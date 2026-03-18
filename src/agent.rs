@@ -555,6 +555,37 @@ fn approval_actor_id() -> String {
         .unwrap_or_else(|| "lead".to_string())
 }
 
+pub async fn one_shot_completion(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    system: &str,
+    user: &str,
+) -> anyhow::Result<String> {
+    let request = ChatRequest {
+        model: config.model.clone(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: Some(system.to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: Some(user.to_string()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        tools: None,
+        tool_choice: None,
+        temperature: Some(0.0),
+    };
+    let response = send_llm_request(client, config, &request, None).await?;
+    let message = parse_llm_response(response, config.api_kind).await?;
+    Ok(message.content.unwrap_or_default())
+}
+
 pub async fn diagnose_agent_failure(
     client: &reqwest::Client,
     config: &LlmConfig,

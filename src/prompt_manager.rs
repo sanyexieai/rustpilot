@@ -468,7 +468,13 @@ fn hierarchical_task_protocol() -> &'static str {
 
 fn skill_authoring_protocol() -> &'static str {
     "Skill Authoring Protocol:\n\
-When the user asks to create a skill, prefer the dedicated `skill_create` tool so the skill is written to `skills/<name>/SKILL.md` with valid frontmatter. Do not improvise ad hoc paths such as `.kimi/skills/*.md` unless the user explicitly asks for that location."
+Creating a skill MUST be done exclusively via the `skill_create` tool. Never write SKILL.md or any files under skills/ directly with file-writing tools. \
+The `skill_create` tool requires: `name`, `description`, `body`, `test_prompt` (a representative user request that exercises the skill's core capability), and `expect_response_contains` (keywords that must appear in the LLM response). \
+After creation the tool automatically runs a live LLM test using the skill as system prompt; the skill is only considered complete when all tests pass. \
+If the LLM test fails, revise the skill body or the test expectations and call `skill_create` again with a corrected version (delete the failed skill directory first). \
+For skills involving real execution (browser automation, API calls, etc.), write an integration test by editing tests/integration.py — a template is generated automatically. \
+The integration test can pause for human interaction by calling wait_for_human('message'), which sends a mail notification; resume by calling `skill_test_signal` after completing the action. \
+To validate an existing skill (all test tiers), use `skill_validate` with the skill name."
 }
 
 fn root_planning_protocol() -> &'static str {

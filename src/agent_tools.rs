@@ -247,6 +247,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         "write_file" => run_builtin_tool("write_file", || {
             let args: WriteFileArgs = parse_tool_args("write_file", &call.function.arguments)?;
             reject_parent_file_write("write_file", &args.path)?;
+            reject_skills_dir_write("write_file", &args.path)?;
             run_with_classified_error("write_file", BuiltinToolErrorKind::FileSystem, || {
                 write_file(&args)
             })
@@ -254,6 +255,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         "edit_file" => run_builtin_tool("edit_file", || {
             let args: EditFileArgs = parse_tool_args("edit_file", &call.function.arguments)?;
             reject_parent_file_write("edit_file", &args.path)?;
+            reject_skills_dir_write("edit_file", &args.path)?;
             run_with_classified_error("edit_file", BuiltinToolErrorKind::FileSystem, || {
                 edit_file(&args)
             })
@@ -329,6 +331,36 @@ fn reject_parent_file_write(tool: &str, path: &str) -> anyhow::Result<()> {
          Option B — team: if this file change is part of a larger feature or refactor spanning \
          multiple files or roles, create one task_create per phase/role and coordinate via team_send.\n\
          Exception: writing to .tasks/ and .team/ planning directories is allowed.",
+        tool,
+        path
+    )
+}
+
+fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
+    let normalized = path.trim().replace('\\', "/");
+    // Allow writing test cases and integration scripts inside an existing skill's tests/ dir.
+    // Block everything else directly under skills/ — SKILL.md must go through skill_create.
+    let in_skills = normalized.contains("/skills/") || normalized.starts_with("skills/");
+    if !in_skills {
+        return Ok(());
+    }
+    // The only allowed direct writes inside skills/ are the integration test script
+    // and the smoke test JSON, but only if the skill directory already exists
+    // (i.e. was already created via skill_create).
+    let allowed = normalized.ends_with("/tests/integration.py")
+        || normalized.ends_with("/tests/smoke.json")
+        || normalized.contains("/tests/");
+    if allowed {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} refused: cannot write directly to skills/ — path: {}.\n\
+         Skills MUST be created via the `skill_create` tool, which:\n\
+         1. Writes SKILL.md with correct frontmatter\n\
+         2. Generates tests/smoke.json with LLM test assertions\n\
+         3. Generates tests/integration.py template\n\
+         4. Immediately runs static + LLM tests and reports results\n\
+         After creation, use `skill_validate` to run all tests including integration.",
         tool,
         path
     )

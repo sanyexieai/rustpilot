@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -n \"pub fn handle_project_tool_call\" /d/code/rustpilot/rustpilot/src/project_tools/*.rs)"
     ]
   }
 }

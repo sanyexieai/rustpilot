@@ -1,0 +1,6 @@
+{
+  "name": "smoke",
+  "expect_description_min_length": 5,
+  "expect_body_min_length": 100,
+  "expect_body_contains": "## 核心"
+}

@@ -283,6 +283,20 @@ pub(crate) fn wait_for_launch_running(
     anyhow::bail!("timed out waiting for launch {}", launch_id)
 }
 
+/// 退出时扫 launch registry，强制 kill 所有仍标记为 running 的进程。
+/// 覆盖范围包括 workers、supervisor 不知道的代理、以及 launcher 自行拉起的进程。
+pub(crate) fn kill_all_running_launches(project: &ProjectContext) {
+    let Ok(records) = project.launches().list_with_status(&["running", "requested"]) else {
+        return;
+    };
+    for record in records {
+        if let Some(pid) = record.pid {
+            let _ = kill_process(pid);
+        }
+        let _ = project.launches().mark_stopped(&record.launch_id, None);
+    }
+}
+
 pub(crate) fn stop_launch(project: &ProjectContext, launch_id: &str) -> anyhow::Result<()> {
     if let Some(record) = project.launches().get(launch_id)? {
         if let Some(pid) = record.pid {

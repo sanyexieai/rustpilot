@@ -376,7 +376,7 @@ pub(crate) fn collect_lead_mailbox_events(
     project: &ProjectContext,
     cursor: &mut usize,
     messages: &mut Vec<Message>,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
     let root_actor = root_actor_id();
     collect_agent_mailbox_events(project, &root_actor, cursor, messages)
 }
@@ -386,23 +386,27 @@ fn collect_agent_mailbox_events(
     agent_id: &str,
     cursor: &mut usize,
     messages: &mut Vec<Message>,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
     let raw = project.mailbox().poll(agent_id, *cursor, 50)?;
     let polled: MailPoll = serde_json::from_str(&raw)?;
     *cursor = polled.next_cursor;
-    let mut display_lines = Vec::new();
+    let mut display_lines: Vec<(String, Option<String>)> = Vec::new();
     for item in polled.items {
-        display_lines.push(format!(
-            "[mail][{}][{}][from={}] {}",
-            item.cursor, item.msg_type, item.from, item.message
+        let sender = Some(item.from.clone());
+        display_lines.push((
+            format!(
+                "[mail][{}][{}][from={}] {}",
+                item.cursor, item.msg_type, item.from, item.message
+            ),
+            sender.clone(),
         ));
         if matches!(item.msg_type.as_str(), "task.completed" | "task.failed")
             && let Some(task_id) = item.task_id
         {
             if item.msg_type == "task.completed" {
-                display_lines.push(format!(
-                    "[parent-notify] task {} finished in child process",
-                    task_id
+                display_lines.push((
+                    format!("[parent-notify] task {} finished in child process", task_id),
+                    sender.clone(),
                 ));
             } else {
                 // 检查是否是顶层任务彻底失败（无父任务，recovery_attempts 耗尽）
@@ -412,9 +416,9 @@ fn collect_agent_mailbox_events(
                     .map(|t| t.parent_task_id.is_none())
                     .unwrap_or(false);
 
-                display_lines.push(format!(
-                    "[parent-notify] task {} failed in child process",
-                    task_id
+                display_lines.push((
+                    format!("[parent-notify] task {} failed in child process", task_id),
+                    sender.clone(),
                 ));
 
                 if is_toplevel_final_failure {
@@ -439,7 +443,10 @@ fn collect_agent_mailbox_events(
                                 task_id, task_id
                             )
                         });
-                    display_lines.push(format!("\n[!] TASK FAILED\n{}\n", diagnosis));
+                    display_lines.push((
+                        format!("\n[!] TASK FAILED\n{}\n", diagnosis),
+                        sender.clone(),
+                    ));
                     messages.push(Message {
                         role: "user".to_string(),
                         content: Some(format!(
@@ -457,9 +464,12 @@ fn collect_agent_mailbox_events(
             && let Some(task_id) = item.task_id
         {
             let _ = project.tasks().update(task_id, Some("blocked"), None, None);
-            display_lines.push(format!(
-                "[clarification] task {} blocked, use /reply {} <message>",
-                task_id, task_id
+            display_lines.push((
+                format!(
+                    "[clarification] task {} blocked, use /reply {} <message>",
+                    task_id, task_id
+                ),
+                sender.clone(),
             ));
         }
         if item.requires_ack {
