@@ -199,6 +199,21 @@ pub fn project_tool_definitions() -> Vec<Tool> {
             }),
         ),
         tool(
+            "task_reply",
+            "Unblock a blocked task and send clarification context to the worker. \
+             If the worker process is still running, the clarification is delivered via mailbox so it resumes immediately. \
+             If the worker has already exited, the task is reset to 'pending' so the scheduler relaunches it in a new window. \
+             Always use this tool (not task_update) when responding to a blocked task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "integer" },
+                    "reply": { "type": "string", "description": "The clarification or additional context to provide to the worker" }
+                },
+                "required": ["task_id", "reply"]
+            }),
+        ),
+        tool(
             "task_update",
             "Update task status, owner, or priority. Supports paused and cancelled for sub-task control.",
             json!({
@@ -660,6 +675,11 @@ pub fn handle_project_tool_call(
                 .context("invalid task_get arguments")?;
             tasks.get(args.task_id)?
         }
+        "task_reply" => {
+            let args: TaskReplyArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid task_reply arguments")?;
+            reply_blocked_task(context, tasks, args.task_id, &args.reply)?
+        }
         "task_update" => {
             let args: TaskUpdateArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid task_update arguments")?;
@@ -729,6 +749,44 @@ fn current_agent_id() -> String {
     std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
 }
 
+fn reply_blocked_task(
+    context: &ProjectContext,
+    tasks: &super::TaskManager,
+    task_id: u64,
+    reply: &str,
+) -> anyhow::Result<String> {
+    let repo_root = context.repo_root();
+    let actor_id = current_agent_id();
+    let target = format!("teammate-{}", task_id);
+    let trace_id = format!("task-{}", task_id);
+
+    let worker_running = matches!(
+        crate::team::get_worker_endpoint(repo_root, task_id)?,
+        Some(ep) if ep.status == "running"
+    );
+
+    let next_status = if worker_running { "in_progress" } else { "pending" };
+    let updated = tasks.append_user_reply(task_id, reply, next_status)?;
+
+    // If worker is alive, deliver clarification via mailbox so it resumes immediately.
+    if worker_running {
+        let _ = context.mailbox().send_typed(
+            &actor_id,
+            &target,
+            "task.clarification",
+            &format!("user clarification: {}", reply),
+            Some(task_id),
+            Some(&trace_id),
+            false,
+            None,
+        );
+        Ok(format!("clarification sent to running worker:\n{}", updated))
+    } else {
+        // Worker has exited; task is now pending — the scheduler will relaunch it.
+        Ok(format!("worker not running; task reset to pending for relaunch:\n{}", updated))
+    }
+}
+
 fn reject_child_worktree_create(tasks: &super::TaskManager) -> anyhow::Result<()> {
     let Some(task_id) = std::env::var("RUSTPILOT_TASK_ID")
         .ok()
@@ -792,6 +850,12 @@ struct TaskCreateArgs {
     parent_task_id: Option<u64>,
     #[serde(default)]
     depth: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskReplyArgs {
+    task_id: u64,
+    reply: String,
 }
 
 #[derive(Debug, Deserialize)]
