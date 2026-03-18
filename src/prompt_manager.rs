@@ -119,7 +119,9 @@ pub fn render_worker_system_prompt(
         .replace("{prompt_focus}", prompt_focus)
         .replace("{repo_root}", &repo_root.display().to_string())
         + "\n\n"
-        + hierarchical_task_protocol())
+        + hierarchical_task_protocol()
+        + "\n\n"
+        + skill_authoring_protocol())
 }
 
 pub fn root_prompt_recovery(repo_root: &Path) -> anyhow::Result<Option<PromptRecoveryInfo>> {
@@ -468,10 +470,11 @@ fn hierarchical_task_protocol() -> &'static str {
 
 fn skill_authoring_protocol() -> &'static str {
     "Skill Authoring Protocol:\n\
-Creating a skill MUST be done exclusively via the `skill_create` tool. Never write SKILL.md or any files under skills/ directly with file-writing tools. \
+Creating or updating a skill MUST be done exclusively via the `skill_create` tool. Never write SKILL.md or any files under skills/ directly with file-writing tools. \
 The `skill_create` tool requires: `name`, `description`, `body`, `test_prompt` (a representative user request that exercises the skill's core capability), and `expect_response_contains` (keywords that must appear in the LLM response). \
-After creation the tool automatically runs a live LLM test using the skill as system prompt; the skill is only considered complete when all tests pass. \
-If the LLM test fails, revise the skill body or the test expectations and call `skill_create` again with a corrected version (delete the failed skill directory first). \
+If the skill already exists, `skill_create` updates SKILL.md and tests/smoke.json in-place; any custom integration.py is preserved. \
+After creation or update the tool automatically runs a live LLM test using the skill as system prompt; the skill is only considered complete when all tests pass. \
+If the LLM test fails, revise the skill body or the test expectations and call `skill_create` again with a corrected version. \
 For skills involving real execution (browser automation, API calls, etc.), write an integration test by editing tests/integration.py — a template is generated automatically. \
 The integration test can pause for human interaction by calling wait_for_human('message'), which sends a mail notification; resume by calling `skill_test_signal` after completing the action. \
 To validate an existing skill (all test tiers), use `skill_validate` with the skill name."

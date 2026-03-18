@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""生成 SKILL.md 文件"""
-
-content = '''---
+---
 name: xiaohongshu-poster
 description: 小红书自动登录发帖助手，专注于小红书平台的自动化登录和内容发布
 ---
@@ -77,7 +73,7 @@ class XiaohongshuPoster:
         log_message = f"[{timestamp}] [{level}] {message}"
         print(log_message)
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(log_message + "\\n")
+            f.write(log_message + "\n")
     
     async def init_browser(self, headless: bool = False):
         """初始化浏览器"""
@@ -468,7 +464,7 @@ async def main():
         # poster.log("示例1: 发布纯文字笔记")
         # await poster.publish_text_note(
         #     title="今日分享 | 效率提升小技巧",
-        #     content="今天想和大家分享几个提高工作效率的小方法...\\n\\n1. 制定每日计划\\n2. 番茄工作法\\n3. 定期复盘",
+        #     content="今天想和大家分享几个提高工作效率的小方法...\n\n1. 制定每日计划\n2. 番茄工作法\n3. 定期复盘",
         #     tags=["效率提升", "工作技巧", "自我成长"]
         # )
         # await asyncio.sleep(30)  # 发布间隔
@@ -477,7 +473,7 @@ async def main():
         # poster.log("示例2: 发布图文笔记")
         # await poster.publish_image_note(
         #     title="周末美食推荐 | 简单易学的家常菜",
-        #     content="周末在家尝试做了这道菜，味道超棒！做法也很简单，适合新手尝试。\\n\\n材料：\\n- 鸡肉 500g\\n- 土豆 2个\\n- 胡萝卜 1根\\n\\n步骤：...",
+        #     content="周末在家尝试做了这道菜，味道超棒！做法也很简单，适合新手尝试。\n\n材料：\n- 鸡肉 500g\n- 土豆 2个\n- 胡萝卜 1根\n\n步骤：...",
         #     image_paths=["images/food1.jpg", "images/food2.jpg"],
         #     tags=["美食教程", "家常菜", "周末美食"]
         # )
@@ -577,9 +573,3 @@ await asyncio.sleep(random.uniform(1, 3))
 3. 提供清晰的使用示例和注释
 4. 考虑异常情况的处理（如网络波动、元素未找到等）
 5. 开发项目样式为红色系（小红书品牌色）
-'''
-
-output_path = 'D:/code/rustpilot/rustpilot/skills/xiaohongshu-poster/SKILL.md'
-with open(output_path, 'w', encoding='utf-8') as f:
-    f.write(content)
-print(f'SKILL.md has been written to {output_path}')

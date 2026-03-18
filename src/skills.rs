@@ -50,6 +50,13 @@ impl SkillRegistry {
     }
 }
 
+pub fn skill_exists(raw_name: &str) -> bool {
+    let name = normalize_skill_name(raw_name);
+    resolve_skills_dir()
+        .map(|base| base.join(&name).is_dir())
+        .unwrap_or(false)
+}
+
 pub fn create_prompt_skill(
     raw_name: &str,
     description: &str,
@@ -63,22 +70,28 @@ pub fn create_prompt_skill(
     }
     let base_dir = resolve_or_create_skills_dir()?;
     let skill_dir = base_dir.join(&name);
-    if skill_dir.exists() {
-        anyhow::bail!("skill already exists: {}", skill_dir.display());
-    }
     fs::create_dir_all(skill_dir.join("tests"))?;
+    // When no test_prompt is provided, fall back to the description so that
+    // the smoke test always has a prompt and LLM tests always run.
+    let effective_test_prompt = test_prompt.unwrap_or(description);
+    // Always overwrite the core skill content and smoke test.
     fs::write(
         skill_dir.join("SKILL.md"),
         render_prompt_skill_markdown(&name, description, body),
     )?;
     fs::write(
         skill_dir.join("tests").join("smoke.json"),
-        skill_smoke_test_template(description, body, test_prompt, expect_response_contains),
+        skill_smoke_test_template(description, body, Some(effective_test_prompt), expect_response_contains),
     )?;
-    fs::write(
-        skill_dir.join("tests").join("integration.py"),
-        crate::skill_integration::integration_test_template(),
-    )?;
+    // Only write the integration test template if it doesn't already exist,
+    // so that any custom integration.py written by the user is preserved.
+    let integration_path = skill_dir.join("tests").join("integration.py");
+    if !integration_path.exists() {
+        fs::write(
+            &integration_path,
+            crate::skill_integration::integration_test_template(),
+        )?;
+    }
     Ok(skill_dir)
 }
 

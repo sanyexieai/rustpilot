@@ -3,6 +3,8 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::shell_file_tools::{
     is_dangerous_command, is_likely_expensive_command, is_likely_long_running_command,
@@ -110,53 +112,69 @@ impl WorktreeManager {
         base_ref: &str,
     ) -> anyhow::Result<String> {
         self.validate_name(name)?;
-        if self.find(name)?.is_some() {
-            anyhow::bail!("索引中已存在 worktree '{}'", name);
-        }
         if let Some(task_id) = task_id
             && !self.tasks.exists(task_id)
         {
             anyhow::bail!("任务 {} 不存在", task_id);
         }
 
-        let path = self.dir.join(name);
-        let branch = format!("wt/{}", name);
-        let task_payload = task_id
-            .map(|id| json!({ "id": id }))
-            .unwrap_or_else(|| json!({}));
-        self.events.emit(
-            "worktree.create.before",
-            task_payload.clone(),
-            json!({ "name": name, "base_ref": base_ref }),
-            None,
-        )?;
+        // All index checks and writes happen inside the lock to prevent
+        // concurrent agents from creating multiple worktrees simultaneously.
+        let record = self.with_lock(|| {
+            if self.find(name)?.is_some() {
+                anyhow::bail!("索引中已存在 worktree '{}'", name);
+            }
+            if let Some(active) = self.find_active()? {
+                anyhow::bail!(
+                    "worktree_create refused: active worktree '{}' already exists (path: {}, branch: {}). \
+                     Each user request uses exactly one worktree. Do not create additional worktrees \
+                     for follow-up work or supplemental tasks — use the existing worktree instead. \
+                     Run worktree_run with name='{}' to execute commands in it.",
+                    active.name, active.path, active.branch, active.name
+                );
+            }
 
-        if let Err(err) = self.add_worktree_with_branch_fallback(&path, &branch, base_ref) {
+            let path = self.dir.join(name);
+            let branch = format!("wt/{}", name);
+            let task_payload = task_id
+                .map(|id| json!({ "id": id }))
+                .unwrap_or_else(|| json!({}));
             self.events.emit(
-                "worktree.create.failed",
-                task_payload,
+                "worktree.create.before",
+                task_payload.clone(),
                 json!({ "name": name, "base_ref": base_ref }),
-                Some(err.to_string()),
+                None,
             )?;
-            return Err(err);
-        }
 
-        let record = WorktreeRecord {
-            name: name.to_string(),
-            path: path.display().to_string(),
-            branch,
-            task_id,
-            status: "active".to_string(),
-            created_at: now_secs_f64(),
-            removed_at: None,
-            kept_at: None,
-        };
+            if let Err(err) = self.add_worktree_with_branch_fallback(&path, &branch, base_ref) {
+                self.events.emit(
+                    "worktree.create.failed",
+                    task_payload,
+                    json!({ "name": name, "base_ref": base_ref }),
+                    Some(err.to_string()),
+                )?;
+                return Err(err);
+            }
 
-        let mut index = self.load_index()?;
-        index.worktrees.push(record.clone());
-        self.save_index(&index)?;
+            let record = WorktreeRecord {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                branch,
+                task_id,
+                status: "active".to_string(),
+                created_at: now_secs_f64(),
+                removed_at: None,
+                kept_at: None,
+            };
+
+            let mut index = self.load_index()?;
+            index.worktrees.push(record.clone());
+            self.save_index(&index)?;
+            Ok(record)
+        })?;
+
         if let Some(task_id) = task_id {
-            self.tasks.bind_worktree(task_id, name, "")?;
+            self.tasks.bind_worktree(task_id, &record.name, "")?;
         }
 
         self.events.emit(
@@ -174,6 +192,30 @@ impl WorktreeManager {
             None,
         )?;
         Ok(serde_json::to_string_pretty(&record)?)
+    }
+
+    fn with_lock<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let lock_path = self.dir.join(".lock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("timed out acquiring worktree lock: {}", lock_path.display());
+                    }
+                    thread::sleep(Duration::from_millis(30));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        let result = f();
+        let _ = fs::remove_file(lock_path);
+        result
     }
 
     fn add_worktree_with_branch_fallback(
@@ -399,6 +441,14 @@ impl WorktreeManager {
             .worktrees
             .into_iter()
             .find(|record| record.name == name))
+    }
+
+    pub fn find_active(&self) -> anyhow::Result<Option<WorktreeRecord>> {
+        Ok(self
+            .load_index()?
+            .worktrees
+            .into_iter()
+            .find(|record| record.status == "active"))
     }
 
     fn load_index(&self) -> anyhow::Result<WorktreeIndex> {

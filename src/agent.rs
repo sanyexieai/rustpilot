@@ -300,6 +300,13 @@ pub async fn run_agent_loop(
                 "> [{}] [activity] running tool {}",
                 agent_label, call.function.name
             ));
+            if call.function.name == "skill_create" {
+                launch_log::emit(format!(
+                    "> [{}] [skill_create] args: {}",
+                    agent_label,
+                    truncate_for_print(&call.function.arguments)
+                ));
+            }
             let tool_started = Instant::now();
             let output = match handle_tool_call(project, &call) {
                 Ok(output) => output,

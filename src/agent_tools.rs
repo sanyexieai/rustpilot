@@ -163,6 +163,7 @@ pub fn handle_builtin_tool_call(call: &ToolCall) -> anyhow::Result<Option<String
         "bash" => run_builtin_tool("bash", || {
             let args: BashArgs = parse_tool_args("bash", &call.function.arguments)?;
             reject_blocking_parent_execution("bash", &args.command)?;
+            reject_bash_skill_md_write(&args.command)?;
             run_with_classified_error("bash", BuiltinToolErrorKind::Execution, || {
                 BashTool::run(&args.command)
             })
@@ -387,6 +388,30 @@ fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
         tool,
         path
     )
+}
+
+/// Rejects bash commands that try to write SKILL.md directly, bypassing `skill_create`.
+/// Detects common shell write patterns: `> SKILL.md`, `tee SKILL.md`, `cat > SKILL.md`, etc.
+fn reject_bash_skill_md_write(command: &str) -> anyhow::Result<()> {
+    let lower = command.to_ascii_lowercase();
+    let has_skill_md = lower.contains("skill.md");
+    if !has_skill_md {
+        return Ok(());
+    }
+    // Detect write-producing patterns
+    let is_write = lower.contains("> ") // redirection
+        || lower.contains(">>")          // append
+        || lower.contains("tee ")        // tee
+        || lower.contains("tee\t");
+    if is_write {
+        anyhow::bail!(
+            "bash refused: cannot write SKILL.md via shell command — detected write to SKILL.md.\n\
+             Skills MUST be created or updated via the `skill_create` tool, which writes SKILL.md \
+             with correct frontmatter, generates tests/smoke.json and tests/integration.py, \
+             and immediately runs static + LLM tests."
+        );
+    }
+    Ok(())
 }
 
 fn current_agent_id() -> String {

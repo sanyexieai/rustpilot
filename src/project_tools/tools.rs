@@ -114,7 +114,7 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                         "description": "Keywords or phrases that must appear in the LLM response to test_prompt."
                     }
                 },
-                "required": ["name", "description", "body", "test_prompt", "expect_response_contains"]
+                "required": ["name", "description", "body"]
             }),
         ),
         tool(
@@ -417,14 +417,19 @@ pub fn handle_project_tool_call(
         }
         "skill_create" => {
             let args: SkillCreateArgs = serde_json::from_str(&call.function.arguments)
-                .context("invalid skill_create arguments")?;
+                .with_context(|| format!(
+                    "invalid skill_create arguments: {}\nRequired fields: name(string), description(string), body(string). Optional: test_prompt(string), expect_response_contains(array of strings)",
+                    &call.function.arguments
+                ))?;
+            let is_update = crate::skills::skill_exists(&args.name);
             let created = create_prompt_skill(
                 &args.name,
                 &args.description,
                 &args.body,
-                Some(&args.test_prompt),
+                args.test_prompt.as_deref(),
                 &args.expect_response_contains,
             )?;
+            let action = if is_update { "updated" } else { "created" };
 
             // Static validation
             let static_result = crate::skills::validate_skill(&created);
@@ -442,24 +447,26 @@ pub fn handle_project_tool_call(
                 Err(err) => Err(anyhow::anyhow!("LLM config unavailable: {}", err)),
             };
 
-            match (static_result, llm_result) {
+            let base_summary = match (static_result, llm_result) {
                 (Ok(static_count), Ok(llm_count)) => format!(
-                    "skill created and all tests passed: {}\nstatic tests: {}, llm tests: {}",
+                    "skill {action} and all tests passed: {}\nstatic tests: {}, llm tests: {}",
                     created.join("SKILL.md").display(),
                     static_count,
                     llm_count
                 ),
                 (Err(err), _) => format!(
-                    "skill created but static validation FAILED: {}\nerror: {}\nFix the skill content or tests.",
+                    "skill {action} but static validation FAILED: {}\nerror: {}\nFix the skill content or tests.",
                     created.join("SKILL.md").display(),
                     err
                 ),
                 (Ok(_), Err(err)) => format!(
-                    "skill created but LLM test FAILED: {}\nerror: {}\nRevise the skill body or the test expectations.",
+                    "skill {action} but LLM test FAILED: {}\nerror: {}\nRevise the skill body or the test expectations.",
                     created.join("SKILL.md").display(),
                     err
                 ),
-            }
+            };
+            // Launch integration test in background if present (same as skill_validate).
+            launch_integration_test_background(context, &args.name, &created, &base_summary)
         }
         "skill_validate" => {
             #[derive(Deserialize)]
@@ -510,84 +517,7 @@ pub fn handle_project_tool_call(
                 };
 
                 // 3. Integration test — launch in background if present
-                if crate::skill_integration::has_integration_test(&skill_dir) {
-                    let signal_file = crate::skill_integration::signal_file_path(
-                        context.repo_root(),
-                        &args.name,
-                    );
-                    let mailbox = context.mailbox().clone();
-                    let skill_name = args.name.clone();
-                    let skill_dir2 = skill_dir.clone();
-
-                    // Clone values needed by the on_waiting closure AND the result handler.
-                    let mailbox_waiting = mailbox.clone();
-                    let mailbox_result = mailbox.clone();
-                    let skill_name_waiting = skill_name.clone();
-                    let skill_name_result = skill_name.clone();
-
-                    tokio::spawn(async move {
-                        let agent_id_waiting = std::env::var("RUSTPILOT_AGENT_ID")
-                            .unwrap_or_else(|_| "system".to_string());
-                        let agent_id_result = agent_id_waiting.clone();
-                        let result = crate::skill_integration::run_integration_script(
-                            &skill_dir2,
-                            &signal_file,
-                            move |msg| {
-                                let _ = mailbox_waiting.send(
-                                    "system",
-                                    &agent_id_waiting,
-                                    &format!(
-                                        "[skill-test][{}] 需要人工操作: {}\n完成后调用: skill_test_signal {{\"name\": \"{}\"}}",
-                                        skill_name_waiting, msg, skill_name_waiting
-                                    ),
-                                    None,
-                                );
-                            },
-                        )
-                        .await;
-
-                        let mailbox2 = mailbox_result;
-                        match result {
-                            Ok(out) if out.exit_code == 0 => {
-                                let _ = mailbox2.send(
-                                    "system",
-                                    &agent_id_result,
-                                    &format!("[skill-test][{}] integration test PASSED ✓", skill_name_result),
-                                    None,
-                                );
-                            }
-                            Ok(out) => {
-                                let tail: Vec<_> = out.lines.iter().rev().take(10).rev().collect();
-                                let _ = mailbox2.send(
-                                    "system",
-                                    &agent_id_result,
-                                    &format!(
-                                        "[skill-test][{}] integration test FAILED (exit {})\n{}",
-                                        skill_name_result,
-                                        out.exit_code,
-                                        tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
-                                    ),
-                                    None,
-                                );
-                            }
-                            Err(e) => {
-                                let _ = mailbox2.send(
-                                    "system",
-                                    &agent_id_result,
-                                    &format!("[skill-test][{}] integration test ERROR: {}", skill_name_result, e),
-                                    None,
-                                );
-                            }
-                        }
-                    });
-
-                    format!(
-                        "{}\nintegration test: started in background — you will receive a mail notification when human action is needed or when complete.",
-                        base_summary
-                    )
-                } else {
-                    format!("{}\nintegration test: none (add tests/integration.py to enable)", base_summary)
-                }
+                launch_integration_test_background(context, &args.name, &skill_dir, &base_summary)
             }
         }
         "skill_test_signal" => {
@@ -787,6 +717,81 @@ fn reply_blocked_task(
     }
 }
 
+/// Launch the integration test for a skill in the background (if integration.py exists).
+/// Returns a summary string that includes the integration test status line.
+/// Used by both skill_create and skill_validate.
+fn launch_integration_test_background(
+    context: &super::ProjectContext,
+    skill_name: &str,
+    skill_dir: &std::path::Path,
+    base_summary: &str,
+) -> String {
+    if !crate::skill_integration::has_integration_test(skill_dir) {
+        return format!("{}\nintegration test: none (add tests/integration.py to enable)", base_summary);
+    }
+    let signal_file = crate::skill_integration::signal_file_path(context.repo_root(), skill_name);
+    let mailbox = context.mailbox().clone();
+    let skill_name = skill_name.to_string();
+    let skill_dir = skill_dir.to_path_buf();
+    let mailbox_waiting = mailbox.clone();
+    let mailbox_result = mailbox.clone();
+    let skill_name_waiting = skill_name.clone();
+    let skill_name_result = skill_name.clone();
+    tokio::spawn(async move {
+        let agent_id = std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| "system".to_string());
+        let agent_id_result = agent_id.clone();
+        let result = crate::skill_integration::run_integration_script(
+            &skill_dir,
+            &signal_file,
+            move |msg| {
+                let _ = mailbox_waiting.send(
+                    "system",
+                    &agent_id,
+                    &format!(
+                        "[skill-test][{}] 需要人工操作: {}\n完成后调用: skill_test_signal {{\"name\": \"{}\"}}",
+                        skill_name_waiting, msg, skill_name_waiting
+                    ),
+                    None,
+                );
+            },
+        )
+        .await;
+        let mailbox2 = mailbox_result;
+        match result {
+            Ok(out) if out.exit_code == 0 => {
+                let _ = mailbox2.send(
+                    "system", &agent_id_result,
+                    &format!("[skill-test][{}] integration test PASSED ✓", skill_name_result),
+                    None,
+                );
+            }
+            Ok(out) => {
+                let tail: Vec<_> = out.lines.iter().rev().take(10).rev().collect();
+                let _ = mailbox2.send(
+                    "system", &agent_id_result,
+                    &format!(
+                        "[skill-test][{}] integration test FAILED (exit {})\n{}",
+                        skill_name_result, out.exit_code,
+                        tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                    ),
+                    None,
+                );
+            }
+            Err(e) => {
+                let _ = mailbox2.send(
+                    "system", &agent_id_result,
+                    &format!("[skill-test][{}] integration test ERROR: {}", skill_name_result, e),
+                    None,
+                );
+            }
+        }
+    });
+    format!(
+        "{}\nintegration test: started in background — you will receive a mail notification when human action is needed or when complete.",
+        base_summary
+    )
+}
+
 fn reject_child_worktree_create(tasks: &super::TaskManager) -> anyhow::Result<()> {
     let Some(task_id) = std::env::var("RUSTPILOT_TASK_ID")
         .ok()
@@ -889,7 +894,8 @@ struct SkillCreateArgs {
     body: String,
     /// A representative user request that exercises the skill's core capability.
     /// Used to run a live LLM test after creation.
-    test_prompt: String,
+    #[serde(default)]
+    test_prompt: Option<String>,
     /// Keywords/phrases that must appear in the LLM's response to the test_prompt.
     #[serde(default)]
     expect_response_contains: Vec<String>,
