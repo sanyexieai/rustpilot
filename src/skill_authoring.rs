@@ -210,7 +210,8 @@ fn default_dir_candidates() -> Vec<PathBuf> {
         }
     }
 
-    vec![PathBuf::from("skills"), PathBuf::from("s05").join("skills")]
+    // 默认只支持仓库根目录下的 `skills/`，不再自动探测 `s05/skills` 等历史路径。
+    vec![PathBuf::from("skills")]
 }
 
 fn env_skills_dir() -> Option<PathBuf> {
