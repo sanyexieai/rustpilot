@@ -31,10 +31,7 @@ pub struct LaunchBackendStatus {
     pub note: String,
 }
 
-pub fn launch(
-    plan: &LaunchPlan,
-    mode: LaunchPresentationMode,
-) -> anyhow::Result<LaunchExecution> {
+pub fn launch(plan: &LaunchPlan, mode: LaunchPresentationMode) -> anyhow::Result<LaunchExecution> {
     let status = backend_status(mode);
     #[cfg(windows)]
     {
@@ -185,10 +182,7 @@ pub fn plan_for_record(
     if !record.log_path.trim().is_empty() {
         env.push(("RUSTPILOT_LAUNCH_LOG".to_string(), record.log_path.clone()));
     }
-    env.push((
-        "RUSTPILOT_LAUNCH_ID".to_string(),
-        record.launch_id.clone(),
-    ));
+    env.push(("RUSTPILOT_LAUNCH_ID".to_string(), record.launch_id.clone()));
     LaunchPlan {
         cwd,
         window_title,
@@ -289,7 +283,12 @@ fn spawn_windows_agent_window(
         .lines()
         .rev()
         .find_map(|line| line.trim().parse::<u32>().ok())
-        .ok_or_else(|| anyhow::anyhow!("failed to parse launched window pid from '{}'", stdout.trim()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to parse launched window pid from '{}'",
+                stdout.trim()
+            )
+        })?;
     Ok(LaunchExecution {
         pid,
         channel: "window".to_string(),
@@ -308,7 +307,13 @@ pub(crate) fn build_windows_launch_script(plan: &LaunchPlan) -> String {
     let env_commands = plan
         .env
         .iter()
-        .map(|(key, value)| format!("set \"{}={}\"", sanitize_cmd_text(key), sanitize_cmd_text(value)))
+        .map(|(key, value)| {
+            format!(
+                "set \"{}={}\"",
+                sanitize_cmd_text(key),
+                sanitize_cmd_text(value)
+            )
+        })
         .collect::<Vec<_>>()
         .join(" & ");
     let command = plan
@@ -383,7 +388,12 @@ fn linux_terminal_command(plan: &LaunchPlan, backend: &str) -> Command {
         }
         "xfce4-terminal" => {
             let mut command = Command::new("xfce4-terminal");
-            command.args(["--title", &plan.window_title, "--command", &format!("sh -lc {}", shell_single_quote(&script))]);
+            command.args([
+                "--title",
+                &plan.window_title,
+                "--command",
+                &format!("sh -lc {}", shell_single_quote(&script)),
+            ]);
             command
         }
         "kitty" => {
@@ -414,7 +424,13 @@ fn posix_launch_script(plan: &LaunchPlan) -> String {
     let exports = plan
         .env
         .iter()
-        .map(|(key, value)| format!("export {}={}", shell_env_key(key), shell_single_quote(value)))
+        .map(|(key, value)| {
+            format!(
+                "export {}={}",
+                shell_env_key(key),
+                shell_single_quote(value)
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ");
     let command = plan
@@ -470,11 +486,11 @@ mod tests {
     use std::path::PathBuf;
 
     #[cfg(not(windows))]
-    use crate::project_tools::LaunchPresentationMode;
-    #[cfg(not(windows))]
     use super::backend_status;
     #[cfg(windows)]
     use super::{LaunchPlan, build_windows_launch_script};
+    #[cfg(not(windows))]
+    use crate::project_tools::LaunchPresentationMode;
 
     #[test]
     #[cfg(windows)]

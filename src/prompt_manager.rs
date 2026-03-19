@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::prompt_policy::{PromptPolicyConfig, RecoveryStrategy};
+use crate::skill_authoring::SkillAuthoringConfig;
 use serde::{Deserialize, Serialize};
 
 const ROOT_PROMPT_FILE: &str = "root_agent_prompt.md";
@@ -27,7 +29,8 @@ pub struct PromptAdaptation {
 
 pub fn load_root_prompt(repo_root: &Path) -> anyhow::Result<String> {
     let path = resolve_root_prompt_path(repo_root);
-    ensure_prompt_file(&path, default_root_prompt())?;
+    let default_prompt = default_root_prompt();
+    ensure_prompt_file(&path, &default_prompt)?;
     Ok(fs::read_to_string(path)?)
 }
 
@@ -37,7 +40,8 @@ pub fn load_lead_prompt(repo_root: &Path) -> anyhow::Result<String> {
 
 pub fn load_worker_prompt(repo_root: &Path) -> anyhow::Result<String> {
     let path = repo_root.join(".team").join(WORKER_PROMPT_FILE);
-    ensure_prompt_file(&path, default_worker_prompt())?;
+    let default_prompt = default_worker_prompt();
+    ensure_prompt_file(&path, &default_prompt)?;
     Ok(fs::read_to_string(path)?)
 }
 
@@ -50,13 +54,8 @@ pub fn adapt_root_prompt_detailed(
     error_text: &str,
 ) -> anyhow::Result<PromptAdaptation> {
     let path = resolve_root_prompt_path(repo_root);
-    adapt_prompt_with_error(
-        &path,
-        default_root_prompt(),
-        "root-recovery",
-        "root",
-        error_text,
-    )
+    let default_prompt = default_root_prompt();
+    adapt_prompt_with_error(&path, &default_prompt, "root-recovery", "root", error_text)
 }
 
 pub fn adapt_lead_prompt(repo_root: &Path, error_text: &str) -> anyhow::Result<bool> {
@@ -79,9 +78,10 @@ pub fn adapt_worker_prompt_detailed(
     error_text: &str,
 ) -> anyhow::Result<PromptAdaptation> {
     let path = repo_root.join(".team").join(WORKER_PROMPT_FILE);
+    let default_prompt = default_worker_prompt();
     adapt_prompt_with_error(
         &path,
-        default_worker_prompt(),
+        &default_prompt,
         "worker-recovery",
         "worker",
         error_text,
@@ -90,11 +90,12 @@ pub fn adapt_worker_prompt_detailed(
 
 pub fn render_root_system_prompt(repo_root: &Path) -> anyhow::Result<String> {
     let prompt = load_root_prompt(repo_root)?;
+    let skill_protocol = skill_authoring_protocol();
     Ok(format!(
         "{}\n\n{}\n\n{}\n\n{}\n\nRepository: {}",
         prompt.trim(),
         hierarchical_task_protocol(),
-        skill_authoring_protocol(),
+        skill_protocol,
         root_planning_protocol(),
         repo_root.display()
     ))
@@ -112,6 +113,7 @@ pub fn render_worker_system_prompt(
     prompt_focus: &str,
 ) -> anyhow::Result<String> {
     let template = load_worker_prompt(repo_root)?;
+    let skill_protocol = skill_authoring_protocol();
     Ok(template
         .replace("{owner}", owner)
         .replace("{role}", role)
@@ -121,7 +123,7 @@ pub fn render_worker_system_prompt(
         + "\n\n"
         + hierarchical_task_protocol()
         + "\n\n"
-        + skill_authoring_protocol())
+        + &skill_protocol)
 }
 
 pub fn root_prompt_recovery(repo_root: &Path) -> anyhow::Result<Option<PromptRecoveryInfo>> {
@@ -212,9 +214,10 @@ fn adapt_prompt_file(
     note_body: &str,
 ) -> anyhow::Result<PromptAdaptation> {
     let existing = fs::read_to_string(path).unwrap_or_default();
+    let config = PromptPolicyConfig::load();
     let strategy = classify_recovery_strategy(note_body);
     let base_prompt = strip_recovery_section(&existing).trim().to_string();
-    let transformed_base = transform_prompt_body(&base_prompt, strategy);
+    let transformed_base = transform_prompt_body_with_config(&config, &base_prompt, strategy);
     let recovery_section = render_recovery_section(note_id, note_body, strategy);
     let updated = format_prompt_with_recovery(&transformed_base, &recovery_section);
     if normalize_prompt_text(&existing) == normalize_prompt_text(&updated) {
@@ -237,30 +240,7 @@ fn adapt_prompt_file(
 }
 
 fn recovery_note_for_error(scope: &str, error_text: &str) -> String {
-    let mut lines = vec![
-        format!("Scope: {}", scope),
-        "If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.".to_string(),
-        "Do not add unnecessary narration, markdown wrappers, or speculative alternatives.".to_string(),
-        "When using tool calls, keep them minimal and directly relevant to the current task.".to_string(),
-    ];
-
-    let lower = error_text.to_ascii_lowercase();
-    if lower.contains("timeout") || lower.contains("timed out") {
-        lines.push("The previous attempt timed out. Reduce output size, reduce tool churn, and avoid unnecessary steps.".to_string());
-    }
-    if lower.contains("404") || lower.contains("not found") {
-        lines.push("The previous attempt hit a missing endpoint or resource. Check base URLs, paths, and request shape before retrying.".to_string());
-    }
-    if lower.contains("401") || lower.contains("unauthorized") {
-        lines.push("The previous attempt failed authentication. Verify token source, provider, and auth headers before retrying.".to_string());
-    }
-    if lower.contains("valid json")
-        || lower.contains("missing field `text`")
-        || lower.contains("missing field 'text'")
-    {
-        lines.push("Return only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.".to_string());
-    }
-
+    let mut lines = PromptPolicyConfig::load().recovery_note_lines(scope, error_text);
     lines.push(format!(
         "Recovery trigger: {}",
         error_text.lines().next().unwrap_or(error_text).trim()
@@ -268,31 +248,8 @@ fn recovery_note_for_error(scope: &str, error_text: &str) -> String {
     lines.join("\n")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecoveryStrategy {
-    Generic,
-    Timeout,
-    JsonOnly,
-    Endpoint,
-    Auth,
-}
-
 fn classify_recovery_strategy(error_text: &str) -> RecoveryStrategy {
-    let lower = error_text.to_ascii_lowercase();
-    if lower.contains("timeout") || lower.contains("timed out") {
-        RecoveryStrategy::Timeout
-    } else if lower.contains("valid json")
-        || lower.contains("missing field `text`")
-        || lower.contains("missing field 'text'")
-    {
-        RecoveryStrategy::JsonOnly
-    } else if lower.contains("401") || lower.contains("unauthorized") {
-        RecoveryStrategy::Auth
-    } else if lower.contains("404") || lower.contains("not found") {
-        RecoveryStrategy::Endpoint
-    } else {
-        RecoveryStrategy::Generic
-    }
+    PromptPolicyConfig::load().classify_recovery_strategy(error_text)
 }
 
 fn strip_recovery_section(text: &str) -> String {
@@ -314,19 +271,28 @@ fn strip_recovery_section(text: &str) -> String {
     }
 }
 
-fn transform_prompt_body(prompt: &str, strategy: RecoveryStrategy) -> String {
-    match strategy {
-        RecoveryStrategy::Timeout => compress_prompt_body(prompt, 420),
-        RecoveryStrategy::JsonOnly => ensure_json_contract(prompt),
-        RecoveryStrategy::Endpoint | RecoveryStrategy::Auth => ensure_diagnostic_contract(prompt),
-        RecoveryStrategy::Generic => prompt.trim().to_string(),
-    }
+fn transform_prompt_body_with_config(
+    config: &PromptPolicyConfig,
+    prompt: &str,
+    strategy: RecoveryStrategy,
+) -> String {
+    config.transform_prompt_body(prompt, strategy)
 }
 
+#[cfg(test)]
 fn compress_prompt_body(prompt: &str, max_chars: usize) -> String {
+    let config = PromptPolicyConfig::load();
+    if max_chars == config.timeout_prompt_max_chars() {
+        return config.compress_prompt_body(prompt);
+    }
+    compress_prompt_body_with_limit(prompt, max_chars, config.compact_clause())
+}
+
+#[cfg(test)]
+fn compress_prompt_body_with_limit(prompt: &str, max_chars: usize, compact_clause: &str) -> String {
     let trimmed = prompt.trim();
     if trimmed.chars().count() <= max_chars {
-        return ensure_compact_clause(trimmed);
+        return append_prompt_clause(trimmed, compact_clause);
     }
     let end = trimmed
         .char_indices()
@@ -335,35 +301,17 @@ fn compress_prompt_body(prompt: &str, max_chars: usize) -> String {
         .last()
         .unwrap_or(0);
     let compact = if end == 0 { trimmed } else { &trimmed[..end] };
-    ensure_compact_clause(compact.trim())
+    append_prompt_clause(compact.trim(), compact_clause)
 }
 
-fn ensure_compact_clause(prompt: &str) -> String {
-    let clause = "Keep the response compact. Prefer the smallest complete answer and avoid unnecessary tool churn.";
+#[cfg(test)]
+fn append_prompt_clause(prompt: &str, clause: &str) -> String {
     if prompt.contains(clause) {
         prompt.to_string()
     } else if prompt.is_empty() {
         clause.to_string()
     } else {
         format!("{}\n\n{}", prompt, clause)
-    }
-}
-
-fn ensure_json_contract(prompt: &str) -> String {
-    let clause = "Return only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.";
-    if prompt.contains(clause) {
-        prompt.to_string()
-    } else {
-        format!("{}\n\n{}", prompt.trim(), clause)
-    }
-}
-
-fn ensure_diagnostic_contract(prompt: &str) -> String {
-    let clause = "If the failure points to configuration, endpoint, or authentication, verify that first and choose the minimal corrective action before continuing.";
-    if prompt.contains(clause) {
-        prompt.to_string()
-    } else {
-        format!("{}\n\n{}", prompt.trim(), clause)
     }
 }
 
@@ -403,56 +351,14 @@ fn resolve_root_prompt_path(repo_root: &Path) -> PathBuf {
     team_dir.join(LEAD_PROMPT_FILE)
 }
 
-fn default_root_prompt() -> &'static str {
-    "You are the root architect and coordinator agent. Your role is to plan and delegate — not to implement directly.\n\
-     \n\
-     ALLOWED for root:\n\
-     - Reading files and exploring the codebase (read_file, bash with read-only commands)\n\
-     - Running read-only shell commands (git status, git log, git diff, ls, cat, rg, find, etc.)\n\
-     - Creating tasks with task_create to delegate implementation work to child agents\n\
-     - Using delegate_long_running for background processes and long-running commands\n\
-     - Writing to .tasks/ and .team/ directories (planning and coordination artifacts)\n\
-     - Sending and receiving team messages (team_send, team_inbox)\n\
-     - Reviewing and summarizing results returned by child agents\n\
-     \n\
-     NOT ALLOWED for root:\n\
-     - Directly writing or editing source files (write_file, edit_file on non-planning paths)\n\
-     - Running state-mutating shell commands (git commit, git push, mkdir, rm, cp, cargo fmt, etc.)\n\
-     - Running expensive or long-running commands (cargo build, cargo test, npm install, etc.)\n\
-     \n\
-     When given any request, ask one question first: can this be fully resolved in a single LLM response turn?\n\
-     - YES (answer, explain, summarize, give advice): respond directly. No tools needed.\n\
-     - NO (anything requiring execution, file changes, multi-step work, or external interaction): delegate via task_create. Never attempt it yourself."
+fn default_root_prompt() -> String {
+    PromptPolicyConfig::load().default_root_prompt().to_string()
 }
 
-fn default_worker_prompt() -> &'static str {
-    "You are team member {owner}, role={role}, task_priority={task_priority}. {prompt_focus}\n\
-     \n\
-     EXECUTION PRINCIPLE:\n\
-     Complete the current task autonomously as far as possible.\n\
-     Attempt every step you can execute yourself: install dependencies, run scripts, create files, execute commands.\n\
-     Only stop and surface to the user when a step is genuinely impossible to automate —\n\
-     such as scanning a QR code, entering a CAPTCHA, or approving an irreversible real-world action.\n\
-     For those blockers: give the user exactly one clear instruction, then wait.\n\
-     Never ask the user to do something you can do yourself.\n\
-     \n\
-     TEAM PLANNING PRINCIPLE (when spawning a team):\n\
-     Before creating multiple agents, first create one planning task.\n\
-     The planner's job: analyze what functional agents are needed, define each agent's input/output contract,\n\
-     then create them with task_create. Each agent receives a precise description with goal, method, and success condition.\n\
-     Agents coordinate via team_send. Results flow back to the parent.\n\
-     \n\
-     SELF-HEALING PRINCIPLE:\n\
-     If you are stuck, failing, or blocked on a sub-problem:\n\
-     1. Assess: can a child agent resolve this?\n\
-        YES — create child tasks (Option A: single task_create; Option B: planning task first, then a team).\n\
-        Describe the specific problem clearly so the child can start without asking for clarification.\n\
-        Then mark yourself as waiting (blocked) for the child's result.\n\
-     2. If the problem cannot be resolved by any agent (missing credentials, external system unavailable):\n\
-        explain the blocker clearly and stop. Do NOT create child tasks that will also fail.\n\
-     \n\
-     Tasks are the control plane and worktrees are the execution plane.\n\
-     Use team_send and team_inbox when coordination is required. Repository: {repo_root}"
+fn default_worker_prompt() -> String {
+    PromptPolicyConfig::load()
+        .default_worker_prompt()
+        .to_string()
 }
 
 fn hierarchical_task_protocol() -> &'static str {
@@ -468,16 +374,8 @@ fn hierarchical_task_protocol() -> &'static str {
 9. If an over-threshold decision cannot be resolved by the current parent, escalate upward level by level; if the chain still cannot decide, escalate to the user."
 }
 
-fn skill_authoring_protocol() -> &'static str {
-    "Skill Authoring Protocol:\n\
-Creating or updating a skill MUST be done exclusively via the `skill_create` tool. Never write SKILL.md or any files under skills/ directly with file-writing tools. \
-The `skill_create` tool requires: `name`, `description`, `body`, `test_prompt` (a representative user request that exercises the skill's core capability), and `expect_response_contains` (keywords that must appear in the LLM response). \
-If the skill already exists, `skill_create` updates SKILL.md and tests/smoke.json in-place; any custom integration.py is preserved. \
-After creation or update the tool automatically runs a live LLM test using the skill as system prompt; the skill is only considered complete when all tests pass. \
-If the LLM test fails, revise the skill body or the test expectations and call `skill_create` again with a corrected version. \
-For skills involving real execution (browser automation, API calls, etc.), write an integration test by editing tests/integration.py — a template is generated automatically. \
-The integration test can pause for human interaction by calling wait_for_human('message'), which sends a mail notification; resume by calling `skill_test_signal` after completing the action. \
-To validate an existing skill (all test tiers), use `skill_validate` with the skill name."
+fn skill_authoring_protocol() -> String {
+    SkillAuthoringConfig::load().skill_authoring_protocol_text()
 }
 
 fn root_planning_protocol() -> &'static str {
@@ -533,7 +431,9 @@ mod tests {
                     .expect("time")
                     .as_nanos()
             );
-            let path = std::env::temp_dir().join("rustpilot_prompt_tests").join(unique);
+            let path = std::env::temp_dir()
+                .join("rustpilot_prompt_tests")
+                .join(unique);
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

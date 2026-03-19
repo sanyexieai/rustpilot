@@ -876,10 +876,8 @@ mod tests {
             })
             .expect("save empty rules");
         let rules = manager.design_rules().expect("normalized rules");
-        assert!(rules
-            .protocol_rules
-            .iter()
-            .any(|item| item == "Use `chat_ui.process_tree` from `/api/status` to render the execution hierarchy."));
+        assert!(rules.protocol_rules.iter().any(|item| item
+            == "Use `chat_ui.process_tree` from `/api/status` to render the execution hierarchy."));
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 

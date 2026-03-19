@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -8,21 +8,20 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::app_support::root_actor_id;
 use crate::agent::{AgentProgressReport, run_agent_loop, tool_definitions};
+use crate::app_support::root_actor_id;
 use crate::config::LlmConfig;
 use crate::config::default_llm_user_agent;
+use crate::constants::WORKER_STUCK_NOTIFY_SECS;
 use crate::launch_log;
 use crate::openai_compat::Message;
 use crate::openai_compat::Tool;
-use crate::project_tools::{
-    EnergyMode, LaunchRecord, ProjectContext, TaskRecord, classify_energy, task_priority_rank,
-};
+use crate::project_tools::{EnergyMode, LaunchRecord, ProjectContext, TaskRecord, classify_energy};
 use crate::prompt_manager::{adapt_worker_prompt_detailed, render_worker_system_prompt};
 use crate::resident_agents::{request_worker_launch, stop_launch, wait_for_launch_running};
-use crate::constants::WORKER_STUCK_NOTIFY_SECS;
 use crate::runtime_env::llm_timeout_secs_for_provider;
 use crate::terminal_session::{SessionState, TerminalCreateRequest, TerminalManager};
+use crate::workflow_defaults::task_priority_rank;
 use serde::{Deserialize, Serialize};
 
 pub struct TeamRuntime {
@@ -42,9 +41,18 @@ enum SpawnMode {
 }
 
 enum WorkerHandle {
-    Child { task_id: u64, child: Child },
-    TmuxWindow { task_id: u64, window_name: String },
-    TerminalSession { task_id: u64, session_id: String },
+    Child {
+        task_id: u64,
+        child: Child,
+    },
+    TmuxWindow {
+        task_id: u64,
+        window_name: String,
+    },
+    TerminalSession {
+        task_id: u64,
+        session_id: String,
+    },
     LaunchManaged {
         task_id: u64,
         owner: String,
@@ -220,8 +228,7 @@ fn scheduler_loop(
                                 }
                             }
                         } else {
-                            let _ =
-                                project.tasks().update(*task_id, Some("failed"), None, None);
+                            let _ = project.tasks().update(*task_id, Some("failed"), None, None);
                             failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -229,8 +236,7 @@ fn scheduler_loop(
                     Err(err) => {
                         eprintln!("team scheduler: wait child failed for task {task_id}: {err}");
                         finished.push(*task_id);
-                        let _ =
-                            project.tasks().update(*task_id, Some("failed"), None, None);
+                        let _ = project.tasks().update(*task_id, Some("failed"), None, None);
                         failed.fetch_add(1, Ordering::Relaxed);
                     }
                 },
@@ -262,13 +268,14 @@ fn scheduler_loop(
                     } else if let Ok(info) = terminal_manager.status(session_id)
                         && !matches!(info.state, SessionState::Running)
                     {
-                        let _ =
-                            project.tasks().update(*task_id, Some("failed"), None, None);
+                        let _ = project.tasks().update(*task_id, Some("failed"), None, None);
                         failed.fetch_add(1, Ordering::Relaxed);
                         finished.push(*task_id);
                     }
                 }
-                WorkerHandle::LaunchManaged { task_id, launch_id, .. } => {
+                WorkerHandle::LaunchManaged {
+                    task_id, launch_id, ..
+                } => {
                     let status = &task_status;
                     if status == "completed" {
                         completed.fetch_add(1, Ordering::Relaxed);
@@ -305,14 +312,10 @@ fn scheduler_loop(
             if let Some(worker) = workers.remove(&task_id) {
                 let owner = worker_owner(&worker);
                 let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
-                let _ = project.agents().set_state(
-                    &owner,
-                    "idle",
-                    None,
-                    None,
-                    None,
-                    Some("任务结束"),
-                );
+                let _ =
+                    project
+                        .agents()
+                        .set_state(&owner, "idle", None, None, None, Some("任务结束"));
                 cleanup_worker(worker, &terminal_manager, &repo_root);
                 let _ = reconcile_parent_after_child_exit(&project, task_id);
             }
@@ -365,8 +368,7 @@ fn scheduler_loop(
                                 "team scheduler: create worktree failed for task {}: {}",
                                 task.id, err
                             );
-                            let _ =
-                                project.tasks().update(task.id, Some("failed"), None, None);
+                            let _ = project.tasks().update(task.id, Some("failed"), None, None);
                             failed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
@@ -422,8 +424,13 @@ fn scheduler_loop(
             .map(|(id, _)| *id)
             .collect();
         for task_id in stuck_ids {
-            let elapsed = spawn_times.remove(&task_id).map(|t| t.elapsed().as_secs()).unwrap_or(0);
-            let Some(worker) = workers.remove(&task_id) else { continue; };
+            let elapsed = spawn_times
+                .remove(&task_id)
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let Some(worker) = workers.remove(&task_id) else {
+                continue;
+            };
             let owner = worker_owner(&worker);
             let root = root_actor_id();
 
@@ -437,7 +444,14 @@ fn scheduler_loop(
             ));
 
             let _ = mark_worker_stopped(&repo_root, task_id);
-            let _ = project.agents().set_state(&owner, "idle", None, None, None, Some("watchdog 强制终止"));
+            let _ = project.agents().set_state(
+                &owner,
+                "idle",
+                None,
+                None,
+                None,
+                Some("watchdog 强制终止"),
+            );
             cleanup_worker(worker, &terminal_manager, &repo_root);
 
             if attempts <= MAX_RECOVERY_ATTEMPTS {
@@ -445,14 +459,32 @@ fn scheduler_loop(
                 let msg = format!(
                     "[!] worker 卡住 {elapsed}s，已自动重启（第 {attempts}/{MAX_RECOVERY_ATTEMPTS} 次）：任务 #{task_id}"
                 );
-                let _ = project.mailbox().send_typed("team-manager", &root, "task.stuck", &msg, Some(task_id), None, true, None);
+                let _ = project.mailbox().send_typed(
+                    "team-manager",
+                    &root,
+                    "task.stuck",
+                    &msg,
+                    Some(task_id),
+                    None,
+                    true,
+                    None,
+                );
             } else {
                 let _ = project.tasks().update(task_id, Some("failed"), None, None);
                 failed.fetch_add(1, Ordering::Relaxed);
                 let msg = format!(
                     "[!] worker 卡住 {elapsed}s，已超过最大重启次数，任务 #{task_id} 标记为失败。请手动检查。"
                 );
-                let _ = project.mailbox().send_typed("team-manager", &root, "task.stuck", &msg, Some(task_id), None, true, None);
+                let _ = project.mailbox().send_typed(
+                    "team-manager",
+                    &root,
+                    "task.stuck",
+                    &msg,
+                    Some(task_id),
+                    None,
+                    true,
+                    None,
+                );
                 let _ = reconcile_parent_after_child_exit(&project, task_id);
             }
         }
@@ -465,14 +497,9 @@ fn scheduler_loop(
         let owner = worker_owner(&worker);
         let _ = mark_worker_stopped(&repo_root, worker_task_id(&worker));
         if let Ok(project) = ProjectContext::new(repo_root.clone()) {
-            let _ = project.agents().set_state(
-                &owner,
-                "idle",
-                None,
-                None,
-                None,
-                Some("team 停止"),
-            );
+            let _ = project
+                .agents()
+                .set_state(&owner, "idle", None, None, None, Some("team 停止"));
             let _ = reconcile_parent_after_child_exit(&project, worker_task_id(&worker));
         }
         cleanup_worker(worker, &terminal_manager, &repo_root);
@@ -744,12 +771,8 @@ pub async fn run_teammate_once(
 
     let tools = tools_for_role_and_priority(&role_hint, &task.priority);
     let progress = crate::activity::new_activity_handle();
-    let heartbeat = WorkerHeartbeat::start(
-        repo_root.clone(),
-        owner.clone(),
-        task_id,
-        progress.clone(),
-    );
+    let heartbeat =
+        WorkerHeartbeat::start(repo_root.clone(), owner.clone(), task_id, progress.clone());
     let report = AgentProgressReport {
         from: owner.clone(),
         to: primary_notification_target.clone(),
@@ -1013,12 +1036,9 @@ pub async fn run_teammate_once(
                         "[worker] task={} self-recovery: child tasks created, entering blocked",
                         task_id
                     ));
-                    let _ = project.tasks().update(
-                        task_id,
-                        Some("blocked"),
-                        Some(&owner),
-                        None,
-                    );
+                    let _ = project
+                        .tasks()
+                        .update(task_id, Some("blocked"), Some(&owner), None);
                     let _ = send_task_notifications(
                         &project,
                         &notification_targets,
@@ -1286,7 +1306,11 @@ fn run_timer_agent(task_id: u64, owner: &str, seconds: u64) {
     }
 }
 
-fn task_notification_targets(project: &ProjectContext, task: &TaskRecord, owner: &str) -> Vec<String> {
+fn task_notification_targets(
+    project: &ProjectContext,
+    task: &TaskRecord,
+    owner: &str,
+) -> Vec<String> {
     let mut targets = Vec::new();
     if let Some(parent_task_id) = task.parent_task_id
         && let Ok(parent_task) = project.tasks().get_record(parent_task_id)
@@ -1487,7 +1511,9 @@ fn emit_parent_mailbox_updates(repo_root: &Path, owner: &str, cursor: &mut usize
             item.message
         ));
         if item.requires_ack {
-            let _ = project.mailbox().ack(owner, &item.msg_id, "received by parent worker");
+            let _ = project
+                .mailbox()
+                .ack(owner, &item.msg_id, "received by parent worker");
         }
     }
 }
@@ -1521,14 +1547,10 @@ pub(crate) fn reconcile_parent_after_child_exit(
 
     let has_blocked = children.iter().any(|task| task.status == "blocked");
     let has_failed = children.iter().any(|task| task.status == "failed");
-    let has_active = children.iter().any(|task| {
-        matches!(
-            task.status.as_str(),
-            "pending" | "in_progress" | "paused"
-        )
-    });
-    let all_children_done_and_failed =
-        !has_active && !has_blocked && has_failed;
+    let has_active = children
+        .iter()
+        .any(|task| matches!(task.status.as_str(), "pending" | "in_progress" | "paused"));
+    let all_children_done_and_failed = !has_active && !has_blocked && has_failed;
 
     let next_status = if all_children_done_and_failed {
         // 所有子任务都失败了：检查 parent 的恢复次数，决定是重新调度还是放弃
@@ -1587,8 +1609,12 @@ pub(crate) fn reconcile_parent_after_child_exit(
         } else {
             ("idle", "子任务已回收，等待父任务继续")
         };
-        let channel = existing_state.as_ref().and_then(|state| state.channel.as_deref());
-        let target = existing_state.as_ref().and_then(|state| state.target.as_deref());
+        let channel = existing_state
+            .as_ref()
+            .and_then(|state| state.channel.as_deref());
+        let target = existing_state
+            .as_ref()
+            .and_then(|state| state.target.as_deref());
         let _ = project.agents().set_state(
             &parent.owner,
             agent_status,
@@ -1621,8 +1647,7 @@ fn cleanup_worker(worker: WorkerHandle, terminal_manager: &TerminalManager, repo
             let _ = terminal_manager.kill(&session_id);
         }
         WorkerHandle::LaunchManaged { launch_id, .. } => {
-            if let Ok(project) = ProjectContext::new(repo_root.to_path_buf())
-            {
+            if let Ok(project) = ProjectContext::new(repo_root.to_path_buf()) {
                 let _ = stop_launch(&project, &launch_id);
             }
         }
@@ -1757,9 +1782,7 @@ fn register_worker_agent(
             Some("worker 运行中"),
         )?,
         WorkerHandle::LaunchManaged {
-            task_id,
-            launch_id,
-            ..
+            task_id, launch_id, ..
         } => {
             let launch = project.launches().get(launch_id)?.unwrap_or(LaunchRecord {
                 launch_id: launch_id.clone(),
@@ -2441,7 +2464,9 @@ fn maybe_reflect_energy(
 
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_parent_after_child_exit, send_task_notifications, task_notification_targets};
+    use super::{
+        reconcile_parent_after_child_exit, send_task_notifications, task_notification_targets,
+    };
     use crate::project_tools::{ProjectContext, TaskCreateOptions, TaskRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2633,7 +2658,12 @@ mod tests {
         let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
         project
             .tasks()
-            .update(parent.id, Some("in_progress"), Some("teammate-parent"), None)
+            .update(
+                parent.id,
+                Some("in_progress"),
+                Some("teammate-parent"),
+                None,
+            )
             .expect("claim parent");
 
         let child_raw = project

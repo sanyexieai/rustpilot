@@ -41,7 +41,7 @@ pub use system_model::{
     SystemAlert, SystemDecision, SystemLaunch, SystemModel, SystemModelManager, SystemPromptChange,
     SystemProposal, SystemProtocol, SystemResident, SystemSummary, SystemTask,
 };
-pub use task::{TaskCreateOptions, TaskManager, TaskRecord, task_priority_rank};
+pub use task::{TaskCreateOptions, TaskManager, TaskRecord};
 pub use tools::{handle_project_tool_call, project_tool_definitions};
 pub use ui_page::{
     UiDesignRules, UiPage as GeneratedUiPage, UiPageContext, UiPageManager, UiUserIntentMemory,

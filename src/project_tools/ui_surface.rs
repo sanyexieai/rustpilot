@@ -754,8 +754,7 @@ mod tests {
                 launch_effective_mode: "multi_window".to_string(),
                 launch_backend: "windows_start_process".to_string(),
                 launch_backend_note:
-                    "visible windows are launched through Start-Process cmd.exe hosts"
-                        .to_string(),
+                    "visible windows are launched through Start-Process cmd.exe hosts".to_string(),
                 resident_count: 1,
                 pending_tasks: 0,
                 running_tasks: 1,

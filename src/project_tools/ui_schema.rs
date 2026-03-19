@@ -849,8 +849,7 @@ mod tests {
                 launch_effective_mode: "multi_window".to_string(),
                 launch_backend: "windows_start_process".to_string(),
                 launch_backend_note:
-                    "visible windows are launched through Start-Process cmd.exe hosts"
-                        .to_string(),
+                    "visible windows are launched through Start-Process cmd.exe hosts".to_string(),
                 resident_count: 1,
                 pending_tasks: 1,
                 running_tasks: 0,
@@ -979,8 +978,18 @@ mod tests {
         );
         assert!(schema.sections.iter().any(|item| item.kind == "main_chat"));
         assert!(schema.sections.iter().any(|item| item.kind == "group_chat"));
-        assert!(schema.sections.iter().any(|item| item.kind == "agent_details"));
-        assert!(schema.sections.iter().any(|item| item.kind == "process_tree"));
+        assert!(
+            schema
+                .sections
+                .iter()
+                .any(|item| item.kind == "agent_details")
+        );
+        assert!(
+            schema
+                .sections
+                .iter()
+                .any(|item| item.kind == "process_tree")
+        );
         assert!(schema.sections.iter().any(|item| item.kind == "launches"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
@@ -1004,8 +1013,7 @@ mod tests {
                 launch_effective_mode: "multi_window".to_string(),
                 launch_backend: "windows_start_process".to_string(),
                 launch_backend_note:
-                    "visible windows are launched through Start-Process cmd.exe hosts"
-                        .to_string(),
+                    "visible windows are launched through Start-Process cmd.exe hosts".to_string(),
                 resident_count: 1,
                 pending_tasks: 0,
                 running_tasks: 1,

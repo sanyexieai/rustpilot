@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, LaunchRegistryManager, Mailbox,
-    LaunchSettingsManager, PromptHistoryManager, ProposalManager, ReflectionManager, ResidentConfigManager,
-    ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager, UiPageManager,
-    UiSchemaManager, UiSurfaceManager, WorktreeManager,
+    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, LaunchRegistryManager,
+    LaunchSettingsManager, Mailbox, PromptHistoryManager, ProposalManager, ReflectionManager,
+    ResidentConfigManager, ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager,
+    UiPageManager, UiSchemaManager, UiSurfaceManager, WorktreeManager,
 };
 
 #[derive(Debug, Clone)]

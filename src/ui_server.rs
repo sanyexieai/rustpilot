@@ -495,7 +495,8 @@ fn build_chat_ui_payload(
         })
         .collect::<Vec<_>>();
 
-    let main_session_id = transcript_session_id_for_agent(&primary_actor_id, &sessions, &primary_actor_id);
+    let main_session_id =
+        transcript_session_id_for_agent(&primary_actor_id, &sessions, &primary_actor_id);
     let main_transcript = main_session_id
         .as_deref()
         .map(|session_id| load_transcript(project, session_id))
@@ -637,7 +638,10 @@ fn build_process_tree_payload(
     let tasks = project.tasks().list_records()?;
     let mut children_map = BTreeMap::<Option<u64>, Vec<crate::project_tools::TaskRecord>>::new();
     for task in tasks {
-        children_map.entry(task.parent_task_id).or_default().push(task);
+        children_map
+            .entry(task.parent_task_id)
+            .or_default()
+            .push(task);
     }
     for children in children_map.values_mut() {
         children.sort_by_key(|task| task.id);
@@ -1297,7 +1301,9 @@ mod tests {
         assert!(is_bootstrap_shell(
             "<html><body>waiting for generated ui page...</body></html>"
         ));
-        assert!(!is_bootstrap_shell("<html><body><div id=\"app\">ready</div></body></html>"));
+        assert!(!is_bootstrap_shell(
+            "<html><body><div id=\"app\">ready</div></body></html>"
+        ));
     }
 
     #[test]
@@ -1306,7 +1312,13 @@ mod tests {
         let project = project_context(temp.path());
         project
             .agents()
-            .ensure_profile("root-node", "root", "coordinate work", &["route"], &["block"])
+            .ensure_profile(
+                "root-node",
+                "root",
+                "coordinate work",
+                &["route"],
+                &["block"],
+            )
             .expect("root profile");
         project
             .agents()

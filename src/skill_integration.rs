@@ -1,3 +1,4 @@
+use crate::skill_authoring::SkillAuthoringConfig;
 use anyhow::Context as _;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -13,7 +14,9 @@ pub struct IntegrationOutput {
 
 /// Returns true if `tests/integration.py` exists for the skill.
 pub fn has_integration_test(skill_dir: &Path) -> bool {
-    skill_dir.join("tests").join("integration.py").is_file()
+    SkillAuthoringConfig::load()
+        .integration_test_path(skill_dir)
+        .is_file()
 }
 
 /// Signal file path for a skill: `.team/skill_signals/<skill_name>`.
@@ -35,7 +38,7 @@ pub async fn run_integration_script(
     signal_file: &Path,
     on_waiting: impl Fn(String) + Send + Sync + 'static,
 ) -> anyhow::Result<IntegrationOutput> {
-    let script = skill_dir.join("tests").join("integration.py");
+    let script = SkillAuthoringConfig::load().integration_test_path(skill_dir);
     if !script.is_file() {
         return Ok(IntegrationOutput {
             lines: vec![],

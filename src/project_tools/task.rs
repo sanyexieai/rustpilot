@@ -5,6 +5,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::util::now_secs_f64;
+use crate::workflow_defaults::{
+    STATUS_BLOCKED, STATUS_COMPLETED, STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PAUSED,
+    STATUS_PENDING, default_task_priority, default_task_role_hint, is_valid_task_status,
+    normalize_task_priority, normalize_task_role_hint, task_priority_rank,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskRecord {
@@ -106,7 +111,7 @@ impl TaskManager {
                 role_hint: normalize_task_role_hint(
                     options.role_hint.as_deref().unwrap_or(&inferred_role),
                 ),
-                status: "pending".to_string(),
+                status: STATUS_PENDING.to_string(),
                 owner: String::new(),
                 worktree: String::new(),
                 parent_task_id: options.parent_task_id,
@@ -191,12 +196,12 @@ impl TaskManager {
             let min_rank = task_priority_rank(min_priority);
 
             let Some(mut task) = tasks.into_iter().find(|task| {
-                task.status == "pending" && task_priority_rank(&task.priority) >= min_rank
+                task.status == STATUS_PENDING && task_priority_rank(&task.priority) >= min_rank
             }) else {
                 return Ok(None);
             };
 
-            task.status = "in_progress".to_string();
+            task.status = STATUS_IN_PROGRESS.to_string();
             task.owner = owner.to_string();
             task.updated_at = now_secs_f64();
             self.save(&task)?;
@@ -216,8 +221,8 @@ impl TaskManager {
             if !owner.is_empty() {
                 task.owner = owner.to_string();
             }
-            if task.status == "pending" {
-                task.status = "in_progress".to_string();
+            if task.status == STATUS_PENDING {
+                task.status = STATUS_IN_PROGRESS.to_string();
             }
             task.updated_at = now_secs_f64();
             self.save(&task)?;
@@ -245,12 +250,12 @@ impl TaskManager {
         let mut lines = Vec::new();
         for task in tasks {
             let marker = match task.status.as_str() {
-                "pending" => "[ ]",
-                "in_progress" => "[>]",
-                "blocked" => "[!]",
-                "paused" => "[||]",
+                STATUS_PENDING => "[ ]",
+                STATUS_IN_PROGRESS => "[>]",
+                STATUS_BLOCKED => "[!]",
+                STATUS_PAUSED => "[||]",
                 "cancelled" => "[-]",
-                "completed" => "[x]",
+                STATUS_COMPLETED => "[x]",
                 _ => "[?]",
             };
             let owner = if task.owner.is_empty() {
@@ -293,7 +298,7 @@ impl TaskManager {
             Ok(self
                 .load_all()?
                 .into_iter()
-                .filter(|task| task.status == "pending")
+                .filter(|task| task.status == STATUS_PENDING)
                 .count())
         })
     }
@@ -307,7 +312,7 @@ impl TaskManager {
                     task.parent_task_id == parent_task_id
                         && matches!(
                             task.status.as_str(),
-                            "pending" | "in_progress" | "blocked" | "paused"
+                            STATUS_PENDING | STATUS_IN_PROGRESS | STATUS_BLOCKED | STATUS_PAUSED
                         )
                 })
                 .count())
@@ -326,7 +331,10 @@ impl TaskManager {
             if message.is_empty() {
                 anyhow::bail!("reply cannot be empty");
             }
-            if !matches!(next_status, "pending" | "in_progress" | "blocked" | "paused") {
+            if !matches!(
+                next_status,
+                STATUS_PENDING | STATUS_IN_PROGRESS | STATUS_BLOCKED | STATUS_PAUSED
+            ) {
                 anyhow::bail!("invalid task status: {}", next_status);
             }
             if !task.description.trim().is_empty() {
@@ -351,7 +359,7 @@ impl TaskManager {
                 task.subject == subject
                     && matches!(
                         task.status.as_str(),
-                        "pending" | "in_progress" | "blocked" | "paused"
+                        STATUS_PENDING | STATUS_IN_PROGRESS | STATUS_BLOCKED | STATUS_PAUSED
                     )
             }))
         })
@@ -367,7 +375,7 @@ impl TaskManager {
             Ok(self
                 .load_all()?
                 .into_iter()
-                .filter(|task| task.subject == subject && task.status == "failed")
+                .filter(|task| task.subject == subject && task.status == STATUS_FAILED)
                 .count())
         })
     }
@@ -458,42 +466,14 @@ impl TaskManager {
     }
 }
 
-fn default_task_priority() -> String {
-    "medium".to_string()
-}
-
-fn default_task_role_hint() -> String {
-    "developer".to_string()
-}
-
-fn is_valid_task_status(status: &str) -> bool {
-    matches!(
-        status,
-        "pending" | "in_progress" | "blocked" | "paused" | "cancelled" | "completed" | "failed"
-    )
-}
-
-fn normalize_task_priority(priority: &str) -> String {
-    match priority.trim().to_lowercase().as_str() {
-        "critical" => "critical".to_string(),
-        "high" => "high".to_string(),
-        "low" => "low".to_string(),
-        _ => "medium".to_string(),
-    }
-}
-
-fn normalize_task_role_hint(role_hint: &str) -> String {
-    match role_hint.trim().to_lowercase().as_str() {
-        "critic" => "critic".to_string(),
-        "ui" => "ui".to_string(),
-        "design" => "design".to_string(),
-        _ => "developer".to_string(),
-    }
-}
-
 fn infer_task_role_hint(subject: &str, description: &str) -> String {
     let text = format!("{} {}", subject, description).to_lowercase();
-    if text.contains("design") || text.contains("ui") || text.contains("ux") || text.contains("界面") || text.contains("设计") {
+    if text.contains("design")
+        || text.contains("ui")
+        || text.contains("ux")
+        || text.contains("界面")
+        || text.contains("设计")
+    {
         return "design".to_string();
     }
     if text.contains("proposal")
@@ -505,16 +485,6 @@ fn infer_task_role_hint(subject: &str, description: &str) -> String {
         return "critic".to_string();
     }
     "developer".to_string()
-}
-
-pub fn task_priority_rank(priority: &str) -> u8 {
-    match priority {
-        "critical" => 4,
-        "high" => 3,
-        "medium" => 2,
-        "low" => 1,
-        _ => 2,
-    }
 }
 
 #[cfg(test)]
@@ -558,8 +528,7 @@ mod tests {
     fn update_accepts_paused_and_cancelled() {
         let manager = TaskManager::new(fresh_tasks_dir("update")).expect("manager");
         let created = manager.create("task", "").expect("create");
-        let task_id = serde_json::from_str::<serde_json::Value>(&created)
-            .expect("json")["id"]
+        let task_id = serde_json::from_str::<serde_json::Value>(&created).expect("json")["id"]
             .as_u64()
             .expect("id");
 
@@ -573,8 +542,7 @@ mod tests {
         let cancelled = manager
             .update(task_id, Some("cancelled"), None, None)
             .expect("cancel");
-        let cancelled_json: serde_json::Value =
-            serde_json::from_str(&cancelled).expect("json");
+        let cancelled_json: serde_json::Value = serde_json::from_str(&cancelled).expect("json");
         assert_eq!(cancelled_json["status"], "cancelled");
     }
 }

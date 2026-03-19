@@ -43,11 +43,17 @@ struct ColoredLine {
 
 impl ColoredLine {
     fn plain(text: impl Into<String>) -> Self {
-        Self { text: text.into(), color: None }
+        Self {
+            text: text.into(),
+            color: None,
+        }
     }
 
     fn colored(text: impl Into<String>, color: Color) -> Self {
-        Self { text: text.into(), color: Some(color) }
+        Self {
+            text: text.into(),
+            color: Some(color),
+        }
     }
 }
 
@@ -118,8 +124,8 @@ impl InteractiveConsole {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<String>> {
-        let is_ctrl_d = matches!(key.code, KeyCode::Char('d'))
-            && key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_ctrl_d =
+            matches!(key.code, KeyCode::Char('d')) && key.modifiers.contains(KeyModifiers::CONTROL);
 
         if !is_ctrl_d {
             self.ctrl_d_count = 0;
@@ -189,7 +195,6 @@ impl InteractiveConsole {
         }
         Ok(())
     }
-
 }
 
 impl Drop for InteractiveConsole {
@@ -234,10 +239,7 @@ pub async fn run() -> anyhow::Result<()> {
             resident.max_parallel,
         );
     }
-    if args
-        .get(1)
-        .is_some_and(|value| value == "root-runtime-run")
-    {
+    if args.get(1).is_some_and(|value| value == "root-runtime-run") {
         let (repo_root, parent_pid) = parse_root_runtime_args(&args[2..])?;
         load_repo_env(&repo_root);
         return run_root_runtime(repo_root, parent_pid).await;
@@ -384,7 +386,10 @@ async fn run_root_console() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_root_runtime(repo_root: std::path::PathBuf, parent_pid: Option<u32>) -> anyhow::Result<()> {
+async fn run_root_runtime(
+    repo_root: std::path::PathBuf,
+    parent_pid: Option<u32>,
+) -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
     }
@@ -582,7 +587,9 @@ async fn process_console_input(
             &interaction_mode.label(),
             "active",
         )?;
-        project.sessions().save_messages(current_session_id, messages)?;
+        project
+            .sessions()
+            .save_messages(current_session_id, messages)?;
         *skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
         return Ok(outcome);
     }
@@ -614,7 +621,9 @@ async fn process_console_input(
         &interaction_mode.label(),
         "active",
     )?;
-    project.sessions().save_messages(current_session_id, messages)?;
+    project
+        .sessions()
+        .save_messages(current_session_id, messages)?;
     *skills = SkillRegistry::load().unwrap_or_else(|_| SkillRegistry::empty());
     Ok(outcome)
 }
@@ -711,11 +720,13 @@ fn start_parent_exit_watch(parent_pid: Option<u32>) -> Receiver<()> {
     let Some(parent_pid) = parent_pid else {
         return rx;
     };
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(500));
-        if !process_is_alive(parent_pid) {
-            let _ = tx.send(());
-            break;
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            if !process_is_alive(parent_pid) {
+                let _ = tx.send(());
+                break;
+            }
         }
     });
     rx
@@ -815,48 +826,83 @@ fn agent_color(agent: &str) -> Color {
         Color::DarkMagenta,
         Color::DarkCyan,
     ];
-    let hash: usize = agent.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    let hash: usize = agent.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
     PALETTE[hash % PALETTE.len()]
 }
 
-fn apply_frame_to_console(frame: &WireFrame, console: &mut InteractiveConsole, lines: &mut Vec<ColoredLine>) {
+fn apply_frame_to_console(
+    frame: &WireFrame,
+    console: &mut InteractiveConsole,
+    lines: &mut Vec<ColoredLine>,
+) {
     match frame {
         WireFrame::Response { response } => match &response.payload {
             WireResponse::Ack { message } => lines.push(ColoredLine::plain(message.clone())),
             WireResponse::Error { message } => {
-                lines.push(ColoredLine::colored(format!("error: {}", message), Color::Red));
+                lines.push(ColoredLine::colored(
+                    format!("error: {}", message),
+                    Color::Red,
+                ));
             }
-            other => lines.push(ColoredLine::plain(serde_json::to_string(other).unwrap_or_default())),
+            other => lines.push(ColoredLine::plain(
+                serde_json::to_string(other).unwrap_or_default(),
+            )),
         },
         WireFrame::Event { event } => match &event.payload {
             WireEvent::Error { message } => {
-                lines.push(ColoredLine::colored(format!("error: {}", message), Color::Red));
+                lines.push(ColoredLine::colored(
+                    format!("error: {}", message),
+                    Color::Red,
+                ));
             }
-            WireEvent::SessionUpdated { focus, status, abortable } => {
+            WireEvent::SessionUpdated {
+                focus,
+                status,
+                abortable,
+            } => {
                 console.set_prompt(focus.clone());
                 let text = if let Some(abortable) = abortable {
-                    format!("[session] focus={} status={} abortable={}", focus, status, abortable)
+                    format!(
+                        "[session] focus={} status={} abortable={}",
+                        focus, status, abortable
+                    )
                 } else {
                     format!("[session] focus={} status={}", focus, status)
                 };
                 lines.push(ColoredLine::colored(text, Color::Cyan));
             }
             WireEvent::ToolStarted { name } => {
-                lines.push(ColoredLine::colored(format!("[tool] {} ...", name), Color::Magenta));
+                lines.push(ColoredLine::colored(
+                    format!("[tool] {} ...", name),
+                    Color::Magenta,
+                ));
             }
             WireEvent::ToolFinished { name, ok } => {
                 let color = if *ok { Color::Magenta } else { Color::Red };
                 let mark = if *ok { "✓" } else { "✗" };
-                lines.push(ColoredLine::colored(format!("[tool] {} {}", mark, name), color));
+                lines.push(ColoredLine::colored(
+                    format!("[tool] {} {}", mark, name),
+                    color,
+                ));
             }
-            WireEvent::TaskUpdated { task_id, status, summary } => {
+            WireEvent::TaskUpdated {
+                task_id,
+                status,
+                summary,
+            } => {
                 let id_str = task_id.map(|id| format!("#{} ", id)).unwrap_or_default();
                 lines.push(ColoredLine::colored(
                     format!("[task] {}[{}] {}", id_str, status, summary),
                     Color::Blue,
                 ));
             }
-            WireEvent::MessageDelta { role, content, from } => {
+            WireEvent::MessageDelta {
+                role,
+                content,
+                from,
+            } => {
                 if role == "system" {
                     // 按发送方 agent 名字稳定映射到颜色，相同团队始终同色
                     let color = from.as_deref().map(agent_color).unwrap_or(Color::Yellow);
@@ -898,10 +944,7 @@ fn confirm_unfinished_tasks(project: &ProjectContext) -> anyhow::Result<()> {
     println!();
     println!("发现 {} 个未完成的任务：", active.len());
     for task in &active {
-        println!(
-            "  #{} [{}] {}",
-            task.id, task.status, task.subject
-        );
+        println!("  #{} [{}] {}", task.id, task.status, task.subject);
     }
     println!();
 
@@ -909,10 +952,7 @@ fn confirm_unfinished_tasks(project: &ProjectContext) -> anyhow::Result<()> {
     let mut cancelled = 0usize;
 
     for task in &active {
-        print!(
-            "继续任务 #{} 「{}」? (Y/n): ",
-            task.id, task.subject
-        );
+        print!("继续任务 #{} 「{}」? (Y/n): ", task.id, task.subject);
         io::Write::flush(&mut io::stdout())?;
 
         let mut input = String::new();

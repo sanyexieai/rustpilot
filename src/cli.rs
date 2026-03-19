@@ -340,11 +340,15 @@ pub fn handle_cli_command(
     if let Some(rest) = trimmed.strip_prefix("/task ").map(str::trim) {
         let mut parts = rest.split_whitespace();
         let Some(action) = parts.next() else {
-            println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+            println!(
+                "usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]"
+            );
             return Ok(Some(CliAction::Continue));
         };
         let Some(task_id_raw) = parts.next() else {
-            println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+            println!(
+                "usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]"
+            );
             return Ok(Some(CliAction::Continue));
         };
         let task_id = match task_id_raw.parse::<u64>() {
@@ -379,7 +383,9 @@ pub fn handle_cli_command(
                 }));
             }
             _ => {
-                println!("usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]");
+                println!(
+                    "usage: /task pause|resume|cancel|priority <task_id> [critical|high|medium|low]"
+                );
                 return Ok(Some(CliAction::Continue));
             }
         }

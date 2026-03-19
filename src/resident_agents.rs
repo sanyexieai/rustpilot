@@ -225,11 +225,7 @@ fn request_resident_launch(
         task_id: None,
         parent_task_id: None,
         parent_agent_id: Some("root".to_string()),
-        max_parallel: Some(
-            config
-                .max_parallel_override
-                .unwrap_or(max_parallel.max(1)),
-        ),
+        max_parallel: Some(config.max_parallel_override.unwrap_or(max_parallel.max(1))),
     };
     Ok(project.launches().request(request)?.launch_id)
 }
@@ -286,7 +282,10 @@ pub(crate) fn wait_for_launch_running(
 /// 退出时扫 launch registry，强制 kill 所有仍标记为 running 的进程。
 /// 覆盖范围包括 workers、supervisor 不知道的代理、以及 launcher 自行拉起的进程。
 pub(crate) fn kill_all_running_launches(project: &ProjectContext) {
-    let Ok(records) = project.launches().list_with_status(&["running", "requested"]) else {
+    let Ok(records) = project
+        .launches()
+        .list_with_status(&["running", "requested"])
+    else {
         return;
     };
     for record in records {
@@ -302,13 +301,13 @@ pub(crate) fn stop_launch(project: &ProjectContext, launch_id: &str) -> anyhow::
         if let Some(pid) = record.pid {
             let _ = kill_process(pid);
         }
-        let _ = project
-            .launches()
-            .mark_stopped(launch_id, None)?;
+        let _ = project.launches().mark_stopped(launch_id, None)?;
         if record.kind == "worker" {
             if let Some(task_id) = record.task_id {
                 let _ = mark_worker_stopped(project.repo_root(), task_id);
-                let _ = project.tasks().update(task_id, Some("cancelled"), None, None);
+                let _ = project
+                    .tasks()
+                    .update(task_id, Some("cancelled"), None, None);
                 let _ = project.agents().set_state(
                     &record.owner,
                     "idle",
@@ -521,9 +520,7 @@ fn kill_process(pid: u32) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::stop_launch;
-    use crate::project_tools::{
-        LaunchRequest, ProjectContext, TaskCreateOptions, TaskRecord,
-    };
+    use crate::project_tools::{LaunchRequest, ProjectContext, TaskCreateOptions, TaskRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -574,7 +571,12 @@ mod tests {
         let parent: TaskRecord = serde_json::from_str(&parent_raw).expect("parse parent");
         project
             .tasks()
-            .update(parent.id, Some("in_progress"), Some("teammate-parent"), None)
+            .update(
+                parent.id,
+                Some("in_progress"),
+                Some("teammate-parent"),
+                None,
+            )
             .expect("update parent");
         project
             .agents()
@@ -644,7 +646,6 @@ mod tests {
             .expect("parent state record");
         assert_eq!(parent_state.status, "idle");
     }
-
 }
 
 pub fn run_resident_agent(
@@ -713,16 +714,14 @@ fn run_launcher_loop(
             if record.status == "requested" {
                 match launch_record_process(&project, &repo_root, &record) {
                     Ok((pid, process_started_at, window_title, channel, target)) => {
-                        let _ = project
-                            .launches()
-                            .update_running(
-                                &record.launch_id,
-                                pid,
-                                process_started_at,
-                                &channel,
-                                &target,
-                                &window_title,
-                            );
+                        let _ = project.launches().update_running(
+                            &record.launch_id,
+                            pid,
+                            process_started_at,
+                            &channel,
+                            &target,
+                            &window_title,
+                        );
                     }
                     Err(err) => {
                         let text = err.to_string();
@@ -857,11 +856,7 @@ fn run_scheduler_loop(
             let snapshot = runtime.snapshot();
             launch_log::emit(format!(
                 "[resident] agent={} mode=scheduler running={} launched={} completed={} failed={}",
-                agent_id,
-                snapshot.running,
-                snapshot.launched,
-                snapshot.completed,
-                snapshot.failed
+                agent_id, snapshot.running, snapshot.launched, snapshot.completed, snapshot.failed
             ));
             last_log = Instant::now();
         }

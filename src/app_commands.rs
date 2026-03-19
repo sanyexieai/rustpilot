@@ -10,6 +10,8 @@ use crate::external_tools::import_external_tool;
 use crate::openai_compat::Message;
 use crate::project_tools::{ApprovalMode, LaunchPresentationMode, ProjectContext};
 use crate::resident_agents::AgentSupervisor;
+use crate::resident_agents::{restart_launch, stop_launch};
+use crate::root_request::{ClassifiedRootRequest, RootRequestConfig};
 use crate::runtime::approval::render_approval_status;
 use crate::runtime::lead::{
     estimate_text_tokens, looks_like_question, maybe_reflect_energy, run_root_turn_with_recovery,
@@ -19,15 +21,17 @@ use crate::runtime::policy::{
 };
 use crate::runtime::residents::{render_residents_status, render_team_status};
 use crate::runtime::team::{
-    control_task, focus_lead, focus_shell, focus_team, focus_worker, render_task_tree,
-    reply_task, resident_send, team_run, team_start, team_stop,
+    control_task, focus_lead, focus_shell, focus_team, focus_worker, render_task_tree, reply_task,
+    resident_send, team_run, team_start, team_stop,
 };
 use crate::runtime::usage::render_usage_text;
-use crate::resident_agents::{restart_launch, stop_launch};
 use crate::shell_file_tools::{is_dangerous_command, run_shell_command};
 use crate::skills::SkillRegistry;
 use crate::team::send_input_to_worker;
 use crate::wire::WireFrame;
+use crate::workflow_defaults::{
+    FOCUS_ROOT, FOCUS_SHELL, FOCUS_TEAM, SESSION_STATUS_ACTIVE, SESSION_STATUS_IDLE,
+};
 use std::path::Path;
 
 pub(crate) enum LoopDirective {
@@ -266,8 +270,11 @@ pub(crate) async fn process_cli_action(
                 &runtime.interaction_mode.label(),
                 "active",
             )?;
-            frames.push(WireFrame::session_updated("root", "active"));
-            frames.push(WireFrame::ack("focus: root"));
+            frames.push(WireFrame::session_updated(
+                FOCUS_ROOT,
+                SESSION_STATUS_ACTIVE,
+            ));
+            frames.push(WireFrame::ack(format!("focus: {}", FOCUS_ROOT)));
         }
         CliAction::FocusShell => {
             focus_shell(runtime.project, runtime.interaction_mode);
@@ -277,8 +284,11 @@ pub(crate) async fn process_cli_action(
                 &runtime.interaction_mode.label(),
                 "active",
             )?;
-            frames.push(WireFrame::session_updated("shell", "active"));
-            frames.push(WireFrame::ack("focus: shell"));
+            frames.push(WireFrame::session_updated(
+                FOCUS_SHELL,
+                SESSION_STATUS_ACTIVE,
+            ));
+            frames.push(WireFrame::ack(format!("focus: {}", FOCUS_SHELL)));
         }
         CliAction::FocusTeam => {
             focus_team(runtime.project, runtime.interaction_mode);
@@ -288,8 +298,8 @@ pub(crate) async fn process_cli_action(
                 &runtime.interaction_mode.label(),
                 "idle",
             )?;
-            frames.push(WireFrame::session_updated("team", "idle"));
-            frames.push(WireFrame::ack("focus: team"));
+            frames.push(WireFrame::session_updated(FOCUS_TEAM, SESSION_STATUS_IDLE));
+            frames.push(WireFrame::ack(format!("focus: {}", FOCUS_TEAM)));
         }
         CliAction::FocusWorker { task_id } => {
             let message = focus_worker(
@@ -395,10 +405,7 @@ pub(crate) async fn process_cli_action(
                 }
                 "restart" => {
                     let restarted = restart_launch(runtime.project, &launch_id)?;
-                    format!(
-                        "restarted launch {} as {}",
-                        launch_id, restarted.launch_id
-                    )
+                    format!("restarted launch {} as {}", launch_id, restarted.launch_id)
                 }
                 _ => format!("unsupported launch action: {}", action),
             };
@@ -542,8 +549,10 @@ fn default_session_messages(system_prompt: &str) -> Vec<Message> {
 
 fn session_status_for_mode(interaction_mode: &InteractionMode) -> &'static str {
     match interaction_mode {
-        InteractionMode::TeamQueue => "idle",
-        InteractionMode::Lead | InteractionMode::Shell | InteractionMode::Worker { .. } => "active",
+        InteractionMode::TeamQueue => SESSION_STATUS_IDLE,
+        InteractionMode::Lead | InteractionMode::Shell | InteractionMode::Worker { .. } => {
+            SESSION_STATUS_ACTIVE
+        }
     }
 }
 
@@ -555,7 +564,7 @@ fn persist_session(
 ) -> anyhow::Result<()> {
     project
         .sessions()
-        .ensure_session(session_id, label, "root", "active")?;
+        .ensure_session(session_id, label, FOCUS_ROOT, SESSION_STATUS_ACTIVE)?;
     project.sessions().save_messages(session_id, messages)
 }
 
@@ -566,66 +575,21 @@ enum RootRequestDisposition {
     DelegateSkillAuthoring,
 }
 
-const ROOT_BUILD_VERBS_CLEAN: &[&str] = &[
-    "write ",
-    "create ",
-    "generate ",
-    "implement ",
-    "build ",
-    "make ",
-    "scaffold ",
-    "\u{5199}",
-    "\u{5199}\u{4e00}\u{4e2a}",
-    "\u{505a}\u{4e00}\u{4e2a}",
-    "\u{505a}\u{4e2a}",
-    "\u{521b}\u{5efa}",
-    "\u{751f}\u{6210}",
-    "\u{5b9e}\u{73b0}",
-];
-
-const ROOT_SKILL_TOKENS_CLEAN: &[&str] = &["skill", "skills", "\u{6280}\u{80fd}"];
-
-const ROOT_ARTIFACT_TOKENS_CLEAN: &[&str] = &[
-    "html",
-    "css",
-    "javascript",
-    "typescript",
-    "react",
-    "vue",
-    "component",
-    "page",
-    "login page",
-    "single file",
-    "file",
-    "\u{9875}\u{9762}",
-    "\u{767b}\u{5f55}\u{9875}",
-    "\u{5355}\u{6587}\u{4ef6}",
-    "\u{7ec4}\u{4ef6}",
-    "\u{7f51}\u{9875}",
-    "\u{811a}\u{672c}",
-    "\u{6587}\u{4ef6}",
-];
-
-fn contains_any_token(haystack: &str, tokens: &[&str]) -> bool {
-    tokens.iter().any(|token| haystack.contains(token))
-}
-
 fn classify_root_request_clean(input: &str) -> RootRequestDisposition {
     let trimmed = input.trim();
     if trimmed.is_empty() || looks_like_question(trimmed) {
         return RootRequestDisposition::Direct;
     }
     let lowered = trimmed.to_lowercase();
-    if !contains_any_token(&lowered, ROOT_BUILD_VERBS_CLEAN) {
-        return RootRequestDisposition::Direct;
+    match RootRequestConfig::load().classify_lowered(&lowered) {
+        ClassifiedRootRequest::Direct => RootRequestDisposition::Direct,
+        ClassifiedRootRequest::DelegateArtifactBuild => {
+            RootRequestDisposition::DelegateArtifactBuild
+        }
+        ClassifiedRootRequest::DelegateSkillAuthoring => {
+            RootRequestDisposition::DelegateSkillAuthoring
+        }
     }
-    if contains_any_token(&lowered, ROOT_SKILL_TOKENS_CLEAN) {
-        return RootRequestDisposition::DelegateSkillAuthoring;
-    }
-    if contains_any_token(&lowered, ROOT_ARTIFACT_TOKENS_CLEAN) {
-        return RootRequestDisposition::DelegateArtifactBuild;
-    }
-    RootRequestDisposition::Direct
 }
 
 fn classify_root_request(input: &str) -> RootRequestDisposition {
@@ -1208,10 +1172,8 @@ mod tests {
 
     #[test]
     fn implementation_file_requests_are_classified_with_clean_unicode_inputs_v2() {
-        let artifact_request =
-            "D:\\tmp \u{5728}\u{8fd9}\u{4e2a}\u{76ee}\u{5f55}\u{4e0b} \u{5199}\u{4e00}\u{4e2a}html\u{7684}\u{5355}\u{6587}\u{4ef6}\u{767b}\u{5f55}\u{9875}\u{9762}";
-        let question_request =
-            "\u{4e3a}\u{4ec0}\u{4e48}\u{8fd9}\u{4e2a}\u{9875}\u{9762}\u{6253}\u{4e0d}\u{5f00}\u{ff1f}";
+        let artifact_request = "D:\\tmp \u{5728}\u{8fd9}\u{4e2a}\u{76ee}\u{5f55}\u{4e0b} \u{5199}\u{4e00}\u{4e2a}html\u{7684}\u{5355}\u{6587}\u{4ef6}\u{767b}\u{5f55}\u{9875}\u{9762}";
+        let question_request = "\u{4e3a}\u{4ec0}\u{4e48}\u{8fd9}\u{4e2a}\u{9875}\u{9762}\u{6253}\u{4e0d}\u{5f00}\u{ff1f}";
         assert_eq!(
             classify_root_request(artifact_request),
             RootRequestDisposition::DelegateArtifactBuild
@@ -1224,8 +1186,7 @@ mod tests {
 
     #[test]
     fn skill_creation_requests_are_classified_with_clean_unicode_inputs_v2() {
-        let skill_request =
-            "\u{5199}\u{4e00}\u{4e2a}\u{5c0f}\u{7ea2}\u{4e66}\u{81ea}\u{52a8}\u{767b}\u{5f55}\u{53d1}\u{5e16}\u{7684}skill";
+        let skill_request = "\u{5199}\u{4e00}\u{4e2a}\u{5c0f}\u{7ea2}\u{4e66}\u{81ea}\u{52a8}\u{767b}\u{5f55}\u{53d1}\u{5e16}\u{7684}skill";
         let skill_question =
             "\u{8fd9}\u{4e2a} skill \u{662f}\u{505a}\u{4ec0}\u{4e48}\u{7684}\u{ff1f}";
         assert_eq!(
@@ -1283,7 +1244,9 @@ mod tests {
         match outcome.frames.first() {
             Some(WireFrame::Response { response }) => match &response.payload {
                 WireResponse::Ack { message } => {
-                    assert!(message.contains("root delegated implementation request to child task"));
+                    assert!(
+                        message.contains("root delegated implementation request to child task")
+                    );
                 }
                 other => panic!("unexpected response: {:?}", other),
             },

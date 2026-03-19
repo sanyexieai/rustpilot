@@ -11,6 +11,7 @@ use crate::shell_file_tools::{
     BashArgs, BashTool, EditFileArgs, ReadFileArgs, WriteFileArgs, edit_file,
     is_likely_long_running_command, is_read_only_command, read_file, write_file,
 };
+use crate::skill_authoring::SkillAuthoringConfig;
 use crate::terminal_session::{TerminalCreateRequest, TerminalManager};
 
 fn terminal_manager() -> &'static TerminalManager {
@@ -338,6 +339,7 @@ fn reject_parent_file_write(tool: &str, path: &str) -> anyhow::Result<()> {
 }
 
 fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
+    let config = SkillAuthoringConfig::load();
     let normalized = path.trim().replace('\\', "/");
     let in_skills = normalized.contains("/skills/") || normalized.starts_with("skills/");
     if !in_skills {
@@ -354,28 +356,38 @@ fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
 
     // Always block direct creation of SKILL.md — must use skill_create
     let file_name = normalized.split('/').last().unwrap_or("");
-    if file_name == "SKILL.md" {
+    if file_name == config.skill_file_name() {
         anyhow::bail!(
-            "{} refused: cannot write SKILL.md directly — path: {}.\n\
+            "{} refused: cannot write {} directly — path: {}.\n\
              Skills MUST be created via the `skill_create` tool, which:\n\
-             1. Writes SKILL.md with correct frontmatter\n\
-             2. Generates tests/smoke.json with LLM test assertions\n\
-             3. Generates tests/integration.py template\n\
+             1. Writes {} with correct frontmatter\n\
+             2. Generates {}/{} with LLM test assertions\n\
+             3. Generates {}/{} template\n\
              4. Immediately runs static + LLM tests and reports results",
             tool,
-            path
+            config.skill_file_name(),
+            path,
+            config.skill_file_name(),
+            config.tests_dir_name(),
+            config.smoke_test_file_name(),
+            config.tests_dir_name(),
+            config.integration_test_file_name(),
         );
     }
 
     // If the skill directory already exists (SKILL.md is present), allow any other file writes.
     // This lets agents add helper scripts, config files, etc. after skill_create has run.
     if !skill_name.is_empty() {
-        let repo_root = std::env::var("RUSTPILOT_REPO_ROOT")
+        let skill_md_exists = config
+            .resolve_existing_skills_dir()
             .ok()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let skill_md = repo_root.join("skills").join(skill_name).join("SKILL.md");
-        if skill_md.exists() {
+            .map(|base| {
+                base.join(skill_name)
+                    .join(config.skill_file_name())
+                    .exists()
+            })
+            .unwrap_or(false);
+        if skill_md_exists {
             return Ok(()); // skill was created via skill_create; additional files are allowed
         }
     }
@@ -383,18 +395,20 @@ fn reject_skills_dir_write(tool: &str, path: &str) -> anyhow::Result<()> {
     anyhow::bail!(
         "{} refused: cannot write directly to skills/ — path: {}.\n\
          The skill directory does not exist yet. Use `skill_create` first to initialise the skill \
-         (writes SKILL.md, generates test templates, and runs LLM tests). \
+         ({}). \
          After that you may add helper scripts or other files freely.",
         tool,
-        path
+        path,
+        config.skill_create_summary()
     )
 }
 
 /// Rejects bash commands that try to write SKILL.md directly, bypassing `skill_create`.
 /// Detects common shell write patterns: `> SKILL.md`, `tee SKILL.md`, `cat > SKILL.md`, etc.
 fn reject_bash_skill_md_write(command: &str) -> anyhow::Result<()> {
+    let config = SkillAuthoringConfig::load();
     let lower = command.to_ascii_lowercase();
-    let has_skill_md = lower.contains("skill.md");
+    let has_skill_md = lower.contains(&config.skill_file_name().to_ascii_lowercase());
     if !has_skill_md {
         return Ok(());
     }
@@ -405,10 +419,17 @@ fn reject_bash_skill_md_write(command: &str) -> anyhow::Result<()> {
         || lower.contains("tee\t");
     if is_write {
         anyhow::bail!(
-            "bash refused: cannot write SKILL.md via shell command — detected write to SKILL.md.\n\
-             Skills MUST be created or updated via the `skill_create` tool, which writes SKILL.md \
-             with correct frontmatter, generates tests/smoke.json and tests/integration.py, \
-             and immediately runs static + LLM tests."
+            "bash refused: cannot write {} via shell command — detected write to {}.\n\
+             Skills MUST be created or updated via the `skill_create` tool, which writes {} \
+             with correct frontmatter, generates {}/{} and {}/{}, \
+             and immediately runs static + LLM tests.",
+            config.skill_file_name(),
+            config.skill_file_name(),
+            config.skill_file_name(),
+            config.tests_dir_name(),
+            config.smoke_test_file_name(),
+            config.tests_dir_name(),
+            config.integration_test_file_name()
         );
     }
     Ok(())

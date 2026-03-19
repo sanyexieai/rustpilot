@@ -61,7 +61,14 @@ pub(crate) async fn run_lead_turn(
     lead_cursor: &mut usize,
 ) -> anyhow::Result<()> {
     run_root_turn(
-        session_id, client, llm, project, messages, progress, supervisor, lead_cursor,
+        session_id,
+        client,
+        llm,
+        project,
+        messages,
+        progress,
+        supervisor,
+        lead_cursor,
     )
     .await
 }
@@ -337,9 +344,14 @@ async fn handle_lead_turn_error(
         serde_json::json!({}),
         Some(error_text.clone()),
     );
-    let _ = project
-        .decisions()
-        .append(&actor_id, ROOT_ERROR_EVENT, None, None, &summary, &error_text);
+    let _ = project.decisions().append(
+        &actor_id,
+        ROOT_ERROR_EVENT,
+        None,
+        None,
+        &summary,
+        &error_text,
+    );
     let _ = project.reflections().append(
         &actor_id,
         ROOT_ERROR_EVENT,

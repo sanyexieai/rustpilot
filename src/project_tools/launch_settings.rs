@@ -33,7 +33,9 @@ impl LaunchPresentationMode {
     pub fn description(self) -> &'static str {
         match self {
             Self::MultiWindow => "each launch opens a dedicated visible OS window",
-            Self::SingleWindow => "keep one operator window; child launches run without extra windows",
+            Self::SingleWindow => {
+                "keep one operator window; child launches run without extra windows"
+            }
             Self::ImplicitMultiWindow => {
                 "child launches stay isolated in background processes with logs, without extra windows"
             }
@@ -144,9 +146,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("time")
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join("tests")
-                .join(format!("launch_settings_{}_{}", std::process::id(), unique));
+            let path = std::env::temp_dir().join("tests").join(format!(
+                "launch_settings_{}_{}",
+                std::process::id(),
+                unique
+            ));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

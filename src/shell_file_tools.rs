@@ -169,9 +169,9 @@ pub fn is_state_mutating_command(command: &str) -> bool {
         "pip install",
         "npm init",
     ];
-    MUTATING_PATTERNS.iter().any(|p| {
-        normalized == p.trim() || normalized.starts_with(&format!("{} ", p.trim()))
-    })
+    MUTATING_PATTERNS
+        .iter()
+        .any(|p| normalized == p.trim() || normalized.starts_with(&format!("{} ", p.trim())))
 }
 
 pub fn run_shell_command(command: &str, current_dir: Option<&Path>) -> anyhow::Result<String> {
@@ -428,7 +428,9 @@ mod tests {
     fn long_running_command_detection_flags_dev_servers() {
         assert!(is_likely_long_running_command("npm run dev"));
         assert!(is_likely_long_running_command("cargo run"));
-        assert!(is_likely_long_running_command("python -m uvicorn app:app --reload"));
+        assert!(is_likely_long_running_command(
+            "python -m uvicorn app:app --reload"
+        ));
         assert!(is_likely_long_running_command("vite --watch"));
         assert!(!is_likely_long_running_command("cargo test"));
         assert!(!is_likely_long_running_command("git status"));

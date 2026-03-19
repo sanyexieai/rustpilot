@@ -1,5 +1,9 @@
 use crate::openai_compat::Message;
 use crate::project_tools::{ProjectContext, UiUserIntentMemory};
+use crate::ui_intent_policy::UiIntentPolicy;
+use crate::workflow_defaults::{
+    FOCUS_ROOT, FOCUS_SHELL, FOCUS_TEAM, ROOT_ACTOR_DEFAULT, TASK_PRIORITIES, default_task_priority,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,9 +31,9 @@ pub(crate) enum InteractionMode {
 impl InteractionMode {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::TeamQueue => "team".to_string(),
-            Self::Lead => "root".to_string(),
-            Self::Shell => "shell".to_string(),
+            Self::TeamQueue => FOCUS_TEAM.to_string(),
+            Self::Lead => FOCUS_ROOT.to_string(),
+            Self::Shell => FOCUS_SHELL.to_string(),
             Self::Worker { task_id } => format!("worker({})", task_id),
         }
     }
@@ -43,9 +47,9 @@ pub(crate) fn parse_interaction_mode_label(raw: &str) -> anyhow::Result<Interact
 
     let normalized = trimmed.to_ascii_lowercase();
     match normalized.as_str() {
-        "lead" | "root" => return Ok(InteractionMode::Lead),
-        "shell" => return Ok(InteractionMode::Shell),
-        "team" | "team_queue" => return Ok(InteractionMode::TeamQueue),
+        "lead" | FOCUS_ROOT => return Ok(InteractionMode::Lead),
+        FOCUS_SHELL => return Ok(InteractionMode::Shell),
+        FOCUS_TEAM | "team_queue" => return Ok(InteractionMode::TeamQueue),
         _ => {}
     }
 
@@ -104,7 +108,7 @@ pub(crate) fn load_repo_env(repo_root: &Path) {
 }
 
 pub(crate) fn root_actor_id() -> String {
-    std::env::var("RUSTPILOT_ROOT_AGENT_ID").unwrap_or_else(|_| "lead".to_string())
+    std::env::var("RUSTPILOT_ROOT_AGENT_ID").unwrap_or_else(|_| ROOT_ACTOR_DEFAULT.to_string())
 }
 
 pub(crate) fn current_agent_id() -> String {
@@ -153,7 +157,6 @@ mod root_actor_tests {
             std::env::remove_var("RUSTPILOT_ROOT_AGENT_ID");
         }
     }
-
 }
 
 pub(crate) fn parse_priority_prefixed_goal(input: &str) -> (String, String) {
@@ -162,14 +165,14 @@ pub(crate) fn parse_priority_prefixed_goal(input: &str) -> (String, String) {
         && let Some((raw_priority, goal)) = rest.split_once(']')
     {
         let priority = raw_priority.trim().to_lowercase();
-        if matches!(priority.as_str(), "critical" | "high" | "medium" | "low") {
+        if TASK_PRIORITIES.contains(&priority.as_str()) {
             let goal = goal.trim();
             if !goal.is_empty() {
                 return (priority, goal.to_string());
             }
         }
     }
-    ("medium".to_string(), trimmed.to_string())
+    (default_task_priority(), trimmed.to_string())
 }
 
 pub(crate) fn parse_ui_intent(input: &str) -> Option<UiIntent> {
@@ -179,111 +182,14 @@ pub(crate) fn parse_ui_intent(input: &str) -> Option<UiIntent> {
     }
 
     let lowered = trimmed.to_lowercase();
-    let english_exact = [
-        "open ui",
-        "open the ui",
-        "open dashboard",
-        "open the dashboard",
-        "open status page",
-        "open the status page",
-        "open control panel",
-        "open management page",
-        "show dashboard",
-        "show status page",
-        "show control panel",
-    ];
-    if english_exact
-        .iter()
-        .any(|pattern| lowered.contains(pattern))
-    {
-        return Some(UiIntent {
-            intent_type: "open_management_page".to_string(),
-            desired_view: "project_state".to_string(),
-            primary_request: trimmed.to_string(),
-            constraints: Vec::new(),
-            operator_notes: vec!["intent detected from direct ui open phrasing".to_string()],
-        });
-    }
-
-    let has_open = [
-        "open",
-        "show",
-        "launch",
-        "start",
-        "\u{6253}\u{5f00}",
-        "\u{5f00}\u{542f}",
-        "\u{5f00}\u{4e2a}",
-        "\u{7ed9}\u{6211}\u{5f00}",
-    ]
-    .iter()
-    .any(|keyword| lowered.contains(keyword));
-    let wants_tasks = ["task", "tasks", "任务", "工单"]
-        .iter()
-        .any(|keyword| lowered.contains(keyword));
-    let wants_sessions = ["session", "sessions", "会话"]
-        .iter()
-        .any(|keyword| lowered.contains(keyword));
-    let wants_approval = ["approval", "approvals", "审批"]
-        .iter()
-        .any(|keyword| lowered.contains(keyword));
-    let wants_residents = ["resident", "residents", "agent", "agents", "驻留", "代理"]
-        .iter()
-        .any(|keyword| lowered.contains(keyword));
-    let has_ui_surface = [
-        "ui",
-        "dashboard",
-        "status page",
-        "control panel",
-        "management page",
-        "page",
-        "panel",
-        "\u{9875}\u{9762}",
-        "\u{754c}\u{9762}",
-        "\u{9762}\u{677f}",
-        "\u{72b6}\u{6001}\u{9875}",
-        "\u{7ba1}\u{7406}\u{9875}",
-    ]
-    .iter()
-    .any(|keyword| lowered.contains(keyword));
-    let has_management_intent = [
-        "status",
-        "current state",
-        "system state",
-        "project state",
-        "manage",
-        "management",
-        "current",
-        "\u{72b6}\u{6001}",
-        "\u{5f53}\u{524d}",
-        "\u{7ba1}\u{7406}",
-        "\u{7cfb}\u{7edf}",
-        "\u{9879}\u{76ee}",
-    ]
-    .iter()
-    .any(|keyword| lowered.contains(keyword));
-
-    if !((has_open || has_management_intent) && has_ui_surface) {
-        return None;
-    }
-
-    let desired_view = if wants_tasks {
-        "task_board"
-    } else if wants_sessions {
-        "session_console"
-    } else if wants_approval {
-        "approval_overview"
-    } else if wants_residents {
-        "resident_monitor"
-    } else {
-        "project_state"
-    };
+    let matched = UiIntentPolicy::load().classify(&lowered)?;
 
     Some(UiIntent {
         intent_type: "open_management_page".to_string(),
-        desired_view: desired_view.to_string(),
+        desired_view: matched.desired_view,
         primary_request: trimmed.to_string(),
         constraints: Vec::new(),
-        operator_notes: vec![format!("derived desired_view={}", desired_view)],
+        operator_notes: vec![matched.operator_note],
     })
 }
 

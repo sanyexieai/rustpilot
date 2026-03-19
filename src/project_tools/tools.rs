@@ -1,12 +1,28 @@
+use crate::openai_compat::{Tool, ToolCall, ToolFunction};
+use crate::skill_authoring::SkillAuthoringConfig;
+use crate::skills::create_prompt_skill;
+use crate::workflow_defaults::{
+    STATUS_IN_PROGRESS, STATUS_PENDING, TASK_PRIORITIES, TASK_ROLE_HINTS, TASK_STATUSES,
+    default_task_priority, default_task_role_hint,
+};
 use anyhow::Context;
 use serde::Deserialize;
 use serde_json::json;
-use crate::openai_compat::{Tool, ToolCall, ToolFunction};
-use crate::skills::create_prompt_skill;
 
 use super::{ProjectContext, TaskCreateOptions};
 
 pub fn project_tool_definitions() -> Vec<Tool> {
+    let skill_config = SkillAuthoringConfig::load();
+    let skill_create_desc = format!(
+        "Create a prompt skill under skills/<name>/{}. After creation, a live LLM test is run: the skill is used as system prompt and `test_prompt` is sent as the user message; the response must contain all strings in `expect_response_contains`.",
+        skill_config.skill_file_name()
+    );
+    let skill_validate_desc = format!(
+        "Run all tests for an existing skill: (1) static checks on {} structure, (2) LLM functional tests using the skill as system prompt, (3) integration test ({}/{}) which can run real browser automation and pause for human interaction. Integration tests run in the background — you will be notified via mail when human action is needed or when complete.",
+        skill_config.skill_file_name(),
+        skill_config.tests_dir_name(),
+        skill_config.integration_test_file_name()
+    );
     vec![
         tool(
             "team_send",
@@ -72,8 +88,8 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                 "properties": {
                     "subject": { "type": "string" },
                     "description": { "type": "string" },
-                    "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
-                    "role_hint": { "type": "string", "enum": ["developer", "design", "critic", "ui"] },
+                    "priority": { "type": "string", "enum": TASK_PRIORITIES },
+                    "role_hint": { "type": "string", "enum": TASK_ROLE_HINTS },
                     "parent_task_id": { "type": "integer" },
                     "depth": { "type": "integer", "minimum": 0 }
                 },
@@ -89,15 +105,15 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                     "goal": { "type": "string" },
                     "command": { "type": "string" },
                     "cwd": { "type": "string" },
-                    "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
-                    "role_hint": { "type": "string", "enum": ["developer", "design", "critic", "ui"] }
+                    "priority": { "type": "string", "enum": TASK_PRIORITIES },
+                    "role_hint": { "type": "string", "enum": TASK_ROLE_HINTS }
                 },
                 "required": ["goal", "command"]
             }),
         ),
         tool(
             "skill_create",
-            "Create a prompt skill under skills/<name>/SKILL.md. After creation, a live LLM test is run: the skill is used as system prompt and `test_prompt` is sent as the user message; the response must contain all strings in `expect_response_contains`.",
+            &skill_create_desc,
             json!({
                 "type": "object",
                 "properties": {
@@ -119,7 +135,7 @@ pub fn project_tool_definitions() -> Vec<Tool> {
         ),
         tool(
             "skill_validate",
-            "Run all tests for an existing skill: (1) static checks on SKILL.md structure, (2) LLM functional tests using the skill as system prompt, (3) integration test (tests/integration.py) which can run real browser automation and pause for human interaction. Integration tests run in the background — you will be notified via mail when human action is needed or when complete.",
+            &skill_validate_desc,
             json!({
                 "type": "object",
                 "properties": {
@@ -220,9 +236,9 @@ pub fn project_tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "integer" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "blocked", "paused", "cancelled", "completed", "failed"] },
+                    "status": { "type": "string", "enum": TASK_STATUSES },
                     "owner": { "type": "string" },
-                    "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"] }
+                    "priority": { "type": "string", "enum": TASK_PRIORITIES }
                 },
                 "required": ["task_id"]
             }),
@@ -329,9 +345,7 @@ pub fn handle_project_tool_call(
             let args: TeamSendArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid team_send arguments")?;
             mailbox.send_typed(
-                args.from
-                    .as_deref()
-                    .unwrap_or(&current_agent_id()),
+                args.from.as_deref().unwrap_or(&current_agent_id()),
                 &args.to,
                 args.msg_type.as_deref().unwrap_or("message"),
                 &args.message,
@@ -380,11 +394,10 @@ pub fn handle_project_tool_call(
             )?
         }
         "delegate_long_running" => {
-            let args: DelegateLongRunningArgs =
-                serde_json::from_str(&call.function.arguments)
-                    .context("invalid delegate_long_running arguments")?;
-            let priority = args.priority.unwrap_or_else(|| "medium".to_string());
-            let role_hint = args.role_hint.unwrap_or_else(|| "developer".to_string());
+            let args: DelegateLongRunningArgs = serde_json::from_str(&call.function.arguments)
+                .context("invalid delegate_long_running arguments")?;
+            let priority = args.priority.unwrap_or_else(default_task_priority);
+            let role_hint = args.role_hint.unwrap_or_else(default_task_role_hint);
             let inherited = current_task_hierarchy(tasks);
             let cwd_line = args
                 .cwd
@@ -416,6 +429,7 @@ pub fn handle_project_tool_call(
             )
         }
         "skill_create" => {
+            let skill_config = SkillAuthoringConfig::load();
             let args: SkillCreateArgs = serde_json::from_str(&call.function.arguments)
                 .with_context(|| format!(
                     "invalid skill_create arguments: {}\nRequired fields: name(string), description(string), body(string). Optional: test_prompt(string), expect_response_contains(array of strings)",
@@ -450,18 +464,18 @@ pub fn handle_project_tool_call(
             let base_summary = match (static_result, llm_result) {
                 (Ok(static_count), Ok(llm_count)) => format!(
                     "skill {action} and all tests passed: {}\nstatic tests: {}, llm tests: {}",
-                    created.join("SKILL.md").display(),
+                    skill_config.skill_file_path(&created).display(),
                     static_count,
                     llm_count
                 ),
                 (Err(err), _) => format!(
                     "skill {action} but static validation FAILED: {}\nerror: {}\nFix the skill content or tests.",
-                    created.join("SKILL.md").display(),
+                    skill_config.skill_file_path(&created).display(),
                     err
                 ),
                 (Ok(_), Err(err)) => format!(
                     "skill {action} but LLM test FAILED: {}\nerror: {}\nRevise the skill body or the test expectations.",
-                    created.join("SKILL.md").display(),
+                    skill_config.skill_file_path(&created).display(),
                     err
                 ),
             };
@@ -475,8 +489,8 @@ pub fn handle_project_tool_call(
             }
             let args: SkillValidateArgs = serde_json::from_str(&call.function.arguments)
                 .context("invalid skill_validate arguments")?;
-            let registry = crate::skills::SkillRegistry::load()
-                .context("failed to load skill registry")?;
+            let registry =
+                crate::skills::SkillRegistry::load().context("failed to load skill registry")?;
             let skill_dir = registry.base_dir().join(&args.name);
             if !skill_dir.is_dir() {
                 format!("skill '{}' not found", args.name)
@@ -506,13 +520,13 @@ pub fn handle_project_tool_call(
                         return Ok(Some(format!(
                             "skill '{}': static validation FAILED\nerror: {}",
                             args.name, err
-                        )))
+                        )));
                     }
                     (Ok(_), Err(err)) => {
                         return Ok(Some(format!(
                             "skill '{}': LLM test FAILED\nerror: {}",
                             args.name, err
-                        )))
+                        )));
                     }
                 };
 
@@ -530,8 +544,9 @@ pub fn handle_project_tool_call(
             let signal_file =
                 crate::skill_integration::signal_file_path(context.repo_root(), &args.name);
             std::fs::create_dir_all(signal_file.parent().unwrap()).ok();
-            std::fs::write(&signal_file, b"")
-                .with_context(|| format!("failed to write signal file: {}", signal_file.display()))?;
+            std::fs::write(&signal_file, b"").with_context(|| {
+                format!("failed to write signal file: {}", signal_file.display())
+            })?;
             format!(
                 "signal sent for skill '{}' — integration test will resume shortly.",
                 args.name
@@ -695,7 +710,11 @@ fn reply_blocked_task(
         Some(ep) if ep.status == "running"
     );
 
-    let next_status = if worker_running { "in_progress" } else { "pending" };
+    let next_status = if worker_running {
+        STATUS_IN_PROGRESS
+    } else {
+        STATUS_PENDING
+    };
     let updated = tasks.append_user_reply(task_id, reply, next_status)?;
 
     // If worker is alive, deliver clarification via mailbox so it resumes immediately.
@@ -710,10 +729,16 @@ fn reply_blocked_task(
             false,
             None,
         );
-        Ok(format!("clarification sent to running worker:\n{}", updated))
+        Ok(format!(
+            "clarification sent to running worker:\n{}",
+            updated
+        ))
     } else {
         // Worker has exited; task is now pending — the scheduler will relaunch it.
-        Ok(format!("worker not running; task reset to pending for relaunch:\n{}", updated))
+        Ok(format!(
+            "worker not running; task reset to pending for relaunch:\n{}",
+            updated
+        ))
     }
 }
 
@@ -726,8 +751,14 @@ fn launch_integration_test_background(
     skill_dir: &std::path::Path,
     base_summary: &str,
 ) -> String {
+    let skill_config = SkillAuthoringConfig::load();
     if !crate::skill_integration::has_integration_test(skill_dir) {
-        return format!("{}\nintegration test: none (add tests/integration.py to enable)", base_summary);
+        return format!(
+            "{}\nintegration test: none (add {}/{} to enable)",
+            base_summary,
+            skill_config.tests_dir_name(),
+            skill_config.integration_test_file_name()
+        );
     }
     let signal_file = crate::skill_integration::signal_file_path(context.repo_root(), skill_name);
     let mailbox = context.mailbox().clone();
@@ -760,27 +791,40 @@ fn launch_integration_test_background(
         match result {
             Ok(out) if out.exit_code == 0 => {
                 let _ = mailbox2.send(
-                    "system", &agent_id_result,
-                    &format!("[skill-test][{}] integration test PASSED ✓", skill_name_result),
+                    "system",
+                    &agent_id_result,
+                    &format!(
+                        "[skill-test][{}] integration test PASSED ✓",
+                        skill_name_result
+                    ),
                     None,
                 );
             }
             Ok(out) => {
                 let tail: Vec<_> = out.lines.iter().rev().take(10).rev().collect();
                 let _ = mailbox2.send(
-                    "system", &agent_id_result,
+                    "system",
+                    &agent_id_result,
                     &format!(
                         "[skill-test][{}] integration test FAILED (exit {})\n{}",
-                        skill_name_result, out.exit_code,
-                        tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                        skill_name_result,
+                        out.exit_code,
+                        tail.iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     ),
                     None,
                 );
             }
             Err(e) => {
                 let _ = mailbox2.send(
-                    "system", &agent_id_result,
-                    &format!("[skill-test][{}] integration test ERROR: {}", skill_name_result, e),
+                    "system",
+                    &agent_id_result,
+                    &format!(
+                        "[skill-test][{}] integration test ERROR: {}",
+                        skill_name_result, e
+                    ),
                     None,
                 );
             }

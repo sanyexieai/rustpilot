@@ -1,3 +1,4 @@
+use crate::skill_authoring::SkillAuthoringConfig;
 use crate::tool_capability::ToolCapabilityLevel;
 use crate::tool_manifest::resolve_or_create_tools_dir;
 use anyhow::Context as _;
@@ -68,24 +69,30 @@ pub fn create_prompt_skill(
     if name.is_empty() {
         anyhow::bail!("invalid skill name: {}", raw_name);
     }
+    let config = SkillAuthoringConfig::load();
     let base_dir = resolve_or_create_skills_dir()?;
     let skill_dir = base_dir.join(&name);
-    fs::create_dir_all(skill_dir.join("tests"))?;
+    fs::create_dir_all(config.tests_dir_path(&skill_dir))?;
     // When no test_prompt is provided, fall back to the description so that
     // the smoke test always has a prompt and LLM tests always run.
     let effective_test_prompt = test_prompt.unwrap_or(description);
     // Always overwrite the core skill content and smoke test.
     fs::write(
-        skill_dir.join("SKILL.md"),
-        render_prompt_skill_markdown(&name, description, body),
+        config.skill_file_path(&skill_dir),
+        config.render_skill_markdown(&name, description, body),
     )?;
     fs::write(
-        skill_dir.join("tests").join("smoke.json"),
-        skill_smoke_test_template(description, body, Some(effective_test_prompt), expect_response_contains),
+        config.smoke_test_path(&skill_dir),
+        config.render_smoke_test(
+            description,
+            body,
+            Some(effective_test_prompt),
+            expect_response_contains,
+        ),
     )?;
     // Only write the integration test template if it doesn't already exist,
     // so that any custom integration.py written by the user is preserved.
-    let integration_path = skill_dir.join("tests").join("integration.py");
+    let integration_path = config.integration_test_path(&skill_dir);
     if !integration_path.exists() {
         fs::write(
             &integration_path,
@@ -103,10 +110,11 @@ pub async fn run_skill_llm_tests(
     client: &reqwest::Client,
     config: &crate::config::LlmConfig,
 ) -> anyhow::Result<usize> {
-    let skill_md = skill_dir.join("SKILL.md");
+    let authoring = SkillAuthoringConfig::load();
+    let skill_md = authoring.skill_file_path(skill_dir);
     let skill_content = fs::read_to_string(&skill_md)
         .with_context(|| format!("SKILL.md not found in {}", skill_dir.display()))?;
-    let tests_dir = skill_dir.join("tests");
+    let tests_dir = authoring.tests_dir_path(skill_dir);
     if !tests_dir.is_dir() {
         return Ok(0);
     }
@@ -151,17 +159,21 @@ pub async fn run_skill_llm_tests(
 /// 对已存在的 skill 目录运行验证和测试，返回通过的测试数量。
 /// 如果验证失败则返回 Err，错误信息说明失败原因。
 pub fn validate_skill(skill_dir: &Path) -> anyhow::Result<usize> {
-    let skill_md = skill_dir.join("SKILL.md");
+    let authoring = SkillAuthoringConfig::load();
+    let skill_md = authoring.skill_file_path(skill_dir);
     let content = fs::read_to_string(&skill_md)
         .map_err(|_| anyhow::anyhow!("SKILL.md not found in {}", skill_dir.display()))?;
-    let info = parse_frontmatter(&content, &skill_md)
-        .ok_or_else(|| anyhow::anyhow!("SKILL.md frontmatter is invalid or missing name/description"))?;
+    let info = parse_frontmatter(&content, &skill_md).ok_or_else(|| {
+        anyhow::anyhow!("SKILL.md frontmatter is invalid or missing name/description")
+    })?;
     let body = extract_body(&content);
     validate_and_test_skill(&info, body)?;
     // 计算通过的测试数量
-    let tests_dir = skill_dir.join("tests");
+    let tests_dir = authoring.tests_dir_path(skill_dir);
     let count = if tests_dir.is_dir() {
-        load_skill_test_cases(&tests_dir).map(|c| c.len()).unwrap_or(0)
+        load_skill_test_cases(&tests_dir)
+            .map(|c| c.len())
+            .unwrap_or(0)
     } else {
         0
     };
@@ -169,35 +181,11 @@ pub fn validate_skill(skill_dir: &Path) -> anyhow::Result<usize> {
 }
 
 fn resolve_skills_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var("SKILLS_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-
-    let cwd = std::env::current_dir()?;
-    let direct = cwd.join("skills");
-    if direct.is_dir() {
-        return Ok(direct);
-    }
-
-    let fallback = cwd.join("s05").join("skills");
-    if fallback.is_dir() {
-        return Ok(fallback);
-    }
-
-    anyhow::bail!("skills directory not found")
+    SkillAuthoringConfig::load().resolve_existing_skills_dir()
 }
 
 fn resolve_or_create_skills_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(dir) = std::env::var("SKILLS_DIR") {
-        let path = PathBuf::from(dir);
-        fs::create_dir_all(&path)?;
-        return Ok(path);
-    }
-
-    let cwd = std::env::current_dir()?;
-    let direct = cwd.join("skills");
-    fs::create_dir_all(&direct)?;
-    Ok(direct)
+    SkillAuthoringConfig::load().resolve_or_create_skills_dir()
 }
 
 pub fn init_tool_skill(raw_name: &str, level: ToolCapabilityLevel) -> anyhow::Result<PathBuf> {
@@ -259,61 +247,6 @@ fn normalize_skill_name(input: &str) -> String {
     out
 }
 
-fn render_prompt_skill_markdown(name: &str, description: &str, body: &str) -> String {
-    let title = name
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => {
-                    let mut output = first.to_uppercase().collect::<String>();
-                    output.push_str(chars.as_str());
-                    output
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    format!(
-        "---\nname: {name}\ndescription: {description}\n---\n\n# {title}\n\n{}\n",
-        body.trim()
-    )
-}
-
-fn skill_smoke_test_template(
-    description: &str,
-    body: &str,
-    test_prompt: Option<&str>,
-    expect_response_contains: &[String],
-) -> String {
-    let first_keyword = body
-        .split_whitespace()
-        .find(|w| w.len() >= 2)
-        .unwrap_or("##");
-    let desc_min = description.len().min(5);
-    let body_min = (body.trim().len() / 2).max(20);
-
-    let mut obj = serde_json::json!({
-        "name": "smoke",
-        "expect_description_min_length": desc_min,
-        "expect_body_min_length": body_min,
-        "expect_body_contains": first_keyword,
-    });
-
-    if let Some(prompt) = test_prompt {
-        obj["prompt"] = serde_json::Value::String(prompt.to_string());
-        if !expect_response_contains.is_empty() {
-            obj["expect_response_contains"] = serde_json::json!(expect_response_contains);
-        }
-        obj["expect_response_min_length"] = serde_json::json!(100);
-    }
-
-    serde_json::to_string_pretty(&obj).unwrap_or_default() + "\n"
-}
-
 fn tool_manifest_template(name: &str, level: ToolCapabilityLevel) -> String {
     format!(
         "schema_version = 1\n\n[tool]\nname = \"{name}\"\ndescription = \"external tool skill\"\nlevel = \"{}\"\nruntime_kind = \"script\"\nlanguage = \"python\"\nruntime = \"python 3\"\ncommand = \"python\"\nargs = [\"./tool.py\"]\n",
@@ -366,7 +299,8 @@ fn validate_and_test_skill(info: &SkillInfo, body: &str) -> anyhow::Result<()> {
         anyhow::bail!("skill body is empty");
     }
 
-    let tests_dir = info.path.parent().unwrap_or(Path::new(".")).join("tests");
+    let tests_dir =
+        SkillAuthoringConfig::load().tests_dir_path(info.path.parent().unwrap_or(Path::new(".")));
     if !tests_dir.is_dir() {
         anyhow::bail!("tests/ directory is missing");
     }
@@ -408,7 +342,9 @@ fn run_skill_test_case(
         if description.len() < min_len {
             anyhow::bail!(
                 "test '{}': description length {} < required {}",
-                test_name, description.len(), min_len
+                test_name,
+                description.len(),
+                min_len
             );
         }
     }
@@ -416,7 +352,9 @@ fn run_skill_test_case(
         if body.len() < min_len {
             anyhow::bail!(
                 "test '{}': body length {} < required {}",
-                test_name, body.len(), min_len
+                test_name,
+                body.len(),
+                min_len
             );
         }
     }
@@ -424,7 +362,8 @@ fn run_skill_test_case(
         if !body.contains(expected.as_str()) {
             anyhow::bail!(
                 "test '{}': body missing expected fragment '{}'",
-                test_name, expected
+                test_name,
+                expected
             );
         }
     }
@@ -432,6 +371,7 @@ fn run_skill_test_case(
 }
 
 fn scan_skills(base_dir: &Path) -> anyhow::Result<Vec<SkillInfo>> {
+    let config = SkillAuthoringConfig::load();
     let mut skills = Vec::new();
     for entry in fs::read_dir(base_dir)? {
         let entry = entry?;
@@ -439,7 +379,7 @@ fn scan_skills(base_dir: &Path) -> anyhow::Result<Vec<SkillInfo>> {
         if !path.is_dir() {
             continue;
         }
-        let skill_md = path.join("SKILL.md");
+        let skill_md = config.skill_file_path(&path);
         if !skill_md.is_file() {
             continue;
         }
@@ -477,7 +417,11 @@ fn extract_body(content: &str) -> &str {
         }
     }
     // remainder is body; find the position in the original string
-    let closing = content.match_indices("---").nth(1).map(|(i, _)| i + 3).unwrap_or(0);
+    let closing = content
+        .match_indices("---")
+        .nth(1)
+        .map(|(i, _)| i + 3)
+        .unwrap_or(0);
     content[closing..].trim_start()
 }
 
@@ -608,7 +552,11 @@ mod tests {
             std::env::remove_var("SKILLS_DIR");
         }
 
-        assert_eq!(registry.list().len(), 0, "skill without tests/ should be rejected");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "skill without tests/ should be rejected"
+        );
     }
 
     #[test]
@@ -635,7 +583,11 @@ mod tests {
             std::env::remove_var("SKILLS_DIR");
         }
 
-        assert_eq!(registry.list().len(), 0, "skill with failing test should be rejected");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "skill with failing test should be rejected"
+        );
     }
 
     #[test]

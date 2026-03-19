@@ -3,6 +3,10 @@ use crate::project_tools::{ProjectContext, TaskRecord};
 use crate::resident_agents::AgentSupervisor;
 use crate::runtime::lead::maybe_reflect_energy;
 use crate::team::get_worker_endpoint;
+use crate::workflow_defaults::{
+    DEFAULT_TASK_PRIORITY, SESSION_STATUS_ACTIVE, SESSION_STATUS_IDLE, STATUS_CANCELLED,
+    STATUS_IN_PROGRESS, STATUS_PAUSED, STATUS_PENDING,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -22,7 +26,7 @@ pub(crate) fn focus_lead(project: &ProjectContext, interaction_mode: &mut Intera
     );
     let _ = project.agents().set_state(
         &actor_id,
-        "active",
+        SESSION_STATUS_ACTIVE,
         None,
         Some("cli"),
         Some("main"),
@@ -43,7 +47,7 @@ pub(crate) fn focus_shell(project: &ProjectContext, interaction_mode: &mut Inter
     );
     let _ = project.agents().set_state(
         &actor_id,
-        "active",
+        SESSION_STATUS_ACTIVE,
         None,
         Some("cli"),
         Some("main"),
@@ -64,7 +68,7 @@ pub(crate) fn focus_team(project: &ProjectContext, interaction_mode: &mut Intera
     );
     let _ = project.agents().set_state(
         &actor_id,
-        "idle",
+        SESSION_STATUS_IDLE,
         None,
         Some("cli"),
         Some("main"),
@@ -116,9 +120,9 @@ pub(crate) fn reply_task(
         task_id,
         content,
         if worker_running {
-            "in_progress"
+            STATUS_IN_PROGRESS
         } else {
-            "pending"
+            STATUS_PENDING
         },
     )?;
     let trace_id = format!("task-{}", task_id);
@@ -184,17 +188,17 @@ pub(crate) fn control_task(
     let before = project.tasks().get_record(task_id)?;
     let (next_status, next_priority, summary) = match action {
         "pause" => (
-            Some("paused"),
+            Some(STATUS_PAUSED),
             None,
             format!("paused task {}", task_id),
         ),
         "resume" => (
-            Some("pending"),
+            Some(STATUS_PENDING),
             None,
             format!("resumed task {}", task_id),
         ),
         "cancel" => (
-            Some("cancelled"),
+            Some(STATUS_CANCELLED),
             None,
             format!("cancelled task {}", task_id),
         ),
@@ -204,7 +208,7 @@ pub(crate) fn control_task(
             format!(
                 "raised task {} priority to {}",
                 task_id,
-                priority.unwrap_or("medium")
+                priority.unwrap_or(DEFAULT_TASK_PRIORITY)
             ),
         ),
         _ => anyhow::bail!("unsupported task action: {}", action),
@@ -220,9 +224,14 @@ pub(crate) fn control_task(
         "priority" => "parent agent reprioritized delegated work",
         _ => "task control action",
     };
-    let _ = project
-        .decisions()
-        .append(&actor_id, "task.control", Some(task_id), None, &summary, reason);
+    let _ = project.decisions().append(
+        &actor_id,
+        "task.control",
+        Some(task_id),
+        None,
+        &summary,
+        reason,
+    );
 
     if action == "resume" {
         let _ = supervisor.ensure_running("scheduler");
@@ -303,9 +312,9 @@ pub(crate) fn resident_send(
     content: &str,
 ) -> anyhow::Result<String> {
     let actor_id = current_agent_id();
-    let _ = project
-        .mailbox()
-        .send_typed(&actor_id, agent_id, msg_type, content, None, None, false, None)?;
+    let _ = project.mailbox().send_typed(
+        &actor_id, agent_id, msg_type, content, None, None, false, None,
+    )?;
     let _ = project.decisions().append(
         &actor_id,
         "resident.message.sent",
@@ -332,13 +341,7 @@ fn append_task_tree_lines(
     let child_count = child_counts.get(&task.id).copied().unwrap_or(0);
     lines.push(format!(
         "{}- #{} [{}] priority={} role={} children={} {}",
-        prefix,
-        task.id,
-        task.status,
-        task.priority,
-        task.role_hint,
-        child_count,
-        task.subject
+        prefix, task.id, task.status, task.priority, task.role_hint, child_count, task.subject
     ));
     if let Some(children) = by_parent.get(&Some(task.id)) {
         for child in children {
@@ -449,8 +452,8 @@ mod tests {
             std::env::set_var("RUSTPILOT_AGENT_ID", "teammate-parent");
         }
 
-        let message = control_task(&project, &mut supervisor, task.id, "pause", None)
-            .expect("pause task");
+        let message =
+            control_task(&project, &mut supervisor, task.id, "pause", None).expect("pause task");
         assert!(message.contains("paused task"));
 
         let decision = project
