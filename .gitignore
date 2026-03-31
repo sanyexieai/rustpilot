@@ -8,3 +8,4 @@ target-test/*
 .terminal_sessions/*
 .team/*
 target-test-isolated/*
+skills/*

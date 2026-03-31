@@ -13,6 +13,9 @@ use crate::project_tools::{LaunchRecord, LaunchRequest, ProjectContext, Resident
 use crate::team::{TeamRuntime, mark_worker_stopped, reconcile_parent_after_child_exit};
 use crate::ui_server::spawn_ui_server;
 
+/// 等待 launcher 把 registry 里的 launch 推进到 `running` 的上限（含冷启动、锁竞争、慢磁盘）。
+const LAUNCH_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct AgentSupervisor {
     repo_root: PathBuf,
     max_parallel: usize,
@@ -40,6 +43,9 @@ impl AgentSupervisor {
     }
 
     pub fn reconcile(&mut self) -> anyhow::Result<()> {
+        // 必须先保证 launcher 存活；否则若配置顺序把其它 resident 写在 launcher 之前，
+        // 会在无人消费 launch registry 的情况下空等直至超时。
+        self.ensure_launcher_running()?;
         let project = ProjectContext::new(self.repo_root.clone())?;
         let configs = project.residents().enabled_agents()?;
         let active_ids = configs
@@ -70,7 +76,7 @@ impl AgentSupervisor {
             if should_spawn {
                 self.children.remove(&agent_id);
                 let launch_id = request_resident_launch(&project, &config, self.max_parallel)?;
-                wait_for_launch_running(&project, &launch_id, Duration::from_secs(8))?;
+                wait_for_launch_running(&project, &launch_id, LAUNCH_READY_TIMEOUT)?;
                 self.children
                     .insert(agent_id, ResidentHandle::LaunchManaged { launch_id });
             }
@@ -89,6 +95,7 @@ impl AgentSupervisor {
         if config.agent_id == "launcher" {
             return self.ensure_launcher_running();
         }
+        self.ensure_launcher_running()?;
         let should_spawn = match self.children.get_mut(agent_id) {
             Some(handle) => !resident_handle_running(&project, handle)?,
             None => true,
@@ -96,7 +103,7 @@ impl AgentSupervisor {
         if should_spawn {
             self.children.remove(agent_id);
             let launch_id = request_resident_launch(&project, &config, self.max_parallel)?;
-            wait_for_launch_running(&project, &launch_id, Duration::from_secs(8))?;
+            wait_for_launch_running(&project, &launch_id, LAUNCH_READY_TIMEOUT)?;
             self.children.insert(
                 agent_id.to_string(),
                 ResidentHandle::LaunchManaged { launch_id },
@@ -276,7 +283,16 @@ pub(crate) fn wait_for_launch_running(
         }
         thread::sleep(Duration::from_millis(120));
     }
-    anyhow::bail!("timed out waiting for launch {}", launch_id)
+    let status_hint = project
+        .launches()
+        .get(launch_id)?
+        .map(|r| r.status)
+        .unwrap_or_else(|| "missing".to_string());
+    anyhow::bail!(
+        "timed out waiting for launch {} (last status={}); ensure the launcher resident is running and see .team/launch_logs/",
+        launch_id,
+        status_hint
+    )
 }
 
 /// 退出时扫 launch registry，强制 kill 所有仍标记为 running 的进程。

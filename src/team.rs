@@ -348,40 +348,19 @@ fn scheduler_loop(
                 ),
             );
 
-            let worktree_name = if task.worktree.is_empty() {
-                format!("team-{}", task.id)
-            } else {
-                task.worktree.clone()
-            };
             let owner = format!("teammate-{}", task.id);
-
-            if task.worktree.is_empty() {
-                match project
-                    .worktrees()
-                    .create(&worktree_name, Some(task.id), "HEAD")
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        let text = err.to_string();
-                        if !text.contains("已存在 worktree") {
-                            eprintln!(
-                                "team scheduler: create worktree failed for task {}: {}",
-                                task.id, err
-                            );
-                            let _ = project.tasks().update(task.id, Some("failed"), None, None);
-                            failed.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                        let _ = project
-                            .tasks()
-                            .bind_worktree(task.id, &worktree_name, &owner);
-                    }
+            let prepared = match prepare_task_worktree_for_spawn(&project, task.id, &owner) {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    eprintln!(
+                        "team scheduler: prepare worktree failed for task {}: {}",
+                        task.id, err
+                    );
+                    let _ = project.tasks().update(task.id, Some("failed"), None, None);
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
-            } else {
-                let _ = project
-                    .tasks()
-                    .bind_worktree(task.id, &worktree_name, &owner);
-            }
+            };
 
             match spawn_teammate_process(
                 &repo_root,
@@ -407,6 +386,58 @@ fn scheduler_loop(
                     workers.insert(task.id, worker);
                 }
                 Err(err) => {
+                    if prepared.borrowed_active {
+                        let fallback_worktree = format!("team-{}", task.id);
+                        match create_and_bind_task_worktree(
+                            &project,
+                            task.id,
+                            &fallback_worktree,
+                            &owner,
+                        ) {
+                            Ok(()) => match spawn_teammate_process(
+                                &repo_root,
+                                task.id,
+                                &owner,
+                                &task.role_hint,
+                                &spawn_mode,
+                                &terminal_manager,
+                            ) {
+                                Ok(worker) => {
+                                    let _ = register_worker_endpoint(&repo_root, &owner, &worker);
+                                    let _ = register_worker_agent(
+                                        &project,
+                                        &owner,
+                                        &task.role_hint,
+                                        &worker,
+                                    );
+                                    let _ = project.budgets().record_usage("team-manager", 25);
+                                    maybe_reflect_energy(
+                                        &project,
+                                        "team-manager",
+                                        "worker.spawn",
+                                        Some(task.id),
+                                        "worker spawn succeeded after dedicated worktree fallback",
+                                    );
+                                    launched.fetch_add(1, Ordering::Relaxed);
+                                    spawn_times.insert(task.id, Instant::now());
+                                    workers.insert(task.id, worker);
+                                    continue;
+                                }
+                                Err(retry_err) => {
+                                    eprintln!(
+                                        "team scheduler: spawn teammate failed for task {} after dedicated worktree fallback: {}",
+                                        task.id, retry_err
+                                    );
+                                }
+                            },
+                            Err(fallback_err) => {
+                                eprintln!(
+                                    "team scheduler: dedicated worktree fallback failed for task {}: {}",
+                                    task.id, fallback_err
+                                );
+                            }
+                        }
+                    }
                     eprintln!(
                         "team scheduler: spawn teammate failed for task {}: {}",
                         task.id, err
@@ -513,6 +544,69 @@ fn scheduler_loop(
             Some("team-loop"),
             Some("team 已停止"),
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedTaskWorktree {
+    borrowed_active: bool,
+}
+
+fn prepare_task_worktree_for_spawn(
+    project: &ProjectContext,
+    task_id: u64,
+    owner: &str,
+) -> anyhow::Result<PreparedTaskWorktree> {
+    let task = project.tasks().get_record(task_id)?;
+    if !task.worktree.is_empty() {
+        project
+            .tasks()
+            .bind_worktree(task.id, &task.worktree, owner)?;
+        return Ok(PreparedTaskWorktree {
+            borrowed_active: false,
+        });
+    }
+
+    if let Some(active) = project.worktrees().find_active()? {
+        project
+            .tasks()
+            .bind_worktree(task.id, &active.name, owner)?;
+        return Ok(PreparedTaskWorktree {
+            borrowed_active: true,
+        });
+    }
+
+    let dedicated = format!("team-{}", task.id);
+    create_and_bind_task_worktree(project, task.id, &dedicated, owner)?;
+    Ok(PreparedTaskWorktree {
+        borrowed_active: false,
+    })
+}
+
+fn create_and_bind_task_worktree(
+    project: &ProjectContext,
+    task_id: u64,
+    worktree_name: &str,
+    owner: &str,
+) -> anyhow::Result<()> {
+    match project
+        .worktrees()
+        .create(worktree_name, Some(task_id), "HEAD")
+    {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let text = err.to_string();
+            if text.contains("??? worktree")
+                || (text.contains("worktree") && text.to_ascii_lowercase().contains("exists"))
+            {
+                project
+                    .tasks()
+                    .bind_worktree(task_id, worktree_name, owner)?;
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
     }
 }
 
@@ -2465,7 +2559,8 @@ fn maybe_reflect_energy(
 #[cfg(test)]
 mod tests {
     use super::{
-        reconcile_parent_after_child_exit, send_task_notifications, task_notification_targets,
+        prepare_task_worktree_for_spawn, reconcile_parent_after_child_exit,
+        send_task_notifications, task_notification_targets,
     };
     use crate::project_tools::{ProjectContext, TaskCreateOptions, TaskRecord};
     use std::fs;
@@ -2637,6 +2732,59 @@ mod tests {
             parent_state.note.as_deref(),
             Some("子任务已结束，但存在失败或阻塞，等待父任务处理")
         );
+    }
+
+    #[test]
+    fn prepare_task_worktree_prefers_active_worktree() {
+        let temp = TestDir::new("prepare_task_worktree_prefers_active");
+        let project = project_context(temp.path());
+
+        let active_task_raw = project
+            .tasks()
+            .create_detailed(
+                "active task",
+                "existing worktree owner",
+                TaskCreateOptions::default(),
+            )
+            .expect("create active task");
+        let active_task: TaskRecord =
+            serde_json::from_str(&active_task_raw).expect("parse active task");
+        let task_raw = project
+            .tasks()
+            .create_detailed(
+                "new task",
+                "should reuse current worktree first",
+                TaskCreateOptions::default(),
+            )
+            .expect("create task");
+        let task: TaskRecord = serde_json::from_str(&task_raw).expect("parse task");
+
+        let index_path = temp.path().join(".worktrees").join("index.json");
+        std::fs::create_dir_all(index_path.parent().expect("worktrees dir"))
+            .expect("create worktrees dir");
+        std::fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "worktrees": [{
+                    "name": "team-1",
+                    "path": temp.path().join(".worktrees").join("team-1").display().to_string(),
+                    "branch": "wt/team-1",
+                    "task_id": active_task.id,
+                    "status": "active",
+                    "created_at": 1.0
+                }]
+            }))
+            .expect("serialize index"),
+        )
+        .expect("write index");
+
+        let prepared = prepare_task_worktree_for_spawn(&project, task.id, "teammate-2")
+            .expect("prepare task worktree");
+        assert!(prepared.borrowed_active);
+
+        let task_after = project.tasks().get_record(task.id).expect("task after");
+        assert_eq!(task_after.worktree, "team-1");
+        assert_eq!(task_after.owner, "teammate-2");
     }
 
     #[test]
