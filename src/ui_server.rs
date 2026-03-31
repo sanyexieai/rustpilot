@@ -101,8 +101,9 @@ async fn index(State(state): State<UiServerState>) -> Html<String> {
 async fn api_status(
     State(state): State<UiServerState>,
     headers: HeaderMap,
+    Query(scope): Query<ApiIdentityScope>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let identity = resolve_request_identity(&state, &headers)?;
+    let identity = resolve_request_identity(&state, &headers, Some(&scope))?;
     Ok(Json(
         build_status_payload(&state, Some(&identity)).map_err(internal_error)?,
     ))
@@ -111,8 +112,9 @@ async fn api_status(
 async fn api_me(
     State(state): State<UiServerState>,
     headers: HeaderMap,
+    Query(scope): Query<ApiIdentityScope>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let identity = resolve_request_identity(&state, &headers)?;
+    let identity = resolve_request_identity(&state, &headers, Some(&scope))?;
     Ok(Json(json!({
         "tenant_id": identity.tenant_id,
         "user_id": identity.user_id,
@@ -123,11 +125,49 @@ async fn api_me(
 
 async fn api_auth_bootstrap(
     State(state): State<UiServerState>,
+    payload: Option<Json<ApiBootstrapRequest>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project = ProjectContext::new(state.repo_root.clone()).map_err(internal_error)?;
-    let bootstrap = project
-        .identity()
-        .bootstrap_local_admin()
+    let manager = crate::project_tools::IdentityManager::new(state.repo_root.join(".team"))
+        .map_err(internal_error)?;
+    let payload = payload.map(|item| item.0).unwrap_or_default();
+    let tenant_id = payload
+        .tenant_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default");
+    let user_id = payload
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("local-admin");
+    let role = payload
+        .role
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("owner");
+    let token_label = payload
+        .token_label
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("local-dev");
+    let tenant_display_name = payload
+        .tenant_display_name
+        .clone()
+        .unwrap_or_else(|| humanize_scope_name(tenant_id));
+    let user_display_name = payload
+        .user_display_name
+        .clone()
+        .unwrap_or_else(|| humanize_scope_name(user_id));
+    let bootstrap = manager
+        .bootstrap_identity(
+            tenant_id,
+            &tenant_display_name,
+            user_id,
+            &user_display_name,
+            role,
+            token_label,
+            payload.token.as_deref(),
+        )
         .map_err(internal_error)?;
     Ok(Json(json!({
         "tenant_id": bootstrap.tenant.tenant_id,
@@ -175,7 +215,7 @@ async fn api_chat(
     headers: HeaderMap,
     Json(payload): Json<ApiChatRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let identity = resolve_request_identity(&state, &headers)?;
+    let identity = resolve_request_identity(&state, &headers, Some(&payload.scope()))?;
     ensure_tenant_runtime_ready(&state, &identity)?;
     let target = payload
         .agent_id
@@ -240,7 +280,7 @@ async fn api_chat_stream(
     headers: HeaderMap,
     Json(payload): Json<ApiChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let identity = resolve_request_identity(&state, &headers)?;
+    let identity = resolve_request_identity(&state, &headers, Some(&payload.scope()))?;
     ensure_tenant_runtime_ready(&state, &identity)?;
     api_chat_stream_inner(state, payload, identity).await
 }
@@ -250,7 +290,7 @@ async fn api_chat_stream_get(
     headers: HeaderMap,
     Query(payload): Query<ApiChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let identity = resolve_request_identity(&state, &headers)?;
+    let identity = resolve_request_identity(&state, &headers, Some(&payload.scope()))?;
     ensure_tenant_runtime_ready(&state, &identity)?;
     api_chat_stream_inner(state, payload, identity).await
 }
@@ -517,14 +557,36 @@ fn queue_response_detail(response: &WireResponse) -> Option<Value> {
 fn resolve_request_identity(
     state: &UiServerState,
     headers: &HeaderMap,
+    scope: Option<&ApiIdentityScope>,
 ) -> Result<RequestIdentity, (StatusCode, String)> {
-    let project = ProjectContext::new(state.repo_root.clone()).map_err(internal_error)?;
-    let manager = project.identity();
+    let manager = crate::project_tools::IdentityManager::new(state.repo_root.join(".team"))
+        .map_err(internal_error)?;
     let auth = if let Some(secret) = bearer_token(headers) {
         manager
             .resolve_token(&secret)
             .map_err(internal_error)?
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()))?
+    } else if let (Some(tenant_id), Some(user_id)) = (
+        scope.and_then(|item| item.tenant_id.clone()),
+        scope.and_then(|item| item.user_id.clone()),
+    ) {
+        manager
+            .resolve_membership(&tenant_id, &user_id)
+            .map_err(internal_error)?
+            .map_or_else(
+                || {
+                    manager.ensure_auth_context(
+                        &tenant_id,
+                        &humanize_scope_name(&tenant_id),
+                        &user_id,
+                        &humanize_scope_name(&user_id),
+                        "owner",
+                        "scope-auto-bootstrap",
+                    )
+                },
+                Ok,
+            )
+            .map_err(internal_error)?
     } else if let (Some(tenant_id), Some(user_id)) = (
         header_value(headers, "x-rustpilot-tenant"),
         header_value(headers, "x-rustpilot-user"),
@@ -532,12 +594,20 @@ fn resolve_request_identity(
         manager
             .resolve_membership(&tenant_id, &user_id)
             .map_err(internal_error)?
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "unknown tenant/user membership".to_string(),
-                )
-            })?
+            .map_or_else(
+                || {
+                    manager.ensure_auth_context(
+                        &tenant_id,
+                        &humanize_scope_name(&tenant_id),
+                        &user_id,
+                        &humanize_scope_name(&user_id),
+                        "owner",
+                        "header-auto-bootstrap",
+                    )
+                },
+                Ok,
+            )
+            .map_err(internal_error)?
     } else {
         let bootstrap = manager.bootstrap_local_admin().map_err(internal_error)?;
         AuthContext {
@@ -707,6 +777,45 @@ struct ApiChatRequest {
     target: Option<String>,
     #[serde(default)]
     agent_id: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+impl ApiChatRequest {
+    fn scope(&self) -> ApiIdentityScope {
+        ApiIdentityScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct ApiIdentityScope {
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ApiBootstrapRequest {
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    tenant_display_name: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    user_display_name: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    token_label: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -718,6 +827,25 @@ struct UiSocketClientMessage {
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+fn humanize_scope_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "Default".to_string();
+    }
+    trimmed
+        .split(['-', '_', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn should_use_root_runtime(target: &str) -> bool {
@@ -1787,7 +1915,7 @@ fn normalize_primary_actor_id(preferred_actor_id: &str, agent_ids: &BTreeSet<Str
 #[cfg(test)]
 mod tests {
     use super::{
-        build_process_tree_payload, is_bootstrap_shell, mailbox_direction, mailbox_kind,
+        build_process_tree_payload, humanize_scope_name, is_bootstrap_shell, mailbox_direction, mailbox_kind,
         normalize_primary_actor_id, transcript_session_id_for_agent,
     };
     use crate::project_tools::{ProjectContext, SessionRecord, TaskCreateOptions};
@@ -2021,5 +2149,11 @@ mod tests {
             child_nodes[0]["parent_node_id"].as_str(),
             Some(parent_node_id.as_str())
         );
+    }
+
+    #[test]
+    fn humanize_scope_name_formats_ids() {
+        assert_eq!(humanize_scope_name("acme-dev"), "Acme Dev");
+        assert_eq!(humanize_scope_name("alice_bob"), "Alice Bob");
     }
 }

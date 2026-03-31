@@ -12,8 +12,8 @@
       "do not implement code directly",
       "do not bypass task routing"
     ],
-    "created_at": 1774950654.3874388,
-    "updated_at": 1774950714.6945534
+    "created_at": 1774951842.061067,
+    "updated_at": 1774952085.851022
   },
   {
     "agent_id": "critic",
@@ -28,8 +28,8 @@
       "do not directly edit code",
       "do not bypass proposal workflow"
     ],
-    "created_at": 1774950654.0806162,
-    "updated_at": 1774950713.320449
+    "created_at": 1774951834.6229916,
+    "updated_at": 1774952085.836688
   },
   {
     "agent_id": "launcher",
@@ -44,8 +44,23 @@
       "do not execute task content",
       "do not bypass launch registry"
     ],
-    "created_at": 1774950653.8930368,
-    "updated_at": 1774950710.390762
+    "created_at": 1774951832.1616783,
+    "updated_at": 1774952083.0718727
+  },
+  {
+    "agent_id": "lead",
+    "role": "scheduler",
+    "mission": "Receive user input, maintain the main dialogue, and coordinate workers.",
+    "scope": [
+      "accept user requests",
+      "coordinate tasks",
+      "summarize progress"
+    ],
+    "forbidden": [
+      "do not bypass tasks or mailbox routing"
+    ],
+    "created_at": 1774951832.0135643,
+    "updated_at": 1774952005.7908924
   },
   {
     "agent_id": "reviewer",
@@ -60,8 +75,8 @@
       "do not edit code",
       "do not bypass proposal workflow"
     ],
-    "created_at": 1774950654.4635732,
-    "updated_at": 1774950714.6666973
+    "created_at": 1774951845.535534,
+    "updated_at": 1774952085.2292504
   },
   {
     "agent_id": "scheduler",
@@ -76,8 +91,8 @@
       "do not directly edit code",
       "do not bypass task routing"
     ],
-    "created_at": 1774950653.9832373,
-    "updated_at": 1774950714.62968
+    "created_at": 1774951833.117545,
+    "updated_at": 1774952087.2512915
   },
   {
     "agent_id": "surface-collector",
@@ -92,8 +107,8 @@
       "do not render final pages",
       "do not invent unsupported protocol actions"
     ],
-    "created_at": 1774950654.188614,
-    "updated_at": 1774950701.2639253
+    "created_at": 1774951836.6663496,
+    "updated_at": 1774952080.0590923
   },
   {
     "agent_id": "team-manager",
@@ -107,8 +122,8 @@
     "forbidden": [
       "不要直接替代 worker 执行任务"
     ],
-    "created_at": 1774950653.9971468,
-    "updated_at": 1774950667.5855234
+    "created_at": 1774951833.1068091,
+    "updated_at": 1774952008.783121
   },
   {
     "agent_id": "ui",
@@ -123,7 +138,7 @@
       "do not claim backend-only work",
       "do not bypass task routing"
     ],
-    "created_at": 1774950654.2896607,
-    "updated_at": 1774950714.4215884
+    "created_at": 1774951839.0788698,
+    "updated_at": 1774952081.0894084
   }
 ]

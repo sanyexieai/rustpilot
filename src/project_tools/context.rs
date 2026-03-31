@@ -40,21 +40,8 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     pub fn new(repo_root: PathBuf) -> anyhow::Result<Self> {
-        if let Some(tenant_id) = std::env::var("RUSTPILOT_TENANT_ID")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            if let Some(user_id) = std::env::var("RUSTPILOT_USER_ID")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-            {
-                return Self::for_user(repo_root, &tenant_id, &user_id);
-            }
-            return Self::for_tenant(repo_root, &tenant_id);
-        }
-        Self::with_state_root(repo_root.clone(), repo_root)
+        let state_root = Self::scoped_state_root_for(&repo_root);
+        Self::with_state_root(repo_root, state_root)
     }
 
     pub fn for_tenant(repo_root: PathBuf, tenant_id: &str) -> anyhow::Result<Self> {
@@ -73,9 +60,39 @@ impl ProjectContext {
         Self::with_state_root(repo_root, state_root)
     }
 
+    pub fn scoped_state_root_for(repo_root: &Path) -> PathBuf {
+        if let Some(tenant_id) = std::env::var("RUSTPILOT_TENANT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(user_id) = std::env::var("RUSTPILOT_USER_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                return repo_root
+                    .join(".tenants")
+                    .join(sanitize_scope_segment(&tenant_id))
+                    .join("users")
+                    .join(sanitize_scope_segment(&user_id));
+            }
+            return repo_root
+                .join(".tenants")
+                .join(sanitize_scope_segment(&tenant_id));
+        }
+        repo_root.to_path_buf()
+    }
+
+    pub fn scoped_team_dir_for(repo_root: &Path) -> PathBuf {
+        Self::scoped_state_root_for(repo_root).join(".team")
+    }
+
     fn with_state_root(repo_root: PathBuf, state_root: PathBuf) -> anyhow::Result<Self> {
         fs::create_dir_all(&state_root)?;
         let team_dir = state_root.join(".team");
+        let global_team_dir = repo_root.join(".team");
+        migrate_legacy_scoped_identity_dir(&team_dir, &global_team_dir)?;
         let tasks_dir = state_root.join(".tasks");
         let worktrees_dir = state_root.join(".worktrees");
         let tasks = Arc::new(TaskManager::new(tasks_dir)?);
@@ -92,9 +109,9 @@ impl ProjectContext {
         let residents = Arc::new(ResidentConfigManager::new(team_dir.clone())?);
         let resident_runtime = Arc::new(ResidentRuntimeManager::new(team_dir.clone())?);
         let proposals = Arc::new(ProposalManager::new(team_dir.clone())?);
-        let identity = Arc::new(IdentityManager::new(team_dir.clone())?);
+        let identity = Arc::new(IdentityManager::new(global_team_dir.clone())?);
         let tenant_runtime_registry =
-            Arc::new(TenantRuntimeRegistryManager::new(repo_root.join(".team"))?);
+            Arc::new(TenantRuntimeRegistryManager::new(global_team_dir)?);
         let prompt_history = Arc::new(PromptHistoryManager::new(team_dir.clone())?);
         let system_model = Arc::new(SystemModelManager::new(team_dir.clone())?);
         let ui_surface = Arc::new(UiSurfaceManager::new(team_dir.clone())?);
@@ -246,4 +263,123 @@ fn sanitize_scope_segment(raw: &str) -> String {
             }
         })
         .collect()
+}
+
+fn migrate_legacy_scoped_identity_dir(team_dir: &Path, global_team_dir: &Path) -> anyhow::Result<()> {
+    let legacy_identity_dir = team_dir.join("identity");
+    if !legacy_identity_dir.exists() {
+        return Ok(());
+    }
+
+    let global_identity_dir = global_team_dir.join("identity");
+    fs::create_dir_all(&global_identity_dir)?;
+    for file_name in ["tenants.json", "users.json", "memberships.json", "tokens.json"] {
+        let source = legacy_identity_dir.join(file_name);
+        if !source.exists() {
+            continue;
+        }
+        let target = global_identity_dir.join(file_name);
+        if !target.exists() {
+            fs::rename(&source, &target).or_else(|_| {
+                fs::copy(&source, &target)?;
+                fs::remove_file(&source)
+            })?;
+        } else {
+            fs::remove_file(&source)?;
+        }
+    }
+
+    let is_empty = fs::read_dir(&legacy_identity_dir)?.next().is_none();
+    if is_empty {
+        fs::remove_dir(&legacy_identity_dir)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectContext;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scoped_projects_share_global_identity_store() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("rustpilot-context-test-{unique}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        let root = ProjectContext::new(repo_root.clone()).expect("root context");
+        let scoped =
+            ProjectContext::for_user(repo_root.clone(), "tenant-a", "user-a").expect("scoped");
+
+        let bootstrap = root
+            .identity()
+            .bootstrap_local_admin()
+            .expect("bootstrap identity");
+
+        let resolved = scoped
+            .identity()
+            .resolve_membership(&bootstrap.tenant.tenant_id, &bootstrap.user.user_id)
+            .expect("resolve membership");
+
+        assert!(resolved.is_some(), "scoped context should read global identity");
+        assert!(repo_root.join(".team").join("identity").exists());
+        assert!(
+            !repo_root
+                .join(".tenants")
+                .join("tenant-a")
+                .join("users")
+                .join("user-a")
+                .join(".team")
+                .join("identity")
+                .exists(),
+            "scoped state root should not create a second identity store"
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn scoped_projects_migrate_legacy_identity_dir_to_global_store() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("rustpilot-context-test-{unique}"));
+        let legacy_identity_dir = repo_root
+            .join(".tenants")
+            .join("tenant-a")
+            .join("users")
+            .join("user-a")
+            .join(".team")
+            .join("identity");
+        fs::create_dir_all(&legacy_identity_dir).expect("create legacy identity dir");
+        fs::write(
+            legacy_identity_dir.join("users.json"),
+            "[{\"user_id\":\"legacy-user\",\"display_name\":\"Legacy User\",\"created_at\":1,\"disabled\":false}]",
+        )
+        .expect("write legacy users");
+
+        let scoped =
+            ProjectContext::for_user(repo_root.clone(), "tenant-a", "user-a").expect("scoped");
+
+        let resolved = scoped
+            .identity()
+            .resolve_membership("default", "local-admin")
+            .expect("resolve membership");
+        assert!(resolved.is_none(), "migration should not invent memberships");
+        assert!(
+            repo_root.join(".team").join("identity").join("users.json").exists(),
+            "global identity store should receive migrated files"
+        );
+        assert!(
+            !legacy_identity_dir.exists(),
+            "legacy scoped identity dir should be removed after migration"
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
 }

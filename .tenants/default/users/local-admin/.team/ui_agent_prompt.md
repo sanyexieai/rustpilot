@@ -20,3 +20,14 @@ Evolution goals:
 - Adapt page structure when system capabilities change
 - Respond to updated prompts without breaking protocol constraints
 - Keep generated UI artifacts stable and comparable across revisions
+
+<!-- auto-recovery:begin -->
+<!-- auto-recovery:ui-schema-recovery -->
+## Auto-Recovery Note
+Strategy: Generic
+Scope: ui schema
+If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.
+Do not add unnecessary narration, markdown wrappers, or speculative alternatives.
+When using tool calls, keep them minimal and directly relevant to the current task.
+Recovery trigger: error sending request for url (https://api.minimaxi.com/v1/chat/completions)
+<!-- auto-recovery:end -->

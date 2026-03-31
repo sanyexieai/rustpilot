@@ -280,6 +280,7 @@ async fn run_root_console() -> anyhow::Result<()> {
     }
 
     let repo_root = detect_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+    ensure_default_local_scope_env();
     unsafe {
         std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
     }
@@ -407,6 +408,7 @@ async fn run_root_runtime(
     repo_root: std::path::PathBuf,
     parent_pid: Option<u32>,
 ) -> anyhow::Result<()> {
+    ensure_default_local_scope_env();
     unsafe {
         std::env::set_var("RUSTPILOT_REPO_ROOT", repo_root.display().to_string());
     }
@@ -629,6 +631,25 @@ async fn run_root_runtime(
     supervisor.stop_all();
     kill_all_running_launches(&project);
     Ok(())
+}
+
+fn ensure_default_local_scope_env() {
+    if std::env::var("RUSTPILOT_TENANT_ID")
+        .ok()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        unsafe {
+            std::env::set_var("RUSTPILOT_TENANT_ID", "default");
+        }
+    }
+    if std::env::var("RUSTPILOT_USER_ID")
+        .ok()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        unsafe {
+            std::env::set_var("RUSTPILOT_USER_ID", "local-admin");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

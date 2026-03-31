@@ -30,6 +30,16 @@
     "last_reset_day": 20543
   },
   {
+    "agent_id": "lead",
+    "daily_limit": 120000,
+    "period_limit": 30000,
+    "task_soft_limit": 12000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
     "agent_id": "reviewer",
     "daily_limit": 70000,
     "period_limit": 18000,
@@ -54,8 +64,8 @@
     "daily_limit": 90000,
     "period_limit": 20000,
     "task_soft_limit": 10000,
-    "used_today": 60,
-    "used_in_period": 60,
+    "used_today": 240,
+    "used_in_period": 240,
     "reserved": 0,
     "last_reset_day": 20543
   },
@@ -74,8 +84,8 @@
     "daily_limit": 110000,
     "period_limit": 30000,
     "task_soft_limit": 14000,
-    "used_today": 240,
-    "used_in_period": 240,
+    "used_today": 480,
+    "used_in_period": 480,
     "reserved": 0,
     "last_reset_day": 20543
   }

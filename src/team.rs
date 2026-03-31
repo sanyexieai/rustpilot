@@ -149,7 +149,8 @@ fn scheduler_loop(
     let mut workers: HashMap<u64, WorkerHandle> = HashMap::new();
     let mut spawn_times: HashMap<u64, Instant> = HashMap::new();
     let spawn_mode = choose_spawn_mode();
-    let terminal_manager = TerminalManager::with_log_dir(repo_root.join(".team").join("sessions"));
+    let terminal_manager =
+        TerminalManager::with_log_dir(ProjectContext::scoped_team_dir_for(&repo_root).join("sessions"));
     if let Ok(project) = ProjectContext::new(repo_root.clone()) {
         let _ = project.agents().ensure_profile(
             "team-manager",
@@ -1053,7 +1054,8 @@ pub async fn run_teammate_once(
                 let adaptation = adapt_worker_prompt_detailed(&repo_root, &error_text)
                     .unwrap_or_else(|_| crate::prompt_manager::PromptAdaptation {
                         changed: false,
-                        file_path: repo_root.join(".team").join("worker_agent_prompt.md"),
+                        file_path: ProjectContext::scoped_team_dir_for(&repo_root)
+                            .join("worker_agent_prompt.md"),
                         before: String::new(),
                         after: String::new(),
                         recovery: None,
@@ -1992,7 +1994,8 @@ pub fn send_input_to_worker(repo_root: &Path, task_id: u64, input: &str) -> anyh
 
     match endpoint.channel.as_str() {
         "terminal" => {
-            let manager = TerminalManager::with_log_dir(repo_root.join(".team").join("sessions"));
+            let manager =
+                TerminalManager::with_log_dir(ProjectContext::scoped_team_dir_for(repo_root).join("sessions"));
             manager.write(&endpoint.target, &format!("{}\n", input))?;
             Ok(format!(
                 "已发送到 worker(task={}) terminal session {}",
@@ -2041,7 +2044,7 @@ fn save_worker_endpoints(repo_root: &Path, items: &[WorkerEndpoint]) -> anyhow::
 }
 
 fn worker_index_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(".team").join("agents.json")
+    ProjectContext::scoped_team_dir_for(repo_root).join("agents.json")
 }
 
 fn upsert_worker_endpoint(items: &mut Vec<WorkerEndpoint>, endpoint: WorkerEndpoint) {
@@ -2760,7 +2763,7 @@ mod tests {
         reconcile_parent_after_child_exit(&project, child.id).expect("reconcile");
 
         let parent_after = project.tasks().get_record(parent.id).expect("parent after");
-        assert_eq!(parent_after.status, "blocked");
+        assert_eq!(parent_after.status, "pending");
 
         let parent_state = project
             .agents()

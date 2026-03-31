@@ -51,7 +51,6 @@ pub struct TaskManager {
 
 impl TaskManager {
     pub fn new(dir: PathBuf) -> anyhow::Result<Self> {
-        fs::create_dir_all(&dir)?;
         Ok(Self { dir })
     }
 
@@ -386,6 +385,9 @@ impl TaskManager {
 
     fn max_id(&self) -> anyhow::Result<u64> {
         let mut max_id = 0u64;
+        if !self.dir.exists() {
+            return Ok(0);
+        }
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -415,12 +417,16 @@ impl TaskManager {
     }
 
     fn save(&self, task: &TaskRecord) -> anyhow::Result<()> {
+        self.ensure_dir()?;
         fs::write(self.path(task.id), serde_json::to_string_pretty(task)?)?;
         Ok(())
     }
 
     fn load_all(&self) -> anyhow::Result<Vec<TaskRecord>> {
         let mut tasks = Vec::new();
+        if !self.dir.exists() {
+            return Ok(tasks);
+        }
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -440,6 +446,7 @@ impl TaskManager {
     }
 
     fn with_lock<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        self.ensure_dir()?;
         let lock_path = self.dir.join(".lock");
         let deadline = Instant::now() + Duration::from_secs(5);
 
@@ -463,6 +470,11 @@ impl TaskManager {
         let result = f();
         let _ = fs::remove_file(lock_path);
         result
+    }
+
+    fn ensure_dir(&self) -> anyhow::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        Ok(())
     }
 }
 
@@ -544,5 +556,23 @@ mod tests {
             .expect("cancel");
         let cancelled_json: serde_json::Value = serde_json::from_str(&cancelled).expect("json");
         assert_eq!(cancelled_json["status"], "cancelled");
+    }
+
+    #[test]
+    fn constructor_does_not_create_empty_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("rustpilot-task-lazy-{unique}"));
+        let dir = base.join(".tasks");
+        let manager = TaskManager::new(dir.clone()).expect("manager");
+        assert!(!dir.exists(), "constructor should not eagerly create task dir");
+
+        let tasks = manager.list_records().expect("list");
+        assert!(tasks.is_empty(), "missing dir should behave like empty task list");
+
+        std::fs::create_dir_all(&base).expect("base dir");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

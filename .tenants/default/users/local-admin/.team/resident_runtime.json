@@ -2,43 +2,43 @@
   {
     "agent_id": "concierge",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950714.698913,
-    "last_loop_duration_ms": 54
+    "last_seen_at": 1774952085.866254,
+    "last_loop_duration_ms": 74
   },
   {
     "agent_id": "critic",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950713.3424494,
-    "last_loop_duration_ms": 119
+    "last_seen_at": 1774952085.854365,
+    "last_loop_duration_ms": 66
   },
   {
     "agent_id": "launcher",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950714.261997,
-    "last_loop_duration_ms": 3947
+    "last_seen_at": 1774952087.072369,
+    "last_loop_duration_ms": 4035
   },
   {
     "agent_id": "reviewer",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950714.670468,
-    "last_loop_duration_ms": 57
+    "last_seen_at": 1774952085.2325475,
+    "last_loop_duration_ms": 47
   },
   {
     "agent_id": "scheduler",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950714.6331954,
-    "last_loop_duration_ms": 52
+    "last_seen_at": 1774952087.254667,
+    "last_loop_duration_ms": 42
   },
   {
     "agent_id": "surface-collector",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950698.704916,
-    "last_loop_duration_ms": 51
+    "last_seen_at": 1774952077.5184736,
+    "last_loop_duration_ms": 52
   },
   {
     "agent_id": "ui",
     "mailbox_cursor": 0,
-    "last_seen_at": 1774950714.4367504,
-    "last_loop_duration_ms": 64
+    "last_seen_at": 1774952078.5498834,
+    "last_loop_duration_ms": 54
   }
 ]

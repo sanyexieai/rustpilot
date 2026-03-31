@@ -68,14 +68,35 @@ impl IdentityManager {
     }
 
     pub fn bootstrap_local_admin(&self) -> anyhow::Result<BootstrapIdentity> {
-        let tenant = self.ensure_tenant("default", "Default")?;
-        let user = self.ensure_user("local-admin", "Local Admin")?;
-        let membership = self.ensure_membership(&tenant.tenant_id, &user.user_id, "owner")?;
+        self.bootstrap_identity(
+            "default",
+            "Default",
+            "local-admin",
+            "Local Admin",
+            "owner",
+            "local-dev",
+            Some("rp_local_default_token"),
+        )
+    }
+
+    pub fn bootstrap_identity(
+        &self,
+        tenant_id: &str,
+        tenant_display_name: &str,
+        user_id: &str,
+        user_display_name: &str,
+        role: &str,
+        token_label: &str,
+        fixed_secret: Option<&str>,
+    ) -> anyhow::Result<BootstrapIdentity> {
+        let tenant = self.ensure_tenant(tenant_id, tenant_display_name)?;
+        let user = self.ensure_user(user_id, user_display_name)?;
+        let membership = self.ensure_membership(&tenant.tenant_id, &user.user_id, role)?;
         let token = self.ensure_token(
             &tenant.tenant_id,
             &user.user_id,
-            "local-dev",
-            Some("rp_local_default_token"),
+            token_label,
+            fixed_secret,
         )?;
         Ok(BootstrapIdentity {
             tenant,
@@ -127,6 +148,26 @@ impl IdentityManager {
                     Err(err)
                 }
             })
+    }
+
+    pub fn ensure_auth_context(
+        &self,
+        tenant_id: &str,
+        tenant_display_name: &str,
+        user_id: &str,
+        user_display_name: &str,
+        role: &str,
+        auth_mode: &str,
+    ) -> anyhow::Result<AuthContext> {
+        let tenant = self.ensure_tenant(tenant_id, tenant_display_name)?;
+        let user = self.ensure_user(user_id, user_display_name)?;
+        let membership = self.ensure_membership(&tenant.tenant_id, &user.user_id, role)?;
+        Ok(AuthContext {
+            tenant_id: tenant.tenant_id,
+            user_id: user.user_id,
+            role: membership.role,
+            auth_mode: auth_mode.to_string(),
+        })
     }
 
     fn build_auth_context(

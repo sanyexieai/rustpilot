@@ -1,8 +1,0 @@
-[resident] agent=concierge role=concierge repo=D:/code/rustpilot/rustpilot max_parallel=2
-[resident] agent=concierge runtime_mode=mailbox behavior_mode=concierge_request loop_ms=2000
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false
-[resident] agent=concierge mode=mailbox cursor=0 had_items=false

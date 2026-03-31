@@ -1,9 +1,9 @@
 [
   {
-    "session_id": "api-default-local-admin",
-    "label": "default / local-admin",
-    "focus": "root",
+    "session_id": "cli-main",
+    "label": "primary",
+    "focus": "lead",
     "status": "active",
-    "updated_at": 1774950681
+    "updated_at": 1774952024
   }
 ]
