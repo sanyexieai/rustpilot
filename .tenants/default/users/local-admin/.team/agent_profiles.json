@@ -13,7 +13,7 @@
       "do not bypass task routing"
     ],
     "created_at": 1774952359.6665366,
-    "updated_at": 1774952598.6310856
+    "updated_at": 1774953150.6600296
   },
   {
     "agent_id": "critic",
@@ -29,7 +29,7 @@
       "do not bypass proposal workflow"
     ],
     "created_at": 1774952352.2185948,
-    "updated_at": 1774952597.053512
+    "updated_at": 1774953150.5771706
   },
   {
     "agent_id": "launcher",
@@ -45,7 +45,7 @@
       "do not bypass launch registry"
     ],
     "created_at": 1774952349.7287848,
-    "updated_at": 1774952597.0381544
+    "updated_at": 1774953150.1037972
   },
   {
     "agent_id": "lead",
@@ -76,7 +76,7 @@
       "do not bypass proposal workflow"
     ],
     "created_at": 1774952362.933844,
-    "updated_at": 1774952598.4788454
+    "updated_at": 1774953149.739792
   },
   {
     "agent_id": "scheduler",
@@ -92,7 +92,7 @@
       "do not bypass task routing"
     ],
     "created_at": 1774952350.6759603,
-    "updated_at": 1774952597.640344
+    "updated_at": 1774953151.4837432
   },
   {
     "agent_id": "surface-collector",
@@ -108,7 +108,7 @@
       "do not invent unsupported protocol actions"
     ],
     "created_at": 1774952354.341359,
-    "updated_at": 1774952589.519807
+    "updated_at": 1774953150.0764244
   },
   {
     "agent_id": "team-manager",
@@ -139,6 +139,6 @@
       "do not bypass task routing"
     ],
     "created_at": 1774952356.796137,
-    "updated_at": 1774952584.5105774
+    "updated_at": 1774953148.8035529
   }
 ]

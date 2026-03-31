@@ -25,5 +25,5 @@ Scope: ui surface
 If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.
 Do not add unnecessary narration, markdown wrappers, or speculative alternatives.
 When using tool calls, keep them minimal and directly relevant to the current task.
-Recovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'
+Recovery trigger: missing field `source_fingerprint` at line 1 column 1520
 <!-- auto-recovery:end -->

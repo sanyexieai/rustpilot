@@ -1,67 +1,69 @@
 {
-  "generated_at": 1774952589.5389276,
-  "source_fingerprint": "5dac7a8b67f7a05f",
+  "generated_at": 1774953147.516158,
+  "source_fingerprint": "836a577e038e9a2c:ebe7d318669b7023:project_state",
   "title": "Rustpilot surface (project_state)",
-  "summary": "Surface plan for the current project state and operational control.",
+  "summary": "Surface plan for project state, operational control, and agent collaboration.",
   "pages": [
     {
       "id": "system-overview",
       "title": "System Overview",
-      "purpose": "Provide an overview of current system state and operator actions.",
+      "purpose": "Primary dashboard for observing system state, agent activity, and dispatching work.",
       "audience": "operator, dispatcher, observer",
       "data_sources": [
         "summary",
         "alerts",
         "residents",
-        "tasks",
-        "proposals",
-        "decisions",
         "main_friend",
         "group_chat",
         "agent_details",
         "process_tree",
-        "launches"
-      ],
-      "supported_sections": [
-        "alerts",
-        "residents",
+        "launches",
         "tasks",
         "proposals",
-        "decisions",
-        "composer",
+        "decisions"
+      ],
+      "supported_sections": [
         "metrics",
+        "alerts",
+        "residents",
         "main_chat",
         "group_chat",
         "agent_details",
         "process_tree",
-        "launches"
+        "launches",
+        "tasks",
+        "proposals",
+        "decisions",
+        "composer"
       ],
       "actions": [
         {
-          "id": "dispatch-ui",
+          "id": "wire-send-ui",
           "title": "Send to UI Agent",
-          "protocol_id": "ui.request.dispatch",
+          "protocol_id": "ui.wire.dispatch",
           "target": "ui",
           "description": "Request page design changes, structure adjustments, or UI evolution."
         },
         {
-          "id": "dispatch-concierge",
+          "id": "wire-send-concierge",
           "title": "Send to Concierge",
-          "protocol_id": "ui.request.dispatch",
+          "protocol_id": "ui.wire.dispatch",
           "target": "concierge",
           "description": "Turn natural-language requests into structured system work."
         },
         {
-          "id": "dispatch-reviewer",
+          "id": "wire-send-reviewer",
           "title": "Send to Reviewer",
-          "protocol_id": "ui.request.dispatch",
+          "protocol_id": "ui.wire.dispatch",
           "target": "reviewer",
           "description": "Collect blockers, failures, and optimization suggestions."
         }
       ],
       "notes": [
-        "The page structure must follow supported backend protocols and real data sources.",
-        "ui_surface.json is planning input for the UI agent, not final page code."
+        "All sections and sources backed by ui.status protocol.",
+        "All actions use ui.wire.dispatch protocol with valid targets (ui, concierge, reviewer).",
+        "Process tree and launches sections preserved per backend contract.",
+        "Chat contracts (main_friend, group_chat, agent_details) included as first-class data sources."
       ]
     }
   ]

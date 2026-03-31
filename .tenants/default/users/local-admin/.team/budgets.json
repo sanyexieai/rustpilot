@@ -64,8 +64,8 @@
     "daily_limit": 90000,
     "period_limit": 20000,
     "task_soft_limit": 10000,
-    "used_today": 240,
-    "used_in_period": 240,
+    "used_today": 900,
+    "used_in_period": 900,
     "reserved": 0,
     "last_reset_day": 20543
   },
@@ -84,8 +84,8 @@
     "daily_limit": 110000,
     "period_limit": 30000,
     "task_soft_limit": 14000,
-    "used_today": 800,
-    "used_in_period": 800,
+    "used_today": 2160,
+    "used_in_period": 2160,
     "reserved": 0,
     "last_reset_day": 20543
   }

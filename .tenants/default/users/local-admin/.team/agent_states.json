@@ -5,7 +5,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident concierge agent waiting for mailbox work",
-    "last_active_at": 1774952598.6332045
+    "last_active_at": 1774953150.6627388
   },
   {
     "agent_id": "critic",
@@ -13,7 +13,7 @@
     "channel": "resident",
     "target": "critic-loop",
     "note": "no open proposals",
-    "last_active_at": 1774952597.0695257
+    "last_active_at": 1774953150.5958102
   },
   {
     "agent_id": "launcher",
@@ -21,7 +21,7 @@
     "channel": "resident",
     "target": "launcher-loop",
     "note": "launcher reconciling agent windows",
-    "last_active_at": 1774952596.16634
+    "last_active_at": 1774953149.2513006
   },
   {
     "agent_id": "lead",
@@ -37,7 +37,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident reviewer agent waiting for mailbox work",
-    "last_active_at": 1774952598.480388
+    "last_active_at": 1774953149.7414556
   },
   {
     "agent_id": "scheduler",
@@ -45,7 +45,7 @@
     "channel": "resident",
     "target": "scheduler-loop",
     "note": "resident scheduler waiting for tasks",
-    "last_active_at": 1774952597.6426537
+    "last_active_at": 1774953151.4876297
   },
   {
     "agent_id": "surface-collector",
@@ -53,7 +53,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident ui_planner agent waiting for mailbox work",
-    "last_active_at": 1774952586.9459243
+    "last_active_at": 1774953150.0791464
   },
   {
     "agent_id": "team-manager",
@@ -61,7 +61,7 @@
     "channel": "scheduler",
     "target": "team-loop",
     "note": "正常并发",
-    "last_active_at": 1774952598.2650378
+    "last_active_at": 1774953151.8378658
   },
   {
     "agent_id": "ui",
@@ -69,6 +69,6 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident ui agent waiting for mailbox work",
-    "last_active_at": 1774952581.9546194
+    "last_active_at": 1774953146.2416997
   }
 ]

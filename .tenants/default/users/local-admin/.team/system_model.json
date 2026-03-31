@@ -1,5 +1,5 @@
 {
-  "generated_at": 1774952589.5354366,
+  "generated_at": 1774953148.8153527,
   "summary": {
     "launch_mode": "multi_window",
     "launch_mode_description": "each launch opens a dedicated visible OS window",
@@ -204,7 +204,7 @@
       "status": "running",
       "note": "launcher reconciling agent windows",
       "backlog": 0,
-      "loop_ms": 3631,
+      "loop_ms": 4778,
       "last_error": "",
       "last_msg": "",
       "port": 0,
@@ -225,7 +225,7 @@
       "status": "running",
       "note": "resident scheduler waiting for tasks",
       "backlog": 0,
-      "loop_ms": 49,
+      "loop_ms": 58,
       "last_error": "",
       "last_msg": "",
       "port": 0,
@@ -246,7 +246,7 @@
       "status": "idle",
       "note": "no open proposals",
       "backlog": 0,
-      "loop_ms": 74,
+      "loop_ms": 78,
       "last_error": "",
       "last_msg": "",
       "port": 0,
@@ -267,17 +267,17 @@
       "status": "idle",
       "note": "resident ui_planner agent waiting for mailbox work",
       "backlog": 0,
-      "loop_ms": 54,
+      "loop_ms": 27221,
       "last_error": "",
       "last_msg": "",
       "port": 0,
       "energy": "Healthy",
-      "budget_used": 240,
+      "budget_used": 900,
       "budget_limit": 90000,
-      "last_action": "ui.surface.fallback",
-      "last_summary": "surface collector fell back to model-derived ui surface spec",
+      "last_action": "ui.surface.recovered",
+      "last_summary": "surface collector recovered after auto-adjusting planner prompt",
       "prompt_strategy": "Generic",
-      "prompt_trigger": "ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'",
+      "prompt_trigger": "missing field `source_fingerprint` at line 1 column 1520",
       "prompt_note": "Scope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task."
     },
     {
@@ -288,18 +288,18 @@
       "status": "idle",
       "note": "resident ui agent waiting for mailbox work",
       "backlog": 0,
-      "loop_ms": 16963,
+      "loop_ms": 101,
       "last_error": "",
       "last_msg": "",
       "port": 0,
       "energy": "Healthy",
-      "budget_used": 800,
+      "budget_used": 2160,
       "budget_limit": 110000,
       "last_action": "ui.schema.generated",
       "last_summary": "ui agent generated a fresh ui schema from surface spec and prompt",
-      "prompt_strategy": "",
-      "prompt_trigger": "",
-      "prompt_note": ""
+      "prompt_strategy": "Generic",
+      "prompt_trigger": "missing field `key` at line 1 column 1048",
+      "prompt_note": "Scope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task."
     },
     {
       "agent_id": "concierge",
@@ -309,7 +309,7 @@
       "status": "idle",
       "note": "resident concierge agent waiting for mailbox work",
       "backlog": 0,
-      "loop_ms": 52,
+      "loop_ms": 48,
       "last_error": "",
       "last_msg": "",
       "port": 0,
@@ -330,7 +330,7 @@
       "status": "idle",
       "note": "resident reviewer agent waiting for mailbox work",
       "backlog": 0,
-      "loop_ms": 52,
+      "loop_ms": 68,
       "last_error": "",
       "last_msg": "",
       "port": 0,
@@ -456,34 +456,168 @@
   ],
   "recent_prompt_changes": [
     {
-      "recorded_at": 1774952531.9190998,
+      "recorded_at": 1774953133.5747292,
+      "agent_scope": "ui-surface",
+      "agent_id": "surface-collector",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_surface_prompt.md",
+      "strategy": "Generic",
+      "trigger": "missing field `source_fingerprint` at line 1 column 1520",
+      "summary": "compressed prompt (1309 -> 1283 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
+      "added_lines": [
+        "Recovery trigger: missing field `source_fingerprint` at line 1 column 1520"
+      ],
+      "removed_lines": [
+        "Recovery trigger: control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0"
+      ],
+      "before": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `source_fingerprint` at line 1 column 1520\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774953093.0263438,
+      "agent_scope": "ui-surface",
+      "agent_id": "surface-collector",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_surface_prompt.md",
+      "strategy": "Generic",
+      "trigger": "control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0",
+      "summary": "expanded prompt (1283 -> 1309 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
+      "added_lines": [
+        "Recovery trigger: control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0"
+      ],
+      "removed_lines": [
+        "Recovery trigger: missing field `source_fingerprint` at line 1 column 1446"
+      ],
+      "before": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `source_fingerprint` at line 1 column 1446\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774953079.8184593,
+      "agent_scope": "ui-schema",
+      "agent_id": "ui",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_agent_prompt.md",
+      "strategy": "Generic",
+      "trigger": "missing field `key` at line 1 column 1048",
+      "summary": "compressed prompt (1719 -> 1712 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
+      "added_lines": [
+        "Recovery trigger: missing field `key` at line 1 column 1048"
+      ],
+      "removed_lines": [
+        "Recovery trigger: missing field `generated_at` at line 51 column 1"
+      ],
+      "before": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `generated_at` at line 51 column 1\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `key` at line 1 column 1048\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774953050.0429244,
+      "agent_scope": "ui-schema",
+      "agent_id": "ui",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_agent_prompt.md",
+      "strategy": "Generic",
+      "trigger": "missing field `generated_at` at line 51 column 1",
+      "summary": "compressed prompt (1811 -> 1719 chars)",
+      "diff_summary": "added 2 lines, removed 3 lines",
+      "added_lines": [
+        "Strategy: Generic",
+        "Recovery trigger: missing field `generated_at` at line 51 column 1"
+      ],
+      "removed_lines": [
+        "Strategy: JsonOnly",
+        "Return only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.",
+        "Recovery trigger: missing field `text` at line 1 column 613"
+      ],
+      "before": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: JsonOnly\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nReturn only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.\nRecovery trigger: missing field `text` at line 1 column 613\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `generated_at` at line 51 column 1\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774952912.1882875,
+      "agent_scope": "ui-schema",
+      "agent_id": "ui",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_agent_prompt.md",
+      "strategy": "JsonOnly",
+      "trigger": "missing field `text` at line 1 column 613",
+      "summary": "rewrote prompt (1811 -> 1811 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
+      "added_lines": [
+        "Recovery trigger: missing field `text` at line 1 column 613"
+      ],
+      "removed_lines": [
+        "Recovery trigger: missing field `text` at line 1 column 603"
+      ],
+      "before": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: JsonOnly\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nReturn only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.\nRecovery trigger: missing field `text` at line 1 column 603\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: JsonOnly\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nReturn only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.\nRecovery trigger: missing field `text` at line 1 column 613\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774952876.4599771,
+      "agent_scope": "ui-surface",
+      "agent_id": "surface-collector",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_surface_prompt.md",
+      "strategy": "Generic",
+      "trigger": "missing field `source_fingerprint` at line 1 column 1446",
+      "summary": "compressed prompt (1310 -> 1283 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
+      "added_lines": [
+        "Recovery trigger: missing field `source_fingerprint` at line 1 column 1446"
+      ],
+      "removed_lines": [
+        "Recovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'"
+      ],
+      "before": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: missing field `source_fingerprint` at line 1 column 1446\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774952836.9007766,
       "agent_scope": "ui-surface",
       "agent_id": "surface-collector",
       "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_surface_prompt.md",
       "strategy": "Generic",
       "trigger": "ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'",
-      "summary": "expanded prompt (781 -> 1310 chars)",
-      "diff_summary": "added 10 lines",
+      "summary": "expanded prompt (1303 -> 1310 chars)",
+      "diff_summary": "added 1 lines, removed 1 lines",
       "added_lines": [
-        "<!-- auto-recovery:begin -->",
-        "<!-- auto-recovery:ui-surface-recovery -->",
-        "## Auto-Recovery Note",
-        "Strategy: Generic",
-        "Scope: ui surface",
-        "If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.",
-        "Do not add unnecessary narration, markdown wrappers, or speculative alternatives.",
-        "When using tool calls, keep them minimal and directly relevant to the current task.",
-        "Recovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'",
-        "<!-- auto-recovery:end -->"
+        "Recovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'"
       ],
-      "removed_lines": [],
-      "before": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n",
+      "removed_lines": [
+        "Recovery trigger: error sending request for url (https://api.minimaxi.com/v1/chat/completions)"
+      ],
+      "before": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: error sending request for url (https://api.minimaxi.com/v1/chat/completions)\n<!-- auto-recovery:end -->\n",
       "after": "You are Rustpilot's UI surface planner.\n\nResponsibilities:\n- Inspect `system_model.json`\n- Collect visible capabilities, roles, data sources, and allowed actions\n- Persist a stable `ui_surface.json` that later UI generation can build from\n\nConstraints:\n- Do not generate final page code\n- Do not invent protocols, interfaces, events, roles, or data sources\n- Reflect system workflow, not just one agent's point of view\n- Keep the output structured, cacheable, and easy to audit\n- Preserve chat/process-tree/launch oriented sections when the backend exposes them\n\nEvolution goals:\n- Adjust pages, actions, and supported sections when capabilities change\n- Keep the surface spec aligned with protocol changes\n- Provide stable planning input for downstream schema and page generation\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-surface-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui surface\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'\n<!-- auto-recovery:end -->\n"
+    },
+    {
+      "recorded_at": 1774952744.504924,
+      "agent_scope": "ui-schema",
+      "agent_id": "ui",
+      "file_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\ui_agent_prompt.md",
+      "strategy": "JsonOnly",
+      "trigger": "missing field `text` at line 1 column 603",
+      "summary": "expanded prompt (1590 -> 1811 chars)",
+      "diff_summary": "added 4 lines, removed 2 lines",
+      "added_lines": [
+        "Return only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.",
+        "Strategy: JsonOnly",
+        "Return only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.",
+        "Recovery trigger: missing field `text` at line 1 column 603"
+      ],
+      "removed_lines": [
+        "Strategy: Generic",
+        "Recovery trigger: key must be a string at line 1 column 2"
+      ],
+      "before": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: Generic\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nRecovery trigger: key must be a string at line 1 column 2\n<!-- auto-recovery:end -->\n",
+      "after": "You are Rustpilot's UI Agent.\n\nResponsibilities:\n- Read `ui_surface.json`\n- Read `system_model.json`\n- Design page structure and copy within backend protocol constraints\n- Produce `UiSchema` as a cacheable UI planning artifact\n\nConstraints:\n- Do not invent unsupported endpoints, events, actions, or data sources\n- Do not remove required core sections such as `metrics`, `residents`, and `composer`\n- If alerts exist, alerts must still be represented\n- Prefer operational clarity over decorative polish\n- Represent system workflow and collaboration state, not just a single agent\n- Treat `chat_ui.main_friend`, `chat_ui.group_chat`, `chat_ui.agent_details`, `chat_ui.process_tree`, and `chat_ui.launches` as first-class inputs\n- The generated UI must show process hierarchy and launch controls when those contracts are present\n- Do not push the real product interface back into Rust bootstrap HTML\n\nEvolution goals:\n- Adapt page structure when system capabilities change\n- Respond to updated prompts without breaking protocol constraints\n- Keep generated UI artifacts stable and comparable across revisions\n\nReturn only the exact requested payload as plain text. No Markdown, no code fences, no wrapper objects, no commentary.\n\n<!-- auto-recovery:begin -->\n<!-- auto-recovery:ui-schema-recovery -->\n## Auto-Recovery Note\nStrategy: JsonOnly\nScope: ui schema\nIf the previous attempt failed, prefer the smallest complete answer that still moves the task forward.\nDo not add unnecessary narration, markdown wrappers, or speculative alternatives.\nWhen using tool calls, keep them minimal and directly relevant to the current task.\nReturn only the exact requested payload shape. Ignore hidden reasoning and avoid wrapper formats.\nRecovery trigger: missing field `text` at line 1 column 603\n<!-- auto-recovery:end -->\n"
     }
   ],
   "tasks": [],
   "proposals": [],
   "decisions": [
+    {
+      "agent_id": "surface-collector",
+      "action": "ui.surface.recovered",
+      "summary": "surface collector recovered after auto-adjusting planner prompt",
+      "reason": "pages=1 fingerprint=836a577e038e9a2c:ebe7d318669b7023:project_state prior_error=missing field `source_fingerprint` at line 1 column 1520",
+      "task_id": null,
+      "proposal_id": null
+    },
     {
       "agent_id": "ui",
       "action": "ui.schema.generated",
@@ -493,10 +627,10 @@
       "proposal_id": null
     },
     {
-      "agent_id": "surface-collector",
-      "action": "ui.surface.fallback",
-      "summary": "surface collector fell back to model-derived ui surface spec",
-      "reason": "error=ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status' pages=1",
+      "agent_id": "ui",
+      "action": "ui.schema.generated",
+      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
+      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
       "task_id": null,
       "proposal_id": null
     },
@@ -512,15 +646,39 @@
       "agent_id": "surface-collector",
       "action": "ui.surface.recovered",
       "summary": "surface collector recovered after auto-adjusting planner prompt",
-      "reason": "pages=1 fingerprint=536d05e7f3a789e3:c34a80ebadafd7b9:project_state prior_error=ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'",
+      "reason": "pages=1 fingerprint=8dbfcc3323000240:a33dc8031cab5d49:project_state prior_error=control character (\\u0000-\\u001F) found while parsing a string at line 45 column 0",
       "task_id": null,
       "proposal_id": null
     },
     {
       "agent_id": "ui",
-      "action": "ui.schema.generated",
-      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
-      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
+      "action": "ui.schema.recovered",
+      "summary": "ui schema generation recovered after auto-adjusting prompt",
+      "reason": "prior_error=missing field `key` at line 1 column 1048",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "ui",
+      "action": "ui.schema.recovered",
+      "summary": "ui schema generation recovered after auto-adjusting prompt",
+      "reason": "prior_error=missing field `generated_at` at line 51 column 1",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "surface-collector",
+      "action": "ui.surface.generated",
+      "summary": "surface collector generated a fresh ui surface spec",
+      "reason": "pages=1 fingerprint=8dbfcc3323000240:8915acdd953f235c:project_state",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "surface-collector",
+      "action": "ui.surface.generated",
+      "summary": "surface collector generated a fresh ui surface spec",
+      "reason": "pages=1 fingerprint=8dbfcc3323000240:1a866d0d1132c9cd:project_state",
       "task_id": null,
       "proposal_id": null
     },
@@ -536,39 +694,7 @@
       "agent_id": "surface-collector",
       "action": "ui.surface.generated",
       "summary": "surface collector generated a fresh ui surface spec",
-      "reason": "pages=1 fingerprint=536d05e7f3a789e3:2a786b7396ea341a:project_state",
-      "task_id": null,
-      "proposal_id": null
-    },
-    {
-      "agent_id": "ui",
-      "action": "ui.schema.generated",
-      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
-      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
-      "task_id": null,
-      "proposal_id": null
-    },
-    {
-      "agent_id": "ui",
-      "action": "ui.schema.generated",
-      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
-      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
-      "task_id": null,
-      "proposal_id": null
-    },
-    {
-      "agent_id": "ui",
-      "action": "ui.schema.generated",
-      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
-      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
-      "task_id": null,
-      "proposal_id": null
-    },
-    {
-      "agent_id": "surface-collector",
-      "action": "ui.surface.generated",
-      "summary": "surface collector generated a fresh ui surface spec",
-      "reason": "pages=1 fingerprint=536d05e7f3a789e3:a03c8d0dfe36aeb1:project_state",
+      "reason": "pages=1 fingerprint=8dbfcc3323000240:320be6346fdfd8a7:project_state",
       "task_id": null,
       "proposal_id": null
     },

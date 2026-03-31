@@ -63,9 +63,9 @@
     "max_parallel": 2,
     "tenant_id": "default",
     "user_id": "local-admin",
-    "status": "running",
+    "status": "stopped",
     "pid": 4916,
-    "process_started_at": 1774952354.217,
+    "process_started_at": null,
     "window_title": "",
     "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-surface-collector-4745231497745435168.log",
     "channel": "implicit_window",
@@ -73,9 +73,9 @@
     "error": null,
     "exit_code": null,
     "created_at": 1774952352.4459305,
-    "updated_at": 1774952354.4885302,
+    "updated_at": 1774953151.896542,
     "started_at": 1774952354.4885302,
-    "stopped_at": null
+    "stopped_at": 1774953151.896542
   },
   {
     "launch_id": "resident-ui-4745231497754148238",

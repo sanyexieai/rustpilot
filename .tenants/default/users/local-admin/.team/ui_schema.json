@@ -1,8 +1,8 @@
 {
-  "generated_at": 1774952592.680908,
-  "source_fingerprint": "4d482f7921fc3be2:617b774171638366:562dd88e19c1ecc0:project_state:project_state",
+  "generated_at": 1774953148.817856,
+  "source_fingerprint": "67bba215ec04846d:836a577e038e9a2c:ebe7d318669b7023:project_state:project_state",
   "title": "System Overview",
-  "subtitle": "Provide an overview of current system state and operator actions.",
+  "subtitle": "Primary dashboard for observing system state, agent activity, and dispatching work.",
   "theme_name": "paper-console",
   "sections": [
     {
