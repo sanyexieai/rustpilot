@@ -93,11 +93,32 @@ impl TenantRuntimeRegistryManager {
         if content.trim().is_empty() {
             return Ok(Vec::new());
         }
-        Ok(serde_json::from_str(&content)?)
+        match serde_json::from_str(&content) {
+            Ok(items) => Ok(items),
+            Err(_) => {
+                let repaired = repair_registry_json(&content)?;
+                let items = serde_json::from_str(&repaired)?;
+                fs::write(&self.path, &repaired)?;
+                Ok(items)
+            }
+        }
     }
 
     fn save_all(&self, items: &[TenantRuntimeRecord]) -> anyhow::Result<()> {
         fs::write(&self.path, serde_json::to_string_pretty(items)?)?;
         Ok(())
     }
+}
+
+fn repair_registry_json(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('[') {
+        anyhow::bail!("tenant runtime registry is not a JSON array");
+    }
+    let end = trimmed
+        .rfind(']')
+        .ok_or_else(|| anyhow::anyhow!("tenant runtime registry is missing closing bracket"))?;
+    let candidate = trimmed[..=end].trim();
+    serde_json::from_str::<Vec<TenantRuntimeRecord>>(candidate)?;
+    Ok(candidate.to_string())
 }

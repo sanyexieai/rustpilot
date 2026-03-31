@@ -29,5 +29,5 @@ Scope: ui schema
 If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.
 Do not add unnecessary narration, markdown wrappers, or speculative alternatives.
 When using tool calls, keep them minimal and directly relevant to the current task.
-Recovery trigger: error sending request for url (https://api.minimaxi.com/v1/chat/completions)
+Recovery trigger: invalid type: string "Resident Agents", expected struct UiLabel at line 1 column 456
 <!-- auto-recovery:end -->

@@ -5,7 +5,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident concierge agent waiting for mailbox work",
-    "last_active_at": 1774952085.8648982
+    "last_active_at": 1774952598.6332045
   },
   {
     "agent_id": "critic",
@@ -13,7 +13,7 @@
     "channel": "resident",
     "target": "critic-loop",
     "note": "no open proposals",
-    "last_active_at": 1774952085.853115
+    "last_active_at": 1774952597.0695257
   },
   {
     "agent_id": "launcher",
@@ -21,7 +21,7 @@
     "channel": "resident",
     "target": "launcher-loop",
     "note": "launcher reconciling agent windows",
-    "last_active_at": 1774952087.07162
+    "last_active_at": 1774952596.16634
   },
   {
     "agent_id": "lead",
@@ -29,7 +29,7 @@
     "channel": "cli",
     "target": "main",
     "note": "primary console",
-    "last_active_at": 1774952005.7925224
+    "last_active_at": 1774952349.579616
   },
   {
     "agent_id": "reviewer",
@@ -37,7 +37,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident reviewer agent waiting for mailbox work",
-    "last_active_at": 1774952085.231326
+    "last_active_at": 1774952598.480388
   },
   {
     "agent_id": "scheduler",
@@ -45,7 +45,7 @@
     "channel": "resident",
     "target": "scheduler-loop",
     "note": "resident scheduler waiting for tasks",
-    "last_active_at": 1774952087.2536912
+    "last_active_at": 1774952597.6426537
   },
   {
     "agent_id": "surface-collector",
@@ -53,7 +53,7 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident ui_planner agent waiting for mailbox work",
-    "last_active_at": 1774952077.5172756
+    "last_active_at": 1774952586.9459243
   },
   {
     "agent_id": "team-manager",
@@ -61,7 +61,7 @@
     "channel": "scheduler",
     "target": "team-loop",
     "note": "正常并发",
-    "last_active_at": 1774952087.4665027
+    "last_active_at": 1774952598.2650378
   },
   {
     "agent_id": "ui",
@@ -69,6 +69,6 @@
     "channel": "resident",
     "target": "mailbox-loop",
     "note": "resident ui agent waiting for mailbox work",
-    "last_active_at": 1774952078.548972
+    "last_active_at": 1774952581.9546194
   }
 ]

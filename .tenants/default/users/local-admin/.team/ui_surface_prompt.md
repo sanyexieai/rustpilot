@@ -16,3 +16,14 @@ Evolution goals:
 - Adjust pages, actions, and supported sections when capabilities change
 - Keep the surface spec aligned with protocol changes
 - Provide stable planning input for downstream schema and page generation
+
+<!-- auto-recovery:begin -->
+<!-- auto-recovery:ui-surface-recovery -->
+## Auto-Recovery Note
+Strategy: Generic
+Scope: ui surface
+If the previous attempt failed, prefer the smallest complete answer that still moves the task forward.
+Do not add unnecessary narration, markdown wrappers, or speculative alternatives.
+When using tool calls, keep them minimal and directly relevant to the current task.
+Recovery trigger: ui surface action 'status-refresh' target '' is not allowed by protocol 'ui.status'
+<!-- auto-recovery:end -->

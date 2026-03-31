@@ -12,8 +12,8 @@
       "do not implement code directly",
       "do not bypass task routing"
     ],
-    "created_at": 1774951842.061067,
-    "updated_at": 1774952085.851022
+    "created_at": 1774952359.6665366,
+    "updated_at": 1774952598.6310856
   },
   {
     "agent_id": "critic",
@@ -28,8 +28,8 @@
       "do not directly edit code",
       "do not bypass proposal workflow"
     ],
-    "created_at": 1774951834.6229916,
-    "updated_at": 1774952085.836688
+    "created_at": 1774952352.2185948,
+    "updated_at": 1774952597.053512
   },
   {
     "agent_id": "launcher",
@@ -44,8 +44,8 @@
       "do not execute task content",
       "do not bypass launch registry"
     ],
-    "created_at": 1774951832.1616783,
-    "updated_at": 1774952083.0718727
+    "created_at": 1774952349.7287848,
+    "updated_at": 1774952597.0381544
   },
   {
     "agent_id": "lead",
@@ -59,8 +59,8 @@
     "forbidden": [
       "do not bypass tasks or mailbox routing"
     ],
-    "created_at": 1774951832.0135643,
-    "updated_at": 1774952005.7908924
+    "created_at": 1774952349.578894,
+    "updated_at": 1774952349.578894
   },
   {
     "agent_id": "reviewer",
@@ -75,8 +75,8 @@
       "do not edit code",
       "do not bypass proposal workflow"
     ],
-    "created_at": 1774951845.535534,
-    "updated_at": 1774952085.2292504
+    "created_at": 1774952362.933844,
+    "updated_at": 1774952598.4788454
   },
   {
     "agent_id": "scheduler",
@@ -91,8 +91,8 @@
       "do not directly edit code",
       "do not bypass task routing"
     ],
-    "created_at": 1774951833.117545,
-    "updated_at": 1774952087.2512915
+    "created_at": 1774952350.6759603,
+    "updated_at": 1774952597.640344
   },
   {
     "agent_id": "surface-collector",
@@ -107,8 +107,8 @@
       "do not render final pages",
       "do not invent unsupported protocol actions"
     ],
-    "created_at": 1774951836.6663496,
-    "updated_at": 1774952080.0590923
+    "created_at": 1774952354.341359,
+    "updated_at": 1774952589.519807
   },
   {
     "agent_id": "team-manager",
@@ -122,8 +122,8 @@
     "forbidden": [
       "不要直接替代 worker 执行任务"
     ],
-    "created_at": 1774951833.1068091,
-    "updated_at": 1774952008.783121
+    "created_at": 1774952350.6650507,
+    "updated_at": 1774952350.6650507
   },
   {
     "agent_id": "ui",
@@ -138,7 +138,7 @@
       "do not claim backend-only work",
       "do not bypass task routing"
     ],
-    "created_at": 1774951839.0788698,
-    "updated_at": 1774952081.0894084
+    "created_at": 1774952356.796137,
+    "updated_at": 1774952584.5105774
   }
 ]

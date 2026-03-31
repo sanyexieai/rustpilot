@@ -8,8 +8,8 @@
       "model": "MiniMax-M2.5",
       "enabled": true,
       "source": "env:LLM_API_KEY",
-      "created_at": 1774951839.09755,
-      "updated_at": 1774952081.1056025
+      "created_at": 1774952356.8081117,
+      "updated_at": 1774952592.687236
     }
   },
   "auth_order": {
