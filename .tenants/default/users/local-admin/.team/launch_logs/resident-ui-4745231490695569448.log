@@ -1,0 +1,4 @@
+[resident] agent=ui role=ui repo=D:/code/rustpilot/rustpilot max_parallel=2
+[resident] agent=ui runtime_mode=mailbox behavior_mode=ui_request loop_ms=2500
+[resident] agent=ui mode=mailbox cursor=0 had_items=false
+[resident] agent=ui mode=mailbox cursor=0 had_items=false

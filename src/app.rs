@@ -217,6 +217,12 @@ pub async fn run() -> anyhow::Result<()> {
         unsafe {
             std::env::set_var("RUSTPILOT_AGENT_ID", teammate.owner.clone());
             std::env::set_var("RUSTPILOT_TASK_ID", teammate.task_id.to_string());
+            if let Some(tenant_id) = teammate.tenant_id.as_deref() {
+                std::env::set_var("RUSTPILOT_TENANT_ID", tenant_id);
+            }
+            if let Some(user_id) = teammate.user_id.as_deref() {
+                std::env::set_var("RUSTPILOT_USER_ID", user_id);
+            }
         }
         load_repo_env(&teammate.repo_root);
         return run_teammate_once(
@@ -232,6 +238,16 @@ pub async fn run() -> anyhow::Result<()> {
         .is_some_and(|value| value == "resident-agent-run")
     {
         let resident = parse_resident_args(&args[2..], AUTO_TEAM_MAX_PARALLEL)?;
+        if let Some(tenant_id) = resident.tenant_id.as_deref() {
+            unsafe {
+                std::env::set_var("RUSTPILOT_TENANT_ID", tenant_id);
+            }
+        }
+        if let Some(user_id) = resident.user_id.as_deref() {
+            unsafe {
+                std::env::set_var("RUSTPILOT_USER_ID", user_id);
+            }
+        }
         load_repo_env(&resident.repo_root);
         return run_resident_agent(
             resident.repo_root,
@@ -483,26 +499,60 @@ async fn run_root_runtime(
         }
 
         while let Ok(command) = direct_api_rx.try_recv() {
+            unsafe {
+                std::env::set_var("RUSTPILOT_TENANT_ID", &command.tenant_id);
+                std::env::set_var("RUSTPILOT_USER_ID", &command.user_id);
+            }
+            let direct_project =
+                ProjectContext::for_user(repo_root.clone(), &command.tenant_id, &command.user_id)?;
+            let _ = direct_project.sessions().ensure_session(
+                &command.session_id,
+                command.session_label.as_deref(),
+                &interaction_mode.label(),
+                "active",
+            );
+            let mut direct_session_id = command.session_id.clone();
+            let mut direct_session_label = command.session_label.clone();
+            let mut direct_messages = direct_project
+                .sessions()
+                .load_messages(&command.session_id)?;
+            if direct_messages.is_empty() {
+                direct_messages.push(Message {
+                    role: "system".to_string(),
+                    content: Some(system_prompt.clone()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                });
+            }
             match execute_wire_request(
                 command.request,
                 WireRuntime {
                     repo_root: &repo_root,
                     client: &client,
                     llm: &llm,
-                    project: &project,
-                    messages: &mut messages,
+                    project: &direct_project,
+                    messages: &mut direct_messages,
                     progress: &progress,
                     supervisor: &mut supervisor,
                     lead_cursor: &mut lead_cursor,
                     interaction_mode: &interaction_mode,
-                    sessions: project.sessions(),
-                    current_session_id: &mut current_session_id,
-                    current_session_label: &mut current_session_label,
+                    sessions: direct_project.sessions(),
+                    current_session_id: &mut direct_session_id,
+                    current_session_label: &mut direct_session_label,
                 },
             )
             .await
             {
                 Ok(outcome) => {
+                    let _ = direct_project.sessions().update_state(
+                        &direct_session_id,
+                        direct_session_label.as_deref(),
+                        &interaction_mode.label(),
+                        "active",
+                    );
+                    let _ = direct_project
+                        .sessions()
+                        .save_messages(&direct_session_id, &direct_messages);
                     for frame in outcome.frames {
                         let _ = command.frames_tx.send(frame);
                     }

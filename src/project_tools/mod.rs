@@ -4,6 +4,7 @@ mod budget;
 mod context;
 mod decision;
 mod event;
+mod identity;
 mod launch_registry;
 mod launch_settings;
 mod mailbox;
@@ -15,6 +16,7 @@ mod resident_runtime;
 mod session;
 mod system_model;
 mod task;
+mod tenant_runtime_registry;
 mod tools;
 mod ui_page;
 mod ui_schema;
@@ -28,6 +30,10 @@ pub use budget::{BudgetLedger, BudgetManager, EnergyMode, classify_energy};
 pub use context::ProjectContext;
 pub use decision::{DecisionManager, DecisionRecord};
 pub use event::{EventBus, EventRecord};
+pub use identity::{
+    ApiTokenRecord, AuthContext, BootstrapIdentity, IdentityManager, MembershipRecord,
+    TenantRecord, UserRecord,
+};
 pub use launch_registry::{LaunchRecord, LaunchRegistryManager, LaunchRequest};
 pub use launch_settings::{LaunchPresentationMode, LaunchSettings, LaunchSettingsManager};
 pub use mailbox::{MailRecord, Mailbox};
@@ -42,6 +48,7 @@ pub use system_model::{
     SystemProposal, SystemProtocol, SystemResident, SystemSummary, SystemTask,
 };
 pub use task::{TaskCreateOptions, TaskManager, TaskRecord};
+pub use tenant_runtime_registry::{TenantRuntimeRecord, TenantRuntimeRegistryManager};
 pub use tools::{handle_project_tool_call, project_tool_definitions};
 pub use ui_page::{
     UiDesignRules, UiPage as GeneratedUiPage, UiPageContext, UiPageManager, UiUserIntentMemory,

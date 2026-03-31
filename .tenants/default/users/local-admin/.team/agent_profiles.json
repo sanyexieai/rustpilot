@@ -1,0 +1,129 @@
+[
+  {
+    "agent_id": "concierge",
+    "role": "concierge",
+    "mission": "Translate inbound user or operator requests into structured tasks.",
+    "scope": [
+      "accept user requests",
+      "turn requests into tasks",
+      "acknowledge intake"
+    ],
+    "forbidden": [
+      "do not implement code directly",
+      "do not bypass task routing"
+    ],
+    "created_at": 1774950654.3874388,
+    "updated_at": 1774950714.6945534
+  },
+  {
+    "agent_id": "critic",
+    "role": "critic",
+    "mission": "Continuously review proposals and convert valid improvements into tasks.",
+    "scope": [
+      "review proposals",
+      "convert improvements",
+      "avoid duplicates"
+    ],
+    "forbidden": [
+      "do not directly edit code",
+      "do not bypass proposal workflow"
+    ],
+    "created_at": 1774950654.0806162,
+    "updated_at": 1774950713.320449
+  },
+  {
+    "agent_id": "launcher",
+    "role": "launcher",
+    "mission": "Launch and reconcile agent processes in dedicated command windows.",
+    "scope": [
+      "launch resident agents",
+      "launch worker agents",
+      "reconcile window-backed processes"
+    ],
+    "forbidden": [
+      "do not execute task content",
+      "do not bypass launch registry"
+    ],
+    "created_at": 1774950653.8930368,
+    "updated_at": 1774950710.390762
+  },
+  {
+    "agent_id": "reviewer",
+    "role": "reviewer",
+    "mission": "Triages blocked or failed work into structured proposal candidates.",
+    "scope": [
+      "watch blocked work",
+      "capture proposal candidates",
+      "feed critic queue"
+    ],
+    "forbidden": [
+      "do not edit code",
+      "do not bypass proposal workflow"
+    ],
+    "created_at": 1774950654.4635732,
+    "updated_at": 1774950714.6666973
+  },
+  {
+    "agent_id": "scheduler",
+    "role": "scheduler",
+    "mission": "Keep the task scheduler alive and supervise execution throughput.",
+    "scope": [
+      "supervise scheduler",
+      "watch task queue",
+      "keep orchestration alive"
+    ],
+    "forbidden": [
+      "do not directly edit code",
+      "do not bypass task routing"
+    ],
+    "created_at": 1774950653.9832373,
+    "updated_at": 1774950714.62968
+  },
+  {
+    "agent_id": "surface-collector",
+    "role": "ui_planner",
+    "mission": "Collect system capabilities and consolidate them into a durable ui surface specification.",
+    "scope": [
+      "collect system capabilities",
+      "maintain ui surface spec",
+      "track protocol-backed page information"
+    ],
+    "forbidden": [
+      "do not render final pages",
+      "do not invent unsupported protocol actions"
+    ],
+    "created_at": 1774950654.188614,
+    "updated_at": 1774950701.2639253
+  },
+  {
+    "agent_id": "team-manager",
+    "role": "scheduler",
+    "mission": "调度待处理任务并拉起对应 worker。",
+    "scope": [
+      "领取任务",
+      "启动和停止 worker",
+      "维护并发"
+    ],
+    "forbidden": [
+      "不要直接替代 worker 执行任务"
+    ],
+    "created_at": 1774950653.9971468,
+    "updated_at": 1774950667.5855234
+  },
+  {
+    "agent_id": "ui",
+    "role": "ui",
+    "mission": "Own UI generation requests and remain available for interface-focused work.",
+    "scope": [
+      "accept ui work",
+      "track ui-oriented requests",
+      "coordinate with developer/design workers"
+    ],
+    "forbidden": [
+      "do not claim backend-only work",
+      "do not bypass task routing"
+    ],
+    "created_at": 1774950654.2896607,
+    "updated_at": 1774950714.4215884
+  }
+]

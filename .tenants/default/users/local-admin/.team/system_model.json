@@ -1,0 +1,494 @@
+{
+  "generated_at": 1774950714.4338484,
+  "summary": {
+    "launch_mode": "multi_window",
+    "launch_mode_description": "each launch opens a dedicated visible OS window",
+    "launch_effective_mode": "multi_window",
+    "launch_backend": "windows_start_process",
+    "launch_backend_note": "visible windows are launched through Start-Process cmd.exe hosts",
+    "resident_count": 7,
+    "pending_tasks": 0,
+    "running_tasks": 0,
+    "blocked_tasks": 0,
+    "completed_tasks": 0,
+    "open_proposals": 0,
+    "recent_decisions": 4
+  },
+  "alerts": [],
+  "protocols": [
+    {
+      "id": "ui.status",
+      "transport": "http",
+      "method": "GET",
+      "path": "/api/status",
+      "purpose": "load the current system model and ui schema for the dashboard",
+      "readonly": true,
+      "requires_confirmation": false,
+      "targets": [],
+      "request_fields": [],
+      "response_fields": [
+        {
+          "name": "schema",
+          "required": true,
+          "field_type": "object",
+          "description": "current ui schema generated for the control surface"
+        },
+        {
+          "name": "model.summary",
+          "required": true,
+          "field_type": "object",
+          "description": "system level summary metrics"
+        },
+        {
+          "name": "model.alerts",
+          "required": false,
+          "field_type": "array",
+          "description": "current system alerts"
+        },
+        {
+          "name": "model.residents",
+          "required": true,
+          "field_type": "array",
+          "description": "resident agent runtime state"
+        },
+        {
+          "name": "model.recent_prompt_changes",
+          "required": false,
+          "field_type": "array",
+          "description": "recent automatic prompt recovery changes"
+        },
+        {
+          "name": "model.tasks",
+          "required": false,
+          "field_type": "array",
+          "description": "recent task feed"
+        },
+        {
+          "name": "model.proposals",
+          "required": false,
+          "field_type": "array",
+          "description": "open proposal feed"
+        },
+        {
+          "name": "model.decisions",
+          "required": false,
+          "field_type": "array",
+          "description": "recent governance decisions"
+        },
+        {
+          "name": "chat_ui.main_friend",
+          "required": true,
+          "field_type": "object",
+          "description": "main direct conversation contract for the primary actor"
+        },
+        {
+          "name": "chat_ui.group_chat",
+          "required": true,
+          "field_type": "object",
+          "description": "agent team group conversation contract"
+        },
+        {
+          "name": "chat_ui.agent_details",
+          "required": true,
+          "field_type": "object",
+          "description": "per-agent transcript and runtime detail map"
+        },
+        {
+          "name": "chat_ui.launches",
+          "required": false,
+          "field_type": "array",
+          "description": "launch registry backed process and window metadata"
+        },
+        {
+          "name": "chat_ui.process_tree",
+          "required": true,
+          "field_type": "object",
+          "description": "hierarchical process and task tree"
+        }
+      ],
+      "supported_sections": [
+        "metrics",
+        "alerts",
+        "residents",
+        "main_chat",
+        "group_chat",
+        "agent_details",
+        "process_tree",
+        "launches",
+        "tasks",
+        "proposals",
+        "decisions"
+      ],
+      "supported_sources": [
+        "summary",
+        "alerts",
+        "residents",
+        "main_friend",
+        "group_chat",
+        "agent_details",
+        "process_tree",
+        "launches",
+        "tasks",
+        "proposals",
+        "decisions"
+      ],
+      "event_types": [
+        "system.snapshot"
+      ]
+    },
+    {
+      "id": "ui.wire.dispatch",
+      "transport": "http",
+      "method": "POST",
+      "path": "/api/wire",
+      "purpose": "dispatch a wire request from the control surface into the agent system",
+      "readonly": false,
+      "requires_confirmation": false,
+      "targets": [
+        "ui",
+        "concierge",
+        "reviewer"
+      ],
+      "request_fields": [
+        {
+          "name": "type",
+          "required": true,
+          "field_type": "enum(chat_send|chat_abort|session_create|session_list|tool_call)",
+          "description": "wire request type"
+        },
+        {
+          "name": "input",
+          "required": false,
+          "field_type": "string",
+          "description": "chat input for chat_send"
+        },
+        {
+          "name": "focus",
+          "required": false,
+          "field_type": "string",
+          "description": "target/focus hint for the request"
+        }
+      ],
+      "response_fields": [
+        {
+          "name": "type",
+          "required": true,
+          "field_type": "string",
+          "description": "wire response type"
+        },
+        {
+          "name": "message",
+          "required": false,
+          "field_type": "string",
+          "description": "acknowledgement or error summary"
+        }
+      ],
+      "supported_sections": [
+        "composer"
+      ],
+      "supported_sources": [
+        "composer"
+      ],
+      "event_types": [
+        "wire.response",
+        "wire.error"
+      ]
+    }
+  ],
+  "residents": [
+    {
+      "agent_id": "launcher",
+      "role": "launcher",
+      "runtime_mode": "launcher",
+      "behavior_mode": "passive",
+      "status": "running",
+      "note": "launcher reconciling agent windows",
+      "backlog": 0,
+      "loop_ms": 3947,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 0,
+      "budget_limit": 60000,
+      "last_action": "",
+      "last_summary": "",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "scheduler",
+      "role": "scheduler",
+      "runtime_mode": "scheduler",
+      "behavior_mode": "passive",
+      "status": "running",
+      "note": "resident scheduler waiting for tasks",
+      "backlog": 0,
+      "loop_ms": 124,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 0,
+      "budget_limit": 90000,
+      "last_action": "",
+      "last_summary": "",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "critic",
+      "role": "critic",
+      "runtime_mode": "critic",
+      "behavior_mode": "passive",
+      "status": "idle",
+      "note": "no open proposals",
+      "backlog": 0,
+      "loop_ms": 119,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 0,
+      "budget_limit": 80000,
+      "last_action": "",
+      "last_summary": "",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "surface-collector",
+      "role": "ui_planner",
+      "runtime_mode": "mailbox",
+      "behavior_mode": "ui_surface_planning",
+      "status": "idle",
+      "note": "resident ui_planner agent waiting for mailbox work",
+      "backlog": 0,
+      "loop_ms": 51,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 60,
+      "budget_limit": 90000,
+      "last_action": "ui.surface.generated",
+      "last_summary": "surface collector generated a fresh ui surface spec",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "ui",
+      "role": "ui",
+      "runtime_mode": "mailbox",
+      "behavior_mode": "ui_request",
+      "status": "idle",
+      "note": "resident ui agent waiting for mailbox work",
+      "backlog": 0,
+      "loop_ms": 85,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 240,
+      "budget_limit": 110000,
+      "last_action": "ui.schema.generated",
+      "last_summary": "ui agent generated a fresh ui schema from surface spec and prompt",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "concierge",
+      "role": "concierge",
+      "runtime_mode": "mailbox",
+      "behavior_mode": "concierge_request",
+      "status": "idle",
+      "note": "resident concierge agent waiting for mailbox work",
+      "backlog": 0,
+      "loop_ms": 57,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 0,
+      "budget_limit": 100000,
+      "last_action": "",
+      "last_summary": "",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    },
+    {
+      "agent_id": "reviewer",
+      "role": "reviewer",
+      "runtime_mode": "mailbox",
+      "behavior_mode": "proposal_triage",
+      "status": "idle",
+      "note": "resident reviewer agent waiting for mailbox work",
+      "backlog": 0,
+      "loop_ms": 120,
+      "last_error": "",
+      "last_msg": "",
+      "port": 0,
+      "energy": "Healthy",
+      "budget_used": 0,
+      "budget_limit": 70000,
+      "last_action": "",
+      "last_summary": "",
+      "prompt_strategy": "",
+      "prompt_trigger": "",
+      "prompt_note": ""
+    }
+  ],
+  "launches": [
+    {
+      "launch_id": "resident-reviewer-4745231490721655471",
+      "agent_id": "reviewer",
+      "owner": "reviewer",
+      "role": "reviewer",
+      "kind": "resident",
+      "status": "running",
+      "pid": 7112,
+      "process_started_at": 1774950681.187,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident reviewer",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-reviewer-4745231490721655471.log",
+      "error": ""
+    },
+    {
+      "launch_id": "resident-concierge-4745231490707849295",
+      "agent_id": "concierge",
+      "owner": "concierge",
+      "role": "concierge",
+      "kind": "resident",
+      "status": "running",
+      "pid": 27740,
+      "process_started_at": 1774950677.423,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident concierge",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-concierge-4745231490707849295.log",
+      "error": ""
+    },
+    {
+      "launch_id": "resident-ui-4745231490695569448",
+      "agent_id": "ui",
+      "owner": "ui",
+      "role": "ui",
+      "kind": "resident",
+      "status": "running",
+      "pid": 30172,
+      "process_started_at": 1774950674.208,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident ui",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-ui-4745231490695569448.log",
+      "error": ""
+    },
+    {
+      "launch_id": "resident-surface-collector-4745231490687341366",
+      "agent_id": "surface-collector",
+      "owner": "surface-collector",
+      "role": "ui_planner",
+      "kind": "resident",
+      "status": "running",
+      "pid": 12804,
+      "process_started_at": 1774950671.324,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident surface-collector",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-surface-collector-4745231490687341366.log",
+      "error": ""
+    },
+    {
+      "launch_id": "resident-critic-4745231490679622879",
+      "agent_id": "critic",
+      "owner": "critic",
+      "role": "critic",
+      "kind": "resident",
+      "status": "running",
+      "pid": 13868,
+      "process_started_at": 1774950669.218,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident critic",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-critic-4745231490679622879.log",
+      "error": ""
+    },
+    {
+      "launch_id": "resident-scheduler-4745231490677043600",
+      "agent_id": "scheduler",
+      "owner": "scheduler",
+      "role": "scheduler",
+      "kind": "resident",
+      "status": "running",
+      "pid": 21840,
+      "process_started_at": 1774950667.479,
+      "task_id": null,
+      "parent_task_id": null,
+      "parent_agent_id": "root",
+      "channel": "implicit_window",
+      "target": "Rustpilot resident scheduler",
+      "window_title": "",
+      "log_path": "D:/code/rustpilot/rustpilot\\.tenants\\default\\users\\local-admin\\.team\\launch_logs\\resident-scheduler-4745231490677043600.log",
+      "error": ""
+    }
+  ],
+  "recent_prompt_changes": [],
+  "tasks": [],
+  "proposals": [],
+  "decisions": [
+    {
+      "agent_id": "ui",
+      "action": "ui.schema.generated",
+      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
+      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "ui",
+      "action": "ui.schema.generated",
+      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
+      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "ui",
+      "action": "ui.schema.generated",
+      "summary": "ui agent generated a fresh ui schema from surface spec and prompt",
+      "reason": "system model, ui surface or prompt fingerprint changed and llm generation succeeded",
+      "task_id": null,
+      "proposal_id": null
+    },
+    {
+      "agent_id": "surface-collector",
+      "action": "ui.surface.generated",
+      "summary": "surface collector generated a fresh ui surface spec",
+      "reason": "pages=1 fingerprint=536d05e7f3a789e3:d776fa11897ffa71:project_state",
+      "task_id": null,
+      "proposal_id": null
+    }
+  ]
+}

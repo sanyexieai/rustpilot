@@ -1,0 +1,163 @@
+[
+  {
+    "agent_id": "launcher",
+    "role": "launcher",
+    "runtime_mode": "launcher",
+    "behavior_mode": "passive",
+    "enabled": true,
+    "mission": "Launch and reconcile agent processes in dedicated command windows.",
+    "scope": [
+      "launch resident agents",
+      "launch worker agents",
+      "reconcile window-backed processes"
+    ],
+    "forbidden": [
+      "do not execute task content",
+      "do not bypass launch registry"
+    ],
+    "daily_limit": 60000,
+    "period_limit": 15000,
+    "task_soft_limit": 6000,
+    "loop_interval_ms": 800,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "scheduler",
+    "role": "scheduler",
+    "runtime_mode": "scheduler",
+    "behavior_mode": "passive",
+    "enabled": true,
+    "mission": "Keep the task scheduler alive and supervise execution throughput.",
+    "scope": [
+      "supervise scheduler",
+      "watch task queue",
+      "keep orchestration alive"
+    ],
+    "forbidden": [
+      "do not directly edit code",
+      "do not bypass task routing"
+    ],
+    "daily_limit": 90000,
+    "period_limit": 20000,
+    "task_soft_limit": 8000,
+    "loop_interval_ms": 1200,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "critic",
+    "role": "critic",
+    "runtime_mode": "critic",
+    "behavior_mode": "passive",
+    "enabled": true,
+    "mission": "Continuously review proposals and convert valid improvements into tasks.",
+    "scope": [
+      "review proposals",
+      "convert improvements",
+      "avoid duplicates"
+    ],
+    "forbidden": [
+      "do not directly edit code",
+      "do not bypass proposal workflow"
+    ],
+    "daily_limit": 80000,
+    "period_limit": 20000,
+    "task_soft_limit": 8000,
+    "loop_interval_ms": 2500,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "surface-collector",
+    "role": "ui_planner",
+    "runtime_mode": "mailbox",
+    "behavior_mode": "ui_surface_planning",
+    "enabled": true,
+    "mission": "Collect system capabilities and consolidate them into a durable ui surface specification.",
+    "scope": [
+      "collect system capabilities",
+      "maintain ui surface spec",
+      "track protocol-backed page information"
+    ],
+    "forbidden": [
+      "do not render final pages",
+      "do not invent unsupported protocol actions"
+    ],
+    "daily_limit": 90000,
+    "period_limit": 20000,
+    "task_soft_limit": 10000,
+    "loop_interval_ms": 2500,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "ui",
+    "role": "ui",
+    "runtime_mode": "mailbox",
+    "behavior_mode": "ui_request",
+    "enabled": true,
+    "mission": "Own UI generation requests and remain available for interface-focused work.",
+    "scope": [
+      "accept ui work",
+      "track ui-oriented requests",
+      "coordinate with developer/design workers"
+    ],
+    "forbidden": [
+      "do not claim backend-only work",
+      "do not bypass task routing"
+    ],
+    "daily_limit": 110000,
+    "period_limit": 30000,
+    "task_soft_limit": 14000,
+    "loop_interval_ms": 2500,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "concierge",
+    "role": "concierge",
+    "runtime_mode": "mailbox",
+    "behavior_mode": "concierge_request",
+    "enabled": true,
+    "mission": "Translate inbound user or operator requests into structured tasks.",
+    "scope": [
+      "accept user requests",
+      "turn requests into tasks",
+      "acknowledge intake"
+    ],
+    "forbidden": [
+      "do not implement code directly",
+      "do not bypass task routing"
+    ],
+    "daily_limit": 100000,
+    "period_limit": 25000,
+    "task_soft_limit": 10000,
+    "loop_interval_ms": 2000,
+    "max_parallel_override": null,
+    "listen_port": null
+  },
+  {
+    "agent_id": "reviewer",
+    "role": "reviewer",
+    "runtime_mode": "mailbox",
+    "behavior_mode": "proposal_triage",
+    "enabled": true,
+    "mission": "Triages blocked or failed work into structured proposal candidates.",
+    "scope": [
+      "watch blocked work",
+      "capture proposal candidates",
+      "feed critic queue"
+    ],
+    "forbidden": [
+      "do not edit code",
+      "do not bypass proposal workflow"
+    ],
+    "daily_limit": 70000,
+    "period_limit": 18000,
+    "task_soft_limit": 7000,
+    "loop_interval_ms": 2500,
+    "max_parallel_override": null,
+    "listen_port": null
+  }
+]

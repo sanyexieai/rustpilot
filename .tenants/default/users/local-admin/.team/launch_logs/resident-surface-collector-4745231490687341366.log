@@ -1,0 +1,4 @@
+[resident] agent=surface-collector role=ui_planner repo=D:/code/rustpilot/rustpilot max_parallel=2
+[resident] agent=surface-collector runtime_mode=mailbox behavior_mode=ui_surface_planning loop_ms=2500
+[resident] agent=surface-collector mode=mailbox cursor=0 had_items=false
+[resident] agent=surface-collector mode=mailbox cursor=0 had_items=false

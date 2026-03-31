@@ -1,0 +1,8 @@
+[resident] agent=reviewer role=reviewer repo=D:/code/rustpilot/rustpilot max_parallel=2
+[resident] agent=reviewer runtime_mode=mailbox behavior_mode=proposal_triage loop_ms=2500
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false
+[resident] agent=reviewer mode=mailbox cursor=0 had_items=false

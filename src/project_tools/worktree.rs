@@ -84,8 +84,12 @@ pub struct WorktreeManager {
 }
 
 impl WorktreeManager {
-    pub fn new(repo_root: PathBuf, tasks: TaskManager, events: EventBus) -> anyhow::Result<Self> {
-        let dir = repo_root.join(".worktrees");
+    pub fn new(
+        repo_root: PathBuf,
+        dir: PathBuf,
+        tasks: TaskManager,
+        events: EventBus,
+    ) -> anyhow::Result<Self> {
         fs::create_dir_all(&dir)?;
         let index_path = dir.join("index.json");
         if !index_path.exists() {

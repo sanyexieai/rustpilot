@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::agent::{AgentProgressReport, run_agent_loop, tool_definitions};
-use crate::app_support::root_actor_id;
+use crate::app_support::{current_tenant_id, current_user_id, root_actor_id};
 use crate::config::LlmConfig;
 use crate::config::default_llm_user_agent;
 use crate::constants::WORKER_STUCK_NOTIFY_SECS;
@@ -658,6 +658,16 @@ fn spawn_teammate_process(
         .arg(owner)
         .arg("--role-hint")
         .arg(role_hint)
+        .args(
+            current_tenant_id()
+                .map(|tenant_id| vec!["--tenant-id".to_string(), tenant_id])
+                .unwrap_or_default(),
+        )
+        .args(
+            current_user_id()
+                .map(|user_id| vec!["--user-id".to_string(), user_id])
+                .unwrap_or_default(),
+        )
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;
@@ -674,13 +684,21 @@ fn spawn_teammate_in_tmux(
     let exe = std::env::current_exe()?;
     let window_name = format!("rustpilot-team:teammate-{}", task_id);
     let pane_name = format!("teammate-{}", task_id);
+    let tenant_part = current_tenant_id()
+        .map(|tenant_id| format!(" --tenant-id {}", shell_quote(&tenant_id)))
+        .unwrap_or_default();
+    let user_part = current_user_id()
+        .map(|user_id| format!(" --user-id {}", shell_quote(&user_id)))
+        .unwrap_or_default();
     let command = format!(
-        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}",
+        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}{}{}",
         shell_quote(exe.to_string_lossy().as_ref()),
         shell_quote(repo_root.to_string_lossy().as_ref()),
         task_id,
         shell_quote(owner),
-        shell_quote(role_hint)
+        shell_quote(role_hint),
+        tenant_part,
+        user_part
     );
     let output = Command::new("tmux")
         .args([
@@ -714,15 +732,35 @@ fn spawn_teammate_in_terminal(
     let info = terminal_manager.create(TerminalCreateRequest {
         cwd: Some(repo_root.to_path_buf()),
         shell: None,
-        env: Vec::new(),
+        env: current_tenant_id()
+            .map(|tenant_id| {
+                let mut env = vec![("RUSTPILOT_TENANT_ID".to_string(), tenant_id)];
+                if let Some(user_id) = current_user_id() {
+                    env.push(("RUSTPILOT_USER_ID".to_string(), user_id));
+                }
+                env
+            })
+            .unwrap_or_else(|| {
+                current_user_id()
+                    .map(|user_id| vec![("RUSTPILOT_USER_ID".to_string(), user_id)])
+                    .unwrap_or_default()
+            }),
     })?;
+    let tenant_part = current_tenant_id()
+        .map(|tenant_id| format!(" --tenant-id {}", shell_quote(&tenant_id)))
+        .unwrap_or_default();
+    let user_part = current_user_id()
+        .map(|user_id| format!(" --user-id {}", shell_quote(&user_id)))
+        .unwrap_or_default();
     let command = format!(
-        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}\n",
+        "{} teammate-run --repo-root {} --task-id {} --owner {} --role-hint {}{}{}\n",
         shell_quote(exe.to_string_lossy().as_ref()),
         shell_quote(repo_root.to_string_lossy().as_ref()),
         task_id,
         shell_quote(owner),
-        shell_quote(role_hint)
+        shell_quote(role_hint),
+        tenant_part,
+        user_part
     );
     terminal_manager.write(&info.id, &command)?;
     println!(
@@ -1888,6 +1926,8 @@ fn register_worker_agent(
                 parent_task_id: None,
                 parent_agent_id: None,
                 max_parallel: None,
+                tenant_id: current_tenant_id(),
+                user_id: current_user_id(),
                 status: "running".to_string(),
                 pid: None,
                 process_started_at: None,

@@ -23,6 +23,10 @@ pub struct LaunchRecord {
     pub parent_agent_id: Option<String>,
     #[serde(default)]
     pub max_parallel: Option<usize>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
     pub status: String,
     #[serde(default)]
     pub pid: Option<u32>,
@@ -58,6 +62,8 @@ pub struct LaunchRequest {
     pub parent_task_id: Option<u64>,
     pub parent_agent_id: Option<String>,
     pub max_parallel: Option<usize>,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +114,8 @@ impl LaunchRegistryManager {
             parent_task_id: request.parent_task_id,
             parent_agent_id: request.parent_agent_id,
             max_parallel: request.max_parallel,
+            tenant_id: request.tenant_id,
+            user_id: request.user_id,
             status: "requested".to_string(),
             pid: None,
             process_started_at: None,

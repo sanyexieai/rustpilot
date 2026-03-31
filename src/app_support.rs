@@ -76,6 +76,8 @@ pub(crate) struct TeammateArgs {
     pub(crate) task_id: u64,
     pub(crate) owner: String,
     pub(crate) role_hint: String,
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) user_id: Option<String>,
 }
 
 pub(crate) struct ResidentArgs {
@@ -83,6 +85,8 @@ pub(crate) struct ResidentArgs {
     pub(crate) agent_id: String,
     pub(crate) role: String,
     pub(crate) max_parallel: usize,
+    pub(crate) tenant_id: Option<String>,
+    pub(crate) user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +117,20 @@ pub(crate) fn root_actor_id() -> String {
 
 pub(crate) fn current_agent_id() -> String {
     std::env::var("RUSTPILOT_AGENT_ID").unwrap_or_else(|_| root_actor_id())
+}
+
+pub(crate) fn current_tenant_id() -> Option<String> {
+    std::env::var("RUSTPILOT_TENANT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn current_user_id() -> Option<String> {
+    std::env::var("RUSTPILOT_USER_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn trim_messages(messages: &[Message], keep_tail: usize) -> Vec<Message> {
@@ -410,6 +428,8 @@ pub(crate) fn parse_teammate_args(args: &[String]) -> anyhow::Result<TeammateArg
     let mut task_id = None::<u64>;
     let mut owner = None::<String>;
     let mut role_hint = None::<String>;
+    let mut tenant_id = None::<String>;
+    let mut user_id = None::<String>;
     let mut idx = 0usize;
 
     while idx < args.len() {
@@ -445,6 +465,22 @@ pub(crate) fn parse_teammate_args(args: &[String]) -> anyhow::Result<TeammateArg
                         .to_string(),
                 );
             }
+            "--tenant-id" => {
+                idx += 1;
+                tenant_id = Some(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --tenant-id value"))?
+                        .to_string(),
+                );
+            }
+            "--user-id" => {
+                idx += 1;
+                user_id = Some(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --user-id value"))?
+                        .to_string(),
+                );
+            }
             flag => anyhow::bail!("unknown argument: {}", flag),
         }
         idx += 1;
@@ -455,6 +491,8 @@ pub(crate) fn parse_teammate_args(args: &[String]) -> anyhow::Result<TeammateArg
         task_id: task_id.ok_or_else(|| anyhow::anyhow!("missing --task-id"))?,
         owner: owner.unwrap_or_else(|| "teammate".to_string()),
         role_hint: role_hint.unwrap_or_else(|| "developer".to_string()),
+        tenant_id,
+        user_id,
     })
 }
 
@@ -466,6 +504,8 @@ pub(crate) fn parse_resident_args(
     let mut agent_id = None::<String>;
     let mut role = None::<String>;
     let mut max_parallel = None::<usize>;
+    let mut tenant_id = None::<String>;
+    let mut user_id = None::<String>;
     let mut idx = 0usize;
 
     while idx < args.len() {
@@ -502,6 +542,22 @@ pub(crate) fn parse_resident_args(
                         .max(1),
                 );
             }
+            "--tenant-id" => {
+                idx += 1;
+                tenant_id = Some(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --tenant-id value"))?
+                        .to_string(),
+                );
+            }
+            "--user-id" => {
+                idx += 1;
+                user_id = Some(
+                    args.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("missing --user-id value"))?
+                        .to_string(),
+                );
+            }
             flag => anyhow::bail!("unknown argument: {}", flag),
         }
         idx += 1;
@@ -512,6 +568,8 @@ pub(crate) fn parse_resident_args(
         agent_id: agent_id.ok_or_else(|| anyhow::anyhow!("missing --agent-id"))?,
         role: role.ok_or_else(|| anyhow::anyhow!("missing --role"))?,
         max_parallel: max_parallel.unwrap_or(default_max_parallel),
+        tenant_id,
+        user_id,
     })
 }
 

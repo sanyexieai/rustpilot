@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "minimax:default": {
+      "profile_id": "minimax:default",
+      "provider": "minimax",
+      "api_key": "sk-cp-k3EdfVTDJ1L4wUfUuDzd2lHuahUko7RQNV_ihX-ejnaLMf4FLKPTVAiE8sjNlx9TFZF4k8s-sCWJ7MnOXSlORqZib32Y10_GF1NM26IK8Uu1Df2Xwnh0a_4",
+      "api_base_url": "https://api.minimaxi.com/v1",
+      "model": "MiniMax-M2.5",
+      "enabled": true,
+      "source": "env:LLM_API_KEY",
+      "created_at": 1774950654.316084,
+      "updated_at": 1774950702.7822704
+    }
+  },
+  "auth_order": {
+    "minimax": [
+      "minimax:default"
+    ]
+  }
+}

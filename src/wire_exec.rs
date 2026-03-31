@@ -448,6 +448,8 @@ pub(crate) fn execute_ui_wire_request(
     repo_root: &Path,
     agent_id: &str,
     decision_action: &str,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
 ) -> anyhow::Result<WireResponse> {
     let context = WireExecContext {
         repo_root,
@@ -468,7 +470,7 @@ pub(crate) fn execute_ui_wire_request(
                 anyhow::bail!("message cannot be empty");
             }
 
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             if let Some(intent) = parse_ui_intent(message) {
                 let url = ui_base_url(&project);
                 return Ok(WireResponse::Ack {
@@ -522,7 +524,7 @@ pub(crate) fn execute_ui_wire_request(
         }
         WireRequest::SessionList => Ok(context.session_list()),
         WireRequest::SessionUse { session_id } => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let Some(session) = project.sessions().get(&session_id)? else {
                 return Ok(WireResponse::Error {
                     message: format!("unknown session: {}", session_id),
@@ -549,7 +551,7 @@ pub(crate) fn execute_ui_wire_request(
             })
         }
         WireRequest::ApprovalStatus => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let policy = project.approval().get_policy()?;
             Ok(WireResponse::ApprovalStatus {
                 mode: approval_mode_name(policy.mode).to_string(),
@@ -562,7 +564,7 @@ pub(crate) fn execute_ui_wire_request(
             })
         }
         WireRequest::ApprovalHistory { limit, reason } => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let items = project
                 .approval()
                 .list_recent_blocks(limit.unwrap_or(10), reason.as_deref())?
@@ -572,7 +574,7 @@ pub(crate) fn execute_ui_wire_request(
             Ok(WireResponse::ApprovalHistory { items })
         }
         WireRequest::ApprovalSet { mode } => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let mode = match mode.as_str() {
                 "auto" => ApprovalMode::Auto,
                 "read_only" => ApprovalMode::ReadOnly,
@@ -596,7 +598,7 @@ pub(crate) fn execute_ui_wire_request(
         }
         WireRequest::ToolList => Ok(context.tool_list(tool_summaries())),
         WireRequest::SessionCreate { label, focus } => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let interaction_mode =
                 resolve_session_create_mode(focus.as_deref(), &InteractionMode::Lead)?;
             let focus_label = interaction_mode.label();
@@ -623,7 +625,7 @@ pub(crate) fn execute_ui_wire_request(
             name,
             arguments_json,
         } => {
-            let project = ProjectContext::new(context.repo_root.to_path_buf())?;
+            let project = scoped_project_context(context.repo_root, tenant_id, user_id)?;
             let call = build_tool_call(&name, arguments_json);
             Ok(match handle_tool_call(&project, &call) {
                 Ok(output) => context.tool_result(&name, output),
@@ -641,6 +643,20 @@ fn wire_approval_block(block: &crate::project_tools::ApprovalBlockRecord) -> Wir
         command: block.command.clone(),
         reason_code: block.reason_code.clone(),
         message: block.message.clone(),
+    }
+}
+
+fn scoped_project_context(
+    repo_root: &Path,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+) -> anyhow::Result<ProjectContext> {
+    match (tenant_id, user_id) {
+        (Some(tenant_id), Some(user_id)) => {
+            ProjectContext::for_user(repo_root.to_path_buf(), tenant_id, user_id)
+        }
+        (Some(tenant_id), None) => ProjectContext::for_tenant(repo_root.to_path_buf(), tenant_id),
+        _ => ProjectContext::new(repo_root.to_path_buf()),
     }
 }
 
@@ -1109,6 +1125,8 @@ mod tests {
             temp.path(),
             "ui",
             "ui.http.wire_request.received",
+            None,
+            None,
         )
         .expect("ui wire request");
 

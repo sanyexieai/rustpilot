@@ -50,6 +50,177 @@ cargo run
 
 The main process starts a local UI server automatically. Natural-language requests such as `open dashboard` or `打开一个管理当前状态的页面` trigger the generated management page instead of requiring a dedicated command.
 
+## HTTP Chat API
+
+The local UI server also exposes a small chat API on the same port, which is `http://127.0.0.1:3847` by default.
+
+The API now supports physical workspace isolation by `tenant + user`. Different users under the same tenant are routed into different on-disk state roots:
+
+```text
+.tenants/<tenant_id>/users/<user_id>/
+  .tasks/
+  .team/
+  .worktrees/
+```
+
+You do not need a full login flow to use this. The simplest options are:
+
+- send `Authorization: Bearer <token>`
+- or send `X-Rustpilot-Tenant` and `X-Rustpilot-User`
+
+### `POST /api/auth/bootstrap`
+
+Create or return a local bootstrap identity for development.
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:3847/api/auth/bootstrap
+```
+
+Example response:
+
+```json
+{
+  "tenant_id": "default",
+  "user_id": "local-admin",
+  "role": "owner",
+  "token": "rp_local_default_token",
+  "auth_mode": "bootstrap"
+}
+```
+
+### `GET /api/me`
+
+Resolve the current tenant/user identity seen by the server.
+
+Example:
+
+```bash
+curl http://127.0.0.1:3847/api/me \
+  -H "Authorization: Bearer rp_local_default_token"
+```
+
+### `POST /api/chat`
+
+Send one chat request and receive a normalized JSON response.
+
+Request body:
+
+```json
+{
+  "message": "帮我看下当前项目状态",
+  "target": "root"
+}
+```
+
+Fields:
+
+- `message`: required chat input
+- `target`: optional chat target, defaults to `root`
+- `agent_id`: optional alias for `target`
+
+Supported direct targets include:
+
+- `root`
+- `lead`
+- `shell`
+- `team`
+- `worker(<task_id>)`
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:3847/api/chat \
+  -H "X-Rustpilot-Tenant: acme" \
+  -H "X-Rustpilot-User: alice" \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"帮我看下当前项目状态\"}"
+```
+
+Direct response shape:
+
+```json
+{
+  "mode": "direct",
+  "status": "completed",
+  "target": "root",
+  "message": "帮我看下当前项目状态",
+  "answer": "..."
+}
+```
+
+Queued response shape:
+
+```json
+{
+  "mode": "queued",
+  "status": "queued",
+  "target": "root",
+  "message": "帮我看下当前项目状态",
+  "detail": {
+    "queued": true,
+    "target": "root"
+  }
+}
+```
+
+### `GET|POST /api/chat/stream`
+
+Open a Server-Sent Events stream for chat output.
+
+GET example:
+
+```bash
+curl -N "http://127.0.0.1:3847/api/chat/stream?message=帮我看下当前项目状态"
+```
+
+POST example:
+
+```bash
+curl -N -X POST http://127.0.0.1:3847/api/chat/stream \
+  -H "X-Rustpilot-Tenant: acme" \
+  -H "X-Rustpilot-User: alice" \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"帮我看下当前项目状态\"}"
+```
+
+SSE event types:
+
+- `start`: stream accepted
+- `delta`: assistant text chunk
+- `queued`: request was queued instead of answered directly
+- `error`: runtime-level error event
+- `done`: stream finished
+
+Example `delta` payload:
+
+```json
+{
+  "role": "assistant",
+  "text": "..."
+}
+```
+
+Example `done` payload for a direct response:
+
+```json
+{
+  "mode": "direct",
+  "status": "completed",
+  "answer": "..."
+}
+```
+
+Notes:
+
+- If no target is provided, the API talks to `root`
+- If no identity headers are provided, the server falls back to the local bootstrap identity
+- Different `tenant + user` combinations use different physical state roots on disk
+- `worker(<task_id>)` can be targeted explicitly when you want to talk to a specific worker
+- Some non-root targets may be queued through mailbox routing instead of returning a direct streamed answer
+- `GET /api/status` includes `root_chat_bridge_available`, which is useful when debugging whether the current server instance is the root-backed one
+
 ## Common CLI Commands
 
 - `/tasks`

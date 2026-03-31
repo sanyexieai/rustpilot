@@ -1,0 +1,18 @@
+{
+  "updated_at": 0.0,
+  "intent_type": "open_management_page",
+  "desired_view": "project_state",
+  "primary_request": "Open a management page for the current project state.",
+  "constraints": [
+    "Show a fixed Main friend conversation.",
+    "Show an Agent Team group conversation created around Main.",
+    "Allow selecting an agent from the group and inspecting that agent's transcript detail.",
+    "Show the current process tree, including parent and child execution relationships.",
+    "Expose launch stop/restart controls when a node has launch metadata."
+  ],
+  "operator_notes": [
+    "Do not fall back to a hand-written full UI.",
+    "Bootstrap HTML may keep the route alive, but the real interface must come from the UI agent.",
+    "Prefer a WeChat-like messaging layout over dashboard cards."
+  ]
+}

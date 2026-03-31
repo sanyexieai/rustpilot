@@ -183,6 +183,20 @@ pub fn plan_for_record(
         env.push(("RUSTPILOT_LAUNCH_LOG".to_string(), record.log_path.clone()));
     }
     env.push(("RUSTPILOT_LAUNCH_ID".to_string(), record.launch_id.clone()));
+    if let Some(tenant_id) = record
+        .tenant_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        env.push(("RUSTPILOT_TENANT_ID".to_string(), tenant_id.clone()));
+    }
+    if let Some(user_id) = record
+        .user_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        env.push(("RUSTPILOT_USER_ID".to_string(), user_id.clone()));
+    }
     LaunchPlan {
         cwd,
         window_title,

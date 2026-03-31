@@ -1,0 +1,44 @@
+[
+  {
+    "agent_id": "concierge",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950714.698913,
+    "last_loop_duration_ms": 54
+  },
+  {
+    "agent_id": "critic",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950713.3424494,
+    "last_loop_duration_ms": 119
+  },
+  {
+    "agent_id": "launcher",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950714.261997,
+    "last_loop_duration_ms": 3947
+  },
+  {
+    "agent_id": "reviewer",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950714.670468,
+    "last_loop_duration_ms": 57
+  },
+  {
+    "agent_id": "scheduler",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950714.6331954,
+    "last_loop_duration_ms": 52
+  },
+  {
+    "agent_id": "surface-collector",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950698.704916,
+    "last_loop_duration_ms": 51
+  },
+  {
+    "agent_id": "ui",
+    "mailbox_cursor": 0,
+    "last_seen_at": 1774950714.4367504,
+    "last_loop_duration_ms": 64
+  }
+]

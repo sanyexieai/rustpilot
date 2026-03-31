@@ -8,6 +8,10 @@ use crate::wire::{WireFrame, WireRequest};
 pub struct DirectApiRequest {
     pub request: WireRequest,
     pub frames_tx: UnboundedSender<WireFrame>,
+    pub tenant_id: String,
+    pub user_id: String,
+    pub session_id: String,
+    pub session_label: Option<String>,
 }
 
 static ROOT_API_BRIDGE: OnceLock<UnboundedSender<DirectApiRequest>> = OnceLock::new();

@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::app_support::{parse_ui_intent, ui_base_url, ui_intent_to_memory};
+use crate::app_support::{
+    current_tenant_id, current_user_id, parse_ui_intent, ui_base_url, ui_intent_to_memory,
+};
 use crate::launch_backend;
 use crate::launch_log;
 use crate::project_tools::{LaunchRecord, LaunchRequest, ProjectContext, ResidentAgentConfig};
@@ -21,6 +23,8 @@ pub struct AgentSupervisor {
     max_parallel: usize,
     children: HashMap<String, ResidentHandle>,
 }
+
+const TENANT_RESIDENT_STALE_SECS: f64 = 20.0;
 
 enum ResidentHandle {
     DirectChild(Child),
@@ -194,6 +198,16 @@ fn spawn_resident_agent(
                 .unwrap_or(max_parallel.max(1))
                 .to_string(),
         )
+        .args(
+            current_tenant_id()
+                .map(|tenant_id| vec!["--tenant-id".to_string(), tenant_id])
+                .unwrap_or_default(),
+        )
+        .args(
+            current_user_id()
+                .map(|user_id| vec!["--user-id".to_string(), user_id])
+                .unwrap_or_default(),
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?)
@@ -233,6 +247,8 @@ fn request_resident_launch(
         parent_task_id: None,
         parent_agent_id: Some("root".to_string()),
         max_parallel: Some(config.max_parallel_override.unwrap_or(max_parallel.max(1))),
+        tenant_id: current_tenant_id(),
+        user_id: current_user_id(),
     };
     Ok(project.launches().request(request)?.launch_id)
 }
@@ -254,8 +270,117 @@ pub(crate) fn request_worker_launch(
         parent_task_id,
         parent_agent_id,
         max_parallel: None,
+        tenant_id: current_tenant_id(),
+        user_id: current_user_id(),
     };
     Ok(project.launches().request(request)?.launch_id)
+}
+
+pub(crate) fn ensure_tenant_residents_ready(
+    repo_root: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    max_parallel: usize,
+) -> anyhow::Result<()> {
+    let tenant_project = ProjectContext::for_user(repo_root.to_path_buf(), tenant_id, user_id)?;
+    let configs = tenant_project.residents().enabled_agents()?;
+    for config in configs {
+        if resident_recently_alive(&tenant_project, &config.agent_id, config.loop_interval_ms)? {
+            continue;
+        }
+        spawn_detached_tenant_resident(repo_root, tenant_id, user_id, &config, max_parallel)?;
+    }
+    Ok(())
+}
+
+fn resident_recently_alive(
+    project: &ProjectContext,
+    agent_id: &str,
+    loop_interval_ms: u64,
+) -> anyhow::Result<bool> {
+    let tenant_id = current_tenant_id().unwrap_or_else(|| "default".to_string());
+    let user_id = current_user_id().unwrap_or_else(|| "local-admin".to_string());
+    if let Some(record) = project
+        .tenant_runtime_registry()
+        .get(&tenant_id, &user_id, agent_id)?
+        && process_is_running(record.pid, Some(record.started_at))
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or(0.0);
+        let freshness =
+            (loop_interval_ms.max(1_000) as f64 / 1000.0 * 4.0).max(TENANT_RESIDENT_STALE_SECS);
+        if now - record.last_seen_at <= freshness {
+            return Ok(true);
+        }
+    }
+    let runtime = project.resident_runtime().snapshot(agent_id)?;
+    let Some(runtime) = runtime else {
+        return Ok(false);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
+    let freshness =
+        (loop_interval_ms.max(1_000) as f64 / 1000.0 * 4.0).max(TENANT_RESIDENT_STALE_SECS);
+    Ok(now - runtime.last_seen_at <= freshness)
+}
+
+fn spawn_detached_tenant_resident(
+    repo_root: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    config: &ResidentAgentConfig,
+    max_parallel: usize,
+) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let child = Command::new(exe)
+        .arg("resident-agent-run")
+        .arg("--repo-root")
+        .arg(repo_root)
+        .arg("--agent-id")
+        .arg(&config.agent_id)
+        .arg("--role")
+        .arg(&config.role)
+        .arg("--max-parallel")
+        .arg(
+            config
+                .max_parallel_override
+                .unwrap_or(max_parallel.max(1))
+                .to_string(),
+        )
+        .arg("--tenant-id")
+        .arg(tenant_id)
+        .arg("--user-id")
+        .arg(user_id)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let root_project = ProjectContext::new(repo_root.to_path_buf())?;
+    let _ = root_project.tenant_runtime_registry().upsert(
+        tenant_id,
+        user_id,
+        &config.agent_id,
+        child.id(),
+        "starting",
+    );
+    Ok(())
+}
+
+fn heartbeat_tenant_runtime(project: &ProjectContext, agent_id: &str, status: &str) {
+    let Some(tenant_id) = current_tenant_id() else {
+        return;
+    };
+    let user_id = current_user_id().unwrap_or_else(|| "local-admin".to_string());
+    let _ = project.tenant_runtime_registry().upsert(
+        &tenant_id,
+        &user_id,
+        agent_id,
+        std::process::id(),
+        status,
+    );
 }
 
 pub(crate) fn wait_for_launch_running(
@@ -374,6 +499,8 @@ pub(crate) fn restart_launch(
         parent_task_id: record.parent_task_id,
         parent_agent_id: record.parent_agent_id.clone(),
         max_parallel: record.max_parallel,
+        tenant_id: record.tenant_id.clone(),
+        user_id: record.user_id.clone(),
     };
     project.launches().request(request)
 }
@@ -635,6 +762,8 @@ mod tests {
                 parent_task_id: Some(parent.id),
                 parent_agent_id: Some("teammate-parent".to_string()),
                 max_parallel: None,
+                tenant_id: None,
+                user_id: None,
             })
             .expect("request launch");
         project
@@ -784,6 +913,15 @@ fn run_launcher_loop(
             loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             last_error.as_deref(),
         );
+        heartbeat_tenant_runtime(
+            &project,
+            &agent_id,
+            if last_error.is_some() {
+                "blocked"
+            } else {
+                "running"
+            },
+        );
         if note == "ok" {
             if last_log.elapsed() >= Duration::from_secs(5) {
                 launch_log::emit(format!(
@@ -839,6 +977,7 @@ fn run_scheduler_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 None,
             );
+            heartbeat_tenant_runtime(&project, &agent_id, "running");
             Ok(())
         })() {
             Ok(()) => {}
@@ -867,6 +1006,7 @@ fn run_scheduler_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 Some(error),
             );
+            heartbeat_tenant_runtime(&project, &agent_id, "blocked");
         }
         if last_log.elapsed() >= Duration::from_secs(5) {
             let snapshot = runtime.snapshot();
@@ -905,6 +1045,7 @@ fn run_critic_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 None,
             );
+            heartbeat_tenant_runtime(&project, &agent_id, "running");
             Ok(())
         })() {
             Ok(()) => {}
@@ -933,6 +1074,7 @@ fn run_critic_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 Some(error),
             );
+            heartbeat_tenant_runtime(&project, &agent_id, "blocked");
         }
         if last_log.elapsed() >= Duration::from_secs(5) {
             launch_log::emit(format!(
@@ -1047,6 +1189,17 @@ fn run_mailbox_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 last_error.as_deref(),
             );
+            heartbeat_tenant_runtime(
+                &project,
+                &agent_id,
+                if last_error.is_some() {
+                    "blocked"
+                } else if had_items {
+                    "active"
+                } else {
+                    "idle"
+                },
+            );
             Ok(())
         })() {
             Ok(()) => {}
@@ -1075,6 +1228,7 @@ fn run_mailbox_loop(
                 loop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 Some(error),
             );
+            heartbeat_tenant_runtime(&project, &agent_id, "blocked");
         }
         if last_log.elapsed() >= Duration::from_secs(5) {
             launch_log::emit(format!(

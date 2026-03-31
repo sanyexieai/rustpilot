@@ -1,0 +1,82 @@
+[
+  {
+    "agent_id": "concierge",
+    "daily_limit": 100000,
+    "period_limit": 25000,
+    "task_soft_limit": 10000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "critic",
+    "daily_limit": 80000,
+    "period_limit": 20000,
+    "task_soft_limit": 8000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "launcher",
+    "daily_limit": 60000,
+    "period_limit": 15000,
+    "task_soft_limit": 6000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "reviewer",
+    "daily_limit": 70000,
+    "period_limit": 18000,
+    "task_soft_limit": 7000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "scheduler",
+    "daily_limit": 90000,
+    "period_limit": 20000,
+    "task_soft_limit": 8000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "surface-collector",
+    "daily_limit": 90000,
+    "period_limit": 20000,
+    "task_soft_limit": 10000,
+    "used_today": 60,
+    "used_in_period": 60,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "team-manager",
+    "daily_limit": 90000,
+    "period_limit": 20000,
+    "task_soft_limit": 8000,
+    "used_today": 0,
+    "used_in_period": 0,
+    "reserved": 0,
+    "last_reset_day": 20543
+  },
+  {
+    "agent_id": "ui",
+    "daily_limit": 110000,
+    "period_limit": 30000,
+    "task_soft_limit": 14000,
+    "used_today": 240,
+    "used_in_period": 240,
+    "reserved": 0,
+    "last_reset_day": 20543
+  }
+]

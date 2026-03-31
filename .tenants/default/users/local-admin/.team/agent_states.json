@@ -1,0 +1,66 @@
+[
+  {
+    "agent_id": "concierge",
+    "status": "idle",
+    "channel": "resident",
+    "target": "mailbox-loop",
+    "note": "resident concierge agent waiting for mailbox work",
+    "last_active_at": 1774950714.697342
+  },
+  {
+    "agent_id": "critic",
+    "status": "idle",
+    "channel": "resident",
+    "target": "critic-loop",
+    "note": "no open proposals",
+    "last_active_at": 1774950713.341214
+  },
+  {
+    "agent_id": "launcher",
+    "status": "running",
+    "channel": "resident",
+    "target": "launcher-loop",
+    "note": "launcher reconciling agent windows",
+    "last_active_at": 1774950714.2607138
+  },
+  {
+    "agent_id": "reviewer",
+    "status": "idle",
+    "channel": "resident",
+    "target": "mailbox-loop",
+    "note": "resident reviewer agent waiting for mailbox work",
+    "last_active_at": 1774950714.669169
+  },
+  {
+    "agent_id": "scheduler",
+    "status": "running",
+    "channel": "resident",
+    "target": "scheduler-loop",
+    "note": "resident scheduler waiting for tasks",
+    "last_active_at": 1774950714.6321142
+  },
+  {
+    "agent_id": "surface-collector",
+    "status": "idle",
+    "channel": "resident",
+    "target": "mailbox-loop",
+    "note": "resident ui_planner agent waiting for mailbox work",
+    "last_active_at": 1774950698.70381
+  },
+  {
+    "agent_id": "team-manager",
+    "status": "running",
+    "channel": "scheduler",
+    "target": "team-loop",
+    "note": "正常并发",
+    "last_active_at": 1774950714.7308886
+  },
+  {
+    "agent_id": "ui",
+    "status": "idle",
+    "channel": "resident",
+    "target": "mailbox-loop",
+    "note": "resident ui agent waiting for mailbox work",
+    "last_active_at": 1774950714.4357176
+  }
+]

@@ -4,7 +4,7 @@ use std::thread;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -18,7 +18,8 @@ use tokio::time::{self, Duration};
 use crate::app_support::parse_interaction_mode_label;
 use crate::direct_api_bridge::{DirectApiRequest, root_api_bridge};
 use crate::openai_compat::Message as ChatMessage;
-use crate::project_tools::ProjectContext;
+use crate::project_tools::{AuthContext, ProjectContext};
+use crate::resident_agents::ensure_tenant_residents_ready;
 use crate::runtime::approval::{approval_mode_name, approval_mode_summary};
 use crate::team::list_worker_endpoints;
 use crate::wire::{WireFrame, WireRequest, WireResponse};
@@ -29,6 +30,14 @@ struct UiServerState {
     repo_root: PathBuf,
     agent_id: String,
     port: u16,
+}
+
+#[derive(Debug, Clone)]
+struct RequestIdentity {
+    tenant_id: String,
+    user_id: String,
+    role: String,
+    auth_mode: String,
 }
 
 pub fn spawn_ui_server(
@@ -66,6 +75,8 @@ pub fn spawn_ui_server(
             let app = Router::new()
                 .route("/", get(index))
                 .route("/api/status", get(api_status))
+                .route("/api/me", get(api_me))
+                .route("/api/auth/bootstrap", post(api_auth_bootstrap))
                 .route("/api/chat", post(api_chat))
                 .route(
                     "/api/chat/stream",
@@ -89,8 +100,42 @@ async fn index(State(state): State<UiServerState>) -> Html<String> {
 
 async fn api_status(
     State(state): State<UiServerState>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    Ok(Json(build_status_payload(&state).map_err(internal_error)?))
+    let identity = resolve_request_identity(&state, &headers)?;
+    Ok(Json(
+        build_status_payload(&state, Some(&identity)).map_err(internal_error)?,
+    ))
+}
+
+async fn api_me(
+    State(state): State<UiServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let identity = resolve_request_identity(&state, &headers)?;
+    Ok(Json(json!({
+        "tenant_id": identity.tenant_id,
+        "user_id": identity.user_id,
+        "role": identity.role,
+        "auth_mode": identity.auth_mode,
+    })))
+}
+
+async fn api_auth_bootstrap(
+    State(state): State<UiServerState>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project = ProjectContext::new(state.repo_root.clone()).map_err(internal_error)?;
+    let bootstrap = project
+        .identity()
+        .bootstrap_local_admin()
+        .map_err(internal_error)?;
+    Ok(Json(json!({
+        "tenant_id": bootstrap.tenant.tenant_id,
+        "user_id": bootstrap.user.user_id,
+        "role": bootstrap.membership.role,
+        "token": bootstrap.token.secret,
+        "auth_mode": "bootstrap",
+    })))
 }
 
 async fn api_request_compat(
@@ -102,6 +147,8 @@ async fn api_request_compat(
         &state.repo_root,
         &state.agent_id,
         "ui.http.request.received",
+        None,
+        None,
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(compat_response_payload(response)))
@@ -116,6 +163,8 @@ async fn api_wire_request(
         &state.repo_root,
         &state.agent_id,
         "ui.http.wire_request.received",
+        None,
+        None,
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(response))
@@ -123,8 +172,11 @@ async fn api_wire_request(
 
 async fn api_chat(
     State(state): State<UiServerState>,
+    headers: HeaderMap,
     Json(payload): Json<ApiChatRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let identity = resolve_request_identity(&state, &headers)?;
+    ensure_tenant_runtime_ready(&state, &identity)?;
     let target = payload
         .agent_id
         .clone()
@@ -139,7 +191,7 @@ async fn api_chat(
     }
 
     if should_use_root_runtime(&target) {
-        match dispatch_root_chat(&message, &target).await {
+        match dispatch_root_chat(&message, &target, &identity).await {
             Ok(frames) => {
                 let assistant_text = assistant_text_from_frames(&frames);
                 return Ok(Json(json!({
@@ -148,12 +200,19 @@ async fn api_chat(
                     "target": target,
                     "message": message,
                     "answer": assistant_text,
+                    "tenant_id": identity.tenant_id,
+                    "user_id": identity.user_id,
                 })));
             }
             Err(err) if is_bridge_unavailable_error(&err) => {
-                let response =
-                    queue_chat_request(&state, &message, &target, "api.chat.root_bridge_fallback")
-                        .map_err(|queue_err| (StatusCode::BAD_REQUEST, queue_err.to_string()))?;
+                let response = queue_chat_request(
+                    &state,
+                    &message,
+                    &target,
+                    "api.chat.root_bridge_fallback",
+                    &identity,
+                )
+                .map_err(|queue_err| (StatusCode::BAD_REQUEST, queue_err.to_string()))?;
                 return Ok(Json(queued_chat_payload(
                     &target,
                     &message,
@@ -162,36 +221,44 @@ async fn api_chat(
                     Some(
                         "root runtime direct bridge is unavailable on this server; request was queued instead",
                     ),
+                    &identity,
                 )));
             }
             Err(err) => return Err((StatusCode::BAD_REQUEST, err.to_string())),
         }
     }
 
-    let response = queue_chat_request(&state, &message, &target, "api.chat.received")
+    let response = queue_chat_request(&state, &message, &target, "api.chat.received", &identity)
         .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(queued_chat_payload(
-        &target, &message, &response, None, None,
+        &target, &message, &response, None, None, &identity,
     )))
 }
 
 async fn api_chat_stream(
     State(state): State<UiServerState>,
+    headers: HeaderMap,
     Json(payload): Json<ApiChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    api_chat_stream_inner(state, payload).await
+    let identity = resolve_request_identity(&state, &headers)?;
+    ensure_tenant_runtime_ready(&state, &identity)?;
+    api_chat_stream_inner(state, payload, identity).await
 }
 
 async fn api_chat_stream_get(
     State(state): State<UiServerState>,
+    headers: HeaderMap,
     Query(payload): Query<ApiChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    api_chat_stream_inner(state, payload).await
+    let identity = resolve_request_identity(&state, &headers)?;
+    ensure_tenant_runtime_ready(&state, &identity)?;
+    api_chat_stream_inner(state, payload, identity).await
 }
 
 async fn api_chat_stream_inner(
     state: UiServerState,
     payload: ApiChatRequest,
+    identity: RequestIdentity,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let target = payload
         .agent_id
@@ -207,10 +274,12 @@ async fn api_chat_stream_inner(
     }
 
     if should_use_root_runtime(&target) {
-        match dispatch_root_chat_stream(&message, &target).await {
+        match dispatch_root_chat_stream(&message, &target, &identity).await {
             Ok(rx) => {
                 let start_target = target.clone();
                 let start_message = message.clone();
+                let start_tenant = identity.tenant_id.clone();
+                let start_user = identity.user_id.clone();
                 let start_event = Ok::<Event, std::convert::Infallible>(
                     Event::default()
                         .event("start")
@@ -218,43 +287,53 @@ async fn api_chat_stream_inner(
                             "mode": "direct",
                             "target": start_target,
                             "message": start_message,
+                            "tenant_id": start_tenant,
+                            "user_id": start_user,
                         }))
                         .unwrap_or_else(|_| Event::default().event("start").data("start")),
                 );
+                let done_tenant = identity.tenant_id.clone();
+                let done_user = identity.user_id.clone();
                 let frame_stream = stream::unfold(
                     Some(DirectStreamState {
                         rx,
                         answer: String::new(),
                     }),
-                    |state| async move {
-                        let mut state = state?;
-                        loop {
-                            match state.rx.recv().await {
-                                Some(frame) => {
-                                    if let Some(event) =
-                                        normalize_direct_stream_event(&frame, &mut state.answer)
-                                    {
+                    move |state| {
+                        let done_tenant = done_tenant.clone();
+                        let done_user = done_user.clone();
+                        async move {
+                            let mut state = state?;
+                            loop {
+                                match state.rx.recv().await {
+                                    Some(frame) => {
+                                        if let Some(event) =
+                                            normalize_direct_stream_event(&frame, &mut state.answer)
+                                        {
+                                            return Some((
+                                                Ok::<Event, std::convert::Infallible>(event),
+                                                Some(state),
+                                            ));
+                                        }
+                                    }
+                                    None => {
+                                        let done = Event::default()
+                                            .event("done")
+                                            .json_data(json!({
+                                                "mode": "direct",
+                                                "status": "completed",
+                                                "answer": state.answer,
+                                                "tenant_id": done_tenant,
+                                                "user_id": done_user,
+                                            }))
+                                            .unwrap_or_else(|_| {
+                                                Event::default().event("done").data("done")
+                                            });
                                         return Some((
-                                            Ok::<Event, std::convert::Infallible>(event),
-                                            Some(state),
+                                            Ok::<Event, std::convert::Infallible>(done),
+                                            None,
                                         ));
                                     }
-                                }
-                                None => {
-                                    let done = Event::default()
-                                        .event("done")
-                                        .json_data(json!({
-                                            "mode": "direct",
-                                            "status": "completed",
-                                            "answer": state.answer,
-                                        }))
-                                        .unwrap_or_else(|_| {
-                                            Event::default().event("done").data("done")
-                                        });
-                                    return Some((
-                                        Ok::<Event, std::convert::Infallible>(done),
-                                        None,
-                                    ));
                                 }
                             }
                         }
@@ -271,6 +350,7 @@ async fn api_chat_stream_inner(
                     &message,
                     &target,
                     "api.chat.stream.root_bridge_fallback",
+                    &identity,
                 )
                 .map_err(|queue_err| (StatusCode::BAD_REQUEST, queue_err.to_string()))?;
                 let queued_payload = queued_chat_payload(
@@ -281,6 +361,7 @@ async fn api_chat_stream_inner(
                     Some(
                         "root runtime direct bridge is unavailable on this server; request was queued instead",
                     ),
+                    &identity,
                 );
                 let event_stream = stream::iter(vec![
                     Ok::<Event, std::convert::Infallible>(
@@ -290,6 +371,8 @@ async fn api_chat_stream_inner(
                                 "mode": "queued",
                                 "target": target,
                                 "message": message,
+                                "tenant_id": identity.tenant_id,
+                                "user_id": identity.user_id,
                             }))
                             .unwrap_or_else(|_| Event::default().event("start").data("start")),
                     ),
@@ -305,6 +388,8 @@ async fn api_chat_stream_inner(
                             .json_data(json!({
                                 "mode": "queued",
                                 "status": "queued",
+                                "tenant_id": identity.tenant_id,
+                                "user_id": identity.user_id,
                             }))
                             .unwrap_or_else(|_| Event::default().event("done").data("done")),
                     ),
@@ -317,9 +402,15 @@ async fn api_chat_stream_inner(
         }
     }
 
-    let response = queue_chat_request(&state, &message, &target, "api.chat.stream.received")
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    let queued_payload = queued_chat_payload(&target, &message, &response, None, None);
+    let response = queue_chat_request(
+        &state,
+        &message,
+        &target,
+        "api.chat.stream.received",
+        &identity,
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let queued_payload = queued_chat_payload(&target, &message, &response, None, None, &identity);
     let event_stream = stream::iter(vec![
         Ok::<Event, std::convert::Infallible>(
             Event::default()
@@ -328,6 +419,8 @@ async fn api_chat_stream_inner(
                     "mode": "queued",
                     "target": target,
                     "message": message,
+                    "tenant_id": identity.tenant_id,
+                    "user_id": identity.user_id,
                 }))
                 .unwrap_or_else(|_| Event::default().event("start").data("start")),
         ),
@@ -343,6 +436,8 @@ async fn api_chat_stream_inner(
                 .json_data(json!({
                     "mode": "queued",
                     "status": "queued",
+                    "tenant_id": identity.tenant_id,
+                    "user_id": identity.user_id,
                 }))
                 .unwrap_or_else(|_| Event::default().event("done").data("done")),
         ),
@@ -387,12 +482,15 @@ fn queued_chat_payload(
     response: &WireResponse,
     delivery: Option<&str>,
     warning: Option<&str>,
+    identity: &RequestIdentity,
 ) -> Value {
     let mut payload = json!({
         "mode": "queued",
         "status": "queued",
         "target": target,
         "message": message,
+        "tenant_id": identity.tenant_id,
+        "user_id": identity.user_id,
     });
     if let Some(delivery) = delivery {
         payload["delivery"] = json!(delivery);
@@ -416,6 +514,71 @@ fn queue_response_detail(response: &WireResponse) -> Option<Value> {
     }
 }
 
+fn resolve_request_identity(
+    state: &UiServerState,
+    headers: &HeaderMap,
+) -> Result<RequestIdentity, (StatusCode, String)> {
+    let project = ProjectContext::new(state.repo_root.clone()).map_err(internal_error)?;
+    let manager = project.identity();
+    let auth = if let Some(secret) = bearer_token(headers) {
+        manager
+            .resolve_token(&secret)
+            .map_err(internal_error)?
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()))?
+    } else if let (Some(tenant_id), Some(user_id)) = (
+        header_value(headers, "x-rustpilot-tenant"),
+        header_value(headers, "x-rustpilot-user"),
+    ) {
+        manager
+            .resolve_membership(&tenant_id, &user_id)
+            .map_err(internal_error)?
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "unknown tenant/user membership".to_string(),
+                )
+            })?
+    } else {
+        let bootstrap = manager.bootstrap_local_admin().map_err(internal_error)?;
+        AuthContext {
+            tenant_id: bootstrap.tenant.tenant_id,
+            user_id: bootstrap.user.user_id,
+            role: bootstrap.membership.role,
+            auth_mode: "bootstrap-default".to_string(),
+        }
+    };
+    Ok(RequestIdentity {
+        tenant_id: auth.tenant_id,
+        user_id: auth.user_id,
+        role: auth.role,
+        auth_mode: auth.auth_mode,
+    })
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let raw = header_value(headers, "authorization")?;
+    raw.strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .map(ToString::to_string)
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn ensure_tenant_runtime_ready(
+    state: &UiServerState,
+    identity: &RequestIdentity,
+) -> Result<(), (StatusCode, String)> {
+    ensure_tenant_residents_ready(&state.repo_root, &identity.tenant_id, &identity.user_id, 2)
+        .map_err(internal_error)
+}
+
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<UiServerState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| ui_socket(socket, state))
 }
@@ -425,7 +588,7 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
     let mut ticker = time::interval(Duration::from_secs(2));
     let mut last_snapshot = String::new();
 
-    if let Ok(snapshot) = build_status_payload(&state)
+    if let Ok(snapshot) = build_status_payload(&state, None)
         .and_then(stable_snapshot_payload)
         .and_then(|value| serialize_ws_event("system.snapshot", value))
     {
@@ -447,6 +610,8 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                                     &state.repo_root,
                                     &state.agent_id,
                                     "ui.ws.request.received",
+                                    None,
+                                    None,
                                 ) {
                                     Ok(response) => {
                                         serialize_ws_event(
@@ -471,6 +636,8 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                                     &state.repo_root,
                                     &state.agent_id,
                                     "ui.ws.wire_request.received",
+                                    None,
+                                    None,
                                 ) {
                                     Ok(response) => serialize_ws_event("wire.response", serde_json::to_value(response).unwrap_or_else(|_| json!({"error":"serialize failed"}))),
                                     Err(err) => serialize_ws_event("wire.error", json!({ "error": err.to_string() })),
@@ -509,7 +676,7 @@ async fn ui_socket(socket: WebSocket, state: UiServerState) {
                 Some(Err(_)) => break,
             },
             _ = ticker.tick() => {
-                if let Ok(snapshot) = build_status_payload(&state)
+                if let Ok(snapshot) = build_status_payload(&state, None)
                     .and_then(stable_snapshot_payload)
                     .and_then(|value| serialize_ws_event("system.snapshot", value))
                     && snapshot != last_snapshot
@@ -561,8 +728,12 @@ fn should_use_root_runtime(target: &str) -> bool {
         || parse_interaction_mode_label(trimmed).is_ok()
 }
 
-async fn dispatch_root_chat(message: &str, target: &str) -> anyhow::Result<Vec<WireFrame>> {
-    let mut rx = dispatch_root_chat_stream(message, target).await?;
+async fn dispatch_root_chat(
+    message: &str,
+    target: &str,
+    identity: &RequestIdentity,
+) -> anyhow::Result<Vec<WireFrame>> {
+    let mut rx = dispatch_root_chat_stream(message, target, identity).await?;
     let mut frames = Vec::new();
     while let Some(frame) = rx.recv().await {
         frames.push(frame);
@@ -573,6 +744,7 @@ async fn dispatch_root_chat(message: &str, target: &str) -> anyhow::Result<Vec<W
 async fn dispatch_root_chat_stream(
     message: &str,
     target: &str,
+    identity: &RequestIdentity,
 ) -> anyhow::Result<tokio::sync::mpsc::UnboundedReceiver<WireFrame>> {
     let bridge = root_api_bridge()
         .ok_or_else(|| anyhow::anyhow!("root runtime chat bridge is unavailable"))?;
@@ -584,6 +756,10 @@ async fn dispatch_root_chat_stream(
                 focus: Some(target.to_string()),
             },
             frames_tx,
+            tenant_id: identity.tenant_id.clone(),
+            user_id: identity.user_id.clone(),
+            session_id: format!("api-{}-{}", identity.tenant_id, identity.user_id),
+            session_label: Some(format!("{} / {}", identity.tenant_id, identity.user_id)),
         })
         .map_err(|_| anyhow::anyhow!("failed to dispatch chat request to root runtime"))?;
     Ok(frames_rx)
@@ -599,6 +775,7 @@ fn queue_chat_request(
     message: &str,
     target: &str,
     decision_action: &str,
+    identity: &RequestIdentity,
 ) -> anyhow::Result<WireResponse> {
     execute_ui_wire_request(
         WireRequest::ChatSend {
@@ -606,8 +783,13 @@ fn queue_chat_request(
             focus: Some(target.to_string()),
         },
         &state.repo_root,
-        &state.agent_id,
-        decision_action,
+        &format!("{}@{}", identity.user_id, state.agent_id),
+        &format!(
+            "{} tenant={} user={}",
+            decision_action, identity.tenant_id, identity.user_id
+        ),
+        Some(&identity.tenant_id),
+        Some(&identity.user_id),
     )
 }
 
@@ -624,8 +806,20 @@ fn assistant_text_from_frames(frames: &[WireFrame]) -> String {
     text
 }
 
-fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
-    let project = ProjectContext::new(state.repo_root.clone())?;
+fn build_status_payload(
+    state: &UiServerState,
+    identity: Option<&RequestIdentity>,
+) -> anyhow::Result<Value> {
+    let project = identity.map_or_else(
+        || ProjectContext::new(state.repo_root.clone()),
+        |identity| {
+            ProjectContext::for_user(
+                state.repo_root.clone(),
+                &identity.tenant_id,
+                &identity.user_id,
+            )
+        },
+    )?;
     let desired_view = project.ui_page().user_request_memory()?.desired_view;
     let model = match project.system_model().snapshot()? {
         Some(model) => model,
@@ -699,6 +893,12 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
         "agent_id": state.agent_id,
         "port": state.port,
         "root_chat_bridge_available": root_api_bridge().is_some(),
+        "auth": identity.map(|item| json!({
+            "tenant_id": item.tenant_id,
+            "user_id": item.user_id,
+            "role": item.role,
+            "auth_mode": item.auth_mode,
+        })),
         "launch_mode": {
             "requested_mode": model.summary.launch_mode,
             "description": model.summary.launch_mode_description,

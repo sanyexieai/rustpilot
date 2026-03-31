@@ -1,16 +1,19 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, LaunchRegistryManager,
-    LaunchSettingsManager, Mailbox, PromptHistoryManager, ProposalManager, ReflectionManager,
-    ResidentConfigManager, ResidentRuntimeManager, SessionManager, SystemModelManager, TaskManager,
-    UiPageManager, UiSchemaManager, UiSurfaceManager, WorktreeManager,
+    AgentManager, ApprovalManager, BudgetManager, DecisionManager, EventBus, IdentityManager,
+    LaunchRegistryManager, LaunchSettingsManager, Mailbox, PromptHistoryManager, ProposalManager,
+    ReflectionManager, ResidentConfigManager, ResidentRuntimeManager, SessionManager,
+    SystemModelManager, TaskManager, TenantRuntimeRegistryManager, UiPageManager, UiSchemaManager,
+    UiSurfaceManager, WorktreeManager,
 };
 
 #[derive(Debug, Clone)]
 pub struct ProjectContext {
     repo_root: PathBuf,
+    state_root: PathBuf,
     tasks: Arc<TaskManager>,
     approval: Arc<ApprovalManager>,
     events: Arc<EventBus>,
@@ -25,6 +28,8 @@ pub struct ProjectContext {
     residents: Arc<ResidentConfigManager>,
     resident_runtime: Arc<ResidentRuntimeManager>,
     proposals: Arc<ProposalManager>,
+    identity: Arc<IdentityManager>,
+    tenant_runtime_registry: Arc<TenantRuntimeRegistryManager>,
     prompt_history: Arc<PromptHistoryManager>,
     system_model: Arc<SystemModelManager>,
     ui_surface: Arc<UiSurfaceManager>,
@@ -35,34 +40,75 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     pub fn new(repo_root: PathBuf) -> anyhow::Result<Self> {
-        let tasks = Arc::new(TaskManager::new(repo_root.join(".tasks"))?);
-        let approval = Arc::new(ApprovalManager::new(repo_root.join(".team"))?);
-        let events = Arc::new(EventBus::new(
-            repo_root.join(".worktrees").join("events.jsonl"),
-        )?);
-        let launches = Arc::new(LaunchRegistryManager::new(repo_root.join(".team"))?);
-        let launch_settings = Arc::new(LaunchSettingsManager::new(repo_root.join(".team"))?);
-        let mailbox = Arc::new(Mailbox::new(repo_root.join(".team").join("mailbox"))?);
-        let agents = Arc::new(AgentManager::new(repo_root.join(".team"))?);
-        let budgets = Arc::new(BudgetManager::new(repo_root.join(".team"))?);
-        let decisions = Arc::new(DecisionManager::new(repo_root.join(".team"))?);
-        let reflections = Arc::new(ReflectionManager::new(repo_root.join(".team"))?);
-        let sessions = Arc::new(SessionManager::new(repo_root.join(".team"))?);
-        let residents = Arc::new(ResidentConfigManager::new(repo_root.join(".team"))?);
-        let resident_runtime = Arc::new(ResidentRuntimeManager::new(repo_root.join(".team"))?);
-        let proposals = Arc::new(ProposalManager::new(repo_root.join(".team"))?);
-        let prompt_history = Arc::new(PromptHistoryManager::new(repo_root.join(".team"))?);
-        let system_model = Arc::new(SystemModelManager::new(repo_root.join(".team"))?);
-        let ui_surface = Arc::new(UiSurfaceManager::new(repo_root.join(".team"))?);
-        let ui_schema = Arc::new(UiSchemaManager::new(repo_root.join(".team"))?);
-        let ui_page = Arc::new(UiPageManager::new(repo_root.join(".team"))?);
+        if let Some(tenant_id) = std::env::var("RUSTPILOT_TENANT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(user_id) = std::env::var("RUSTPILOT_USER_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                return Self::for_user(repo_root, &tenant_id, &user_id);
+            }
+            return Self::for_tenant(repo_root, &tenant_id);
+        }
+        Self::with_state_root(repo_root.clone(), repo_root)
+    }
+
+    pub fn for_tenant(repo_root: PathBuf, tenant_id: &str) -> anyhow::Result<Self> {
+        let state_root = repo_root
+            .join(".tenants")
+            .join(sanitize_scope_segment(tenant_id));
+        Self::with_state_root(repo_root, state_root)
+    }
+
+    pub fn for_user(repo_root: PathBuf, tenant_id: &str, user_id: &str) -> anyhow::Result<Self> {
+        let state_root = repo_root
+            .join(".tenants")
+            .join(sanitize_scope_segment(tenant_id))
+            .join("users")
+            .join(sanitize_scope_segment(user_id));
+        Self::with_state_root(repo_root, state_root)
+    }
+
+    fn with_state_root(repo_root: PathBuf, state_root: PathBuf) -> anyhow::Result<Self> {
+        fs::create_dir_all(&state_root)?;
+        let team_dir = state_root.join(".team");
+        let tasks_dir = state_root.join(".tasks");
+        let worktrees_dir = state_root.join(".worktrees");
+        let tasks = Arc::new(TaskManager::new(tasks_dir)?);
+        let approval = Arc::new(ApprovalManager::new(team_dir.clone())?);
+        let events = Arc::new(EventBus::new(worktrees_dir.join("events.jsonl"))?);
+        let launches = Arc::new(LaunchRegistryManager::new(team_dir.clone())?);
+        let launch_settings = Arc::new(LaunchSettingsManager::new(team_dir.clone())?);
+        let mailbox = Arc::new(Mailbox::new(team_dir.join("mailbox"))?);
+        let agents = Arc::new(AgentManager::new(team_dir.clone())?);
+        let budgets = Arc::new(BudgetManager::new(team_dir.clone())?);
+        let decisions = Arc::new(DecisionManager::new(team_dir.clone())?);
+        let reflections = Arc::new(ReflectionManager::new(team_dir.clone())?);
+        let sessions = Arc::new(SessionManager::new(team_dir.clone())?);
+        let residents = Arc::new(ResidentConfigManager::new(team_dir.clone())?);
+        let resident_runtime = Arc::new(ResidentRuntimeManager::new(team_dir.clone())?);
+        let proposals = Arc::new(ProposalManager::new(team_dir.clone())?);
+        let identity = Arc::new(IdentityManager::new(team_dir.clone())?);
+        let tenant_runtime_registry =
+            Arc::new(TenantRuntimeRegistryManager::new(repo_root.join(".team"))?);
+        let prompt_history = Arc::new(PromptHistoryManager::new(team_dir.clone())?);
+        let system_model = Arc::new(SystemModelManager::new(team_dir.clone())?);
+        let ui_surface = Arc::new(UiSurfaceManager::new(team_dir.clone())?);
+        let ui_schema = Arc::new(UiSchemaManager::new(team_dir.clone())?);
+        let ui_page = Arc::new(UiPageManager::new(team_dir.clone())?);
         let worktrees = Arc::new(WorktreeManager::new(
             repo_root.clone(),
+            worktrees_dir,
             (*tasks).clone(),
             (*events).clone(),
         )?);
         Ok(Self {
             repo_root,
+            state_root,
             tasks,
             approval,
             events,
@@ -77,6 +123,8 @@ impl ProjectContext {
             residents,
             resident_runtime,
             proposals,
+            identity,
+            tenant_runtime_registry,
             prompt_history,
             system_model,
             ui_surface,
@@ -88,6 +136,10 @@ impl ProjectContext {
 
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    pub fn state_root(&self) -> &Path {
+        &self.state_root
     }
 
     pub fn tasks(&self) -> &TaskManager {
@@ -150,6 +202,14 @@ impl ProjectContext {
         self.proposals.as_ref()
     }
 
+    pub fn identity(&self) -> &IdentityManager {
+        self.identity.as_ref()
+    }
+
+    pub fn tenant_runtime_registry(&self) -> &TenantRuntimeRegistryManager {
+        self.tenant_runtime_registry.as_ref()
+    }
+
     pub fn system_model(&self) -> &SystemModelManager {
         self.system_model.as_ref()
     }
@@ -169,4 +229,21 @@ impl ProjectContext {
     pub fn ui_page(&self) -> &UiPageManager {
         self.ui_page.as_ref()
     }
+}
+
+fn sanitize_scope_segment(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "default".to_string();
+    }
+    trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
