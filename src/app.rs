@@ -6,6 +6,7 @@ use crate::app_support::{
 };
 use crate::cli::handle_cli_command;
 use crate::config::{LlmConfig, default_llm_user_agent};
+use crate::direct_api_bridge::{direct_api_channel, install_root_api_bridge};
 use crate::openai_compat::Message;
 use crate::project_tools::ProjectContext;
 use crate::prompt_manager::render_root_system_prompt;
@@ -434,6 +435,8 @@ async fn run_root_runtime(
     let mut interaction_mode = InteractionMode::Lead;
     let system_prompt = render_root_system_prompt(&repo_root)?;
     let ui_port = resolve_ui_port(&project);
+    let (direct_api_tx, mut direct_api_rx) = direct_api_channel();
+    install_root_api_bridge(direct_api_tx);
     let _ui_server = start_main_ui_server(repo_root.clone(), ui_port);
     let default_session =
         project
@@ -477,6 +480,37 @@ async fn run_root_runtime(
             let lines = collect_lead_mailbox_events(&project, &mut lead_cursor, &mut messages)?;
             emit_mailbox_lines(&mut stdout, &lines)?;
             last_mailbox_poll = now;
+        }
+
+        while let Ok(command) = direct_api_rx.try_recv() {
+            match execute_wire_request(
+                command.request,
+                WireRuntime {
+                    repo_root: &repo_root,
+                    client: &client,
+                    llm: &llm,
+                    project: &project,
+                    messages: &mut messages,
+                    progress: &progress,
+                    supervisor: &mut supervisor,
+                    lead_cursor: &mut lead_cursor,
+                    interaction_mode: &interaction_mode,
+                    sessions: project.sessions(),
+                    current_session_id: &mut current_session_id,
+                    current_session_label: &mut current_session_label,
+                },
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    for frame in outcome.frames {
+                        let _ = command.frames_tx.send(frame);
+                    }
+                }
+                Err(err) => {
+                    let _ = command.frames_tx.send(WireFrame::error(err.to_string()));
+                }
+            }
         }
 
         let Ok(request_text) = request_rx.recv_timeout(INPUT_POLL_INTERVAL) else {

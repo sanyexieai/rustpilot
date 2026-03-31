@@ -1,3 +1,4 @@
+use crate::app_support::DEFAULT_UI_PORT;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -111,6 +112,17 @@ impl ResidentConfigManager {
                 .any(|item| item.agent_id == default.agent_id)
             {
                 existing.push(default);
+                changed = true;
+            }
+        }
+
+        for item in &mut existing {
+            if item.agent_id == "ui"
+                && item.role == "ui"
+                && item.behavior_mode == "ui_request"
+                && item.listen_port == Some(DEFAULT_UI_PORT)
+            {
+                item.listen_port = None;
                 changed = true;
             }
         }
@@ -291,7 +303,7 @@ fn default_resident_agents() -> Vec<ResidentAgentConfig> {
             task_soft_limit: 14_000,
             loop_interval_ms: 2_500,
             max_parallel_override: None,
-            listen_port: Some(3847),
+            listen_port: None,
         },
         ResidentAgentConfig {
             agent_id: "concierge".to_string(),

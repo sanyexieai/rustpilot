@@ -135,6 +135,7 @@ pub(crate) async fn execute_wire_request(
             let interaction_mode = focus_override.as_ref().unwrap_or(runtime.interaction_mode);
             let focus_label = interaction_mode.label();
             let session_status = session_status_for_mode(interaction_mode);
+            let transcript_start = runtime.messages.len();
             let mut outcome = process_user_input(
                 &input,
                 crate::app_commands::AppRuntime {
@@ -156,6 +157,10 @@ pub(crate) async fn execute_wire_request(
                 focus_label.clone(),
                 session_status,
                 Some(will_start_abortable_request(&input, interaction_mode)),
+            ));
+            frames.extend(transcript_message_frames(
+                &runtime.messages[transcript_start..],
+                interaction_mode.label().as_str(),
             ));
             frames.append(&mut outcome.frames);
             frames.push(WireFrame::session_updated_with_abortable(
@@ -637,6 +642,41 @@ fn wire_approval_block(block: &crate::project_tools::ApprovalBlockRecord) -> Wir
         reason_code: block.reason_code.clone(),
         message: block.message.clone(),
     }
+}
+
+fn transcript_message_frames<'a>(
+    messages: &'a [Message],
+    default_from: &'a str,
+) -> impl Iterator<Item = WireFrame> + 'a {
+    messages.iter().filter_map(move |message| {
+        let content = message.content.as_deref()?.trim();
+        if content.is_empty() {
+            return None;
+        }
+        match message.role.as_str() {
+            "assistant" => Some(WireFrame::Event {
+                event: WireEnvelope::new(
+                    "event",
+                    crate::wire::WireEvent::MessageDelta {
+                        role: "assistant".to_string(),
+                        content: content.to_string(),
+                        from: Some(default_from.to_string()),
+                    },
+                ),
+            }),
+            "system" => Some(WireFrame::Event {
+                event: WireEnvelope::new(
+                    "event",
+                    crate::wire::WireEvent::MessageDelta {
+                        role: "system".to_string(),
+                        content: content.to_string(),
+                        from: Some(default_from.to_string()),
+                    },
+                ),
+            }),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(test)]

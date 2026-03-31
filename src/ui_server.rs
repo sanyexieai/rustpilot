@@ -2,22 +2,26 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::thread;
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::{self, Duration};
 
+use crate::app_support::parse_interaction_mode_label;
+use crate::direct_api_bridge::{DirectApiRequest, root_api_bridge};
 use crate::openai_compat::Message as ChatMessage;
 use crate::project_tools::ProjectContext;
 use crate::runtime::approval::{approval_mode_name, approval_mode_summary};
 use crate::team::list_worker_endpoints;
-use crate::wire::{WireRequest, WireResponse};
+use crate::wire::{WireFrame, WireRequest, WireResponse};
 use crate::wire_exec::execute_ui_wire_request;
 
 #[derive(Clone)]
@@ -62,6 +66,11 @@ pub fn spawn_ui_server(
             let app = Router::new()
                 .route("/", get(index))
                 .route("/api/status", get(api_status))
+                .route("/api/chat", post(api_chat))
+                .route(
+                    "/api/chat/stream",
+                    get(api_chat_stream_get).post(api_chat_stream),
+                )
                 .route("/api/request", post(api_request_compat))
                 .route("/api/wire", post(api_wire_request))
                 .route("/ws", get(ws_handler))
@@ -110,6 +119,301 @@ async fn api_wire_request(
     )
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(response))
+}
+
+async fn api_chat(
+    State(state): State<UiServerState>,
+    Json(payload): Json<ApiChatRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let target = payload
+        .agent_id
+        .clone()
+        .or(payload.target.clone())
+        .unwrap_or_else(|| "root".to_string());
+    let message = payload.message.trim().to_string();
+    if message.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message cannot be empty".to_string(),
+        ));
+    }
+
+    if should_use_root_runtime(&target) {
+        match dispatch_root_chat(&message, &target).await {
+            Ok(frames) => {
+                let assistant_text = assistant_text_from_frames(&frames);
+                return Ok(Json(json!({
+                    "mode": "direct",
+                    "status": "completed",
+                    "target": target,
+                    "message": message,
+                    "answer": assistant_text,
+                })));
+            }
+            Err(err) if is_bridge_unavailable_error(&err) => {
+                let response =
+                    queue_chat_request(&state, &message, &target, "api.chat.root_bridge_fallback")
+                        .map_err(|queue_err| (StatusCode::BAD_REQUEST, queue_err.to_string()))?;
+                return Ok(Json(queued_chat_payload(
+                    &target,
+                    &message,
+                    &response,
+                    Some("fallback"),
+                    Some(
+                        "root runtime direct bridge is unavailable on this server; request was queued instead",
+                    ),
+                )));
+            }
+            Err(err) => return Err((StatusCode::BAD_REQUEST, err.to_string())),
+        }
+    }
+
+    let response = queue_chat_request(&state, &message, &target, "api.chat.received")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    Ok(Json(queued_chat_payload(
+        &target, &message, &response, None, None,
+    )))
+}
+
+async fn api_chat_stream(
+    State(state): State<UiServerState>,
+    Json(payload): Json<ApiChatRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    api_chat_stream_inner(state, payload).await
+}
+
+async fn api_chat_stream_get(
+    State(state): State<UiServerState>,
+    Query(payload): Query<ApiChatRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    api_chat_stream_inner(state, payload).await
+}
+
+async fn api_chat_stream_inner(
+    state: UiServerState,
+    payload: ApiChatRequest,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let target = payload
+        .agent_id
+        .clone()
+        .or(payload.target.clone())
+        .unwrap_or_else(|| "root".to_string());
+    let message = payload.message.trim().to_string();
+    if message.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message cannot be empty".to_string(),
+        ));
+    }
+
+    if should_use_root_runtime(&target) {
+        match dispatch_root_chat_stream(&message, &target).await {
+            Ok(rx) => {
+                let start_target = target.clone();
+                let start_message = message.clone();
+                let start_event = Ok::<Event, std::convert::Infallible>(
+                    Event::default()
+                        .event("start")
+                        .json_data(json!({
+                            "mode": "direct",
+                            "target": start_target,
+                            "message": start_message,
+                        }))
+                        .unwrap_or_else(|_| Event::default().event("start").data("start")),
+                );
+                let frame_stream = stream::unfold(
+                    Some(DirectStreamState {
+                        rx,
+                        answer: String::new(),
+                    }),
+                    |state| async move {
+                        let mut state = state?;
+                        loop {
+                            match state.rx.recv().await {
+                                Some(frame) => {
+                                    if let Some(event) =
+                                        normalize_direct_stream_event(&frame, &mut state.answer)
+                                    {
+                                        return Some((
+                                            Ok::<Event, std::convert::Infallible>(event),
+                                            Some(state),
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    let done = Event::default()
+                                        .event("done")
+                                        .json_data(json!({
+                                            "mode": "direct",
+                                            "status": "completed",
+                                            "answer": state.answer,
+                                        }))
+                                        .unwrap_or_else(|_| {
+                                            Event::default().event("done").data("done")
+                                        });
+                                    return Some((
+                                        Ok::<Event, std::convert::Infallible>(done),
+                                        None,
+                                    ));
+                                }
+                            }
+                        }
+                    },
+                );
+                let event_stream = stream::once(async { start_event }).chain(frame_stream);
+                return Ok(Sse::new(event_stream)
+                    .keep_alive(KeepAlive::default())
+                    .into_response());
+            }
+            Err(err) if is_bridge_unavailable_error(&err) => {
+                let response = queue_chat_request(
+                    &state,
+                    &message,
+                    &target,
+                    "api.chat.stream.root_bridge_fallback",
+                )
+                .map_err(|queue_err| (StatusCode::BAD_REQUEST, queue_err.to_string()))?;
+                let queued_payload = queued_chat_payload(
+                    &target,
+                    &message,
+                    &response,
+                    Some("fallback"),
+                    Some(
+                        "root runtime direct bridge is unavailable on this server; request was queued instead",
+                    ),
+                );
+                let event_stream = stream::iter(vec![
+                    Ok::<Event, std::convert::Infallible>(
+                        Event::default()
+                            .event("start")
+                            .json_data(json!({
+                                "mode": "queued",
+                                "target": target,
+                                "message": message,
+                            }))
+                            .unwrap_or_else(|_| Event::default().event("start").data("start")),
+                    ),
+                    Ok::<Event, std::convert::Infallible>(
+                        Event::default()
+                            .event("queued")
+                            .json_data(queued_payload.clone())
+                            .unwrap_or_else(|_| Event::default().event("queued").data("queued")),
+                    ),
+                    Ok::<Event, std::convert::Infallible>(
+                        Event::default()
+                            .event("done")
+                            .json_data(json!({
+                                "mode": "queued",
+                                "status": "queued",
+                            }))
+                            .unwrap_or_else(|_| Event::default().event("done").data("done")),
+                    ),
+                ]);
+                return Ok(Sse::new(event_stream)
+                    .keep_alive(KeepAlive::default())
+                    .into_response());
+            }
+            Err(err) => return Err((StatusCode::BAD_REQUEST, err.to_string())),
+        }
+    }
+
+    let response = queue_chat_request(&state, &message, &target, "api.chat.stream.received")
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let queued_payload = queued_chat_payload(&target, &message, &response, None, None);
+    let event_stream = stream::iter(vec![
+        Ok::<Event, std::convert::Infallible>(
+            Event::default()
+                .event("start")
+                .json_data(json!({
+                    "mode": "queued",
+                    "target": target,
+                    "message": message,
+                }))
+                .unwrap_or_else(|_| Event::default().event("start").data("start")),
+        ),
+        Ok::<Event, std::convert::Infallible>(
+            Event::default()
+                .event("queued")
+                .json_data(queued_payload)
+                .unwrap_or_else(|_| Event::default().event("queued").data("queued")),
+        ),
+        Ok::<Event, std::convert::Infallible>(
+            Event::default()
+                .event("done")
+                .json_data(json!({
+                    "mode": "queued",
+                    "status": "queued",
+                }))
+                .unwrap_or_else(|_| Event::default().event("done").data("done")),
+        ),
+    ]);
+    Ok(Sse::new(event_stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+#[derive(Debug)]
+struct DirectStreamState {
+    rx: tokio::sync::mpsc::UnboundedReceiver<WireFrame>,
+    answer: String,
+}
+
+fn normalize_direct_stream_event(frame: &WireFrame, answer: &mut String) -> Option<Event> {
+    match frame {
+        WireFrame::Event { event } => match &event.payload {
+            crate::wire::WireEvent::MessageDelta { role, content, .. } if role == "assistant" => {
+                answer.push_str(content);
+                Event::default()
+                    .event("delta")
+                    .json_data(json!({
+                        "role": "assistant",
+                        "text": content,
+                    }))
+                    .ok()
+            }
+            crate::wire::WireEvent::Error { message } => Event::default()
+                .event("error")
+                .json_data(json!({ "message": message }))
+                .ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn queued_chat_payload(
+    target: &str,
+    message: &str,
+    response: &WireResponse,
+    delivery: Option<&str>,
+    warning: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "mode": "queued",
+        "status": "queued",
+        "target": target,
+        "message": message,
+    });
+    if let Some(delivery) = delivery {
+        payload["delivery"] = json!(delivery);
+    }
+    if let Some(warning) = warning {
+        payload["warning"] = json!(warning);
+    }
+    if let Some(detail) = queue_response_detail(response) {
+        payload["detail"] = detail;
+    }
+    payload
+}
+
+fn queue_response_detail(response: &WireResponse) -> Option<Value> {
+    match response {
+        WireResponse::Ack { message } => serde_json::from_str::<Value>(message)
+            .ok()
+            .or_else(|| Some(json!({ "message": message }))),
+        WireResponse::Error { message } => Some(json!({ "error": message })),
+        _ => serde_json::to_value(response).ok(),
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<UiServerState>) -> impl IntoResponse {
@@ -230,6 +534,15 @@ struct UiRequestPayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiChatRequest {
+    message: String,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UiSocketClientMessage {
     #[serde(rename = "type")]
     msg_type: String,
@@ -238,6 +551,77 @@ struct UiSocketClientMessage {
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+fn should_use_root_runtime(target: &str) -> bool {
+    let trimmed = target.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("root")
+        || trimmed.eq_ignore_ascii_case("lead")
+        || parse_interaction_mode_label(trimmed).is_ok()
+}
+
+async fn dispatch_root_chat(message: &str, target: &str) -> anyhow::Result<Vec<WireFrame>> {
+    let mut rx = dispatch_root_chat_stream(message, target).await?;
+    let mut frames = Vec::new();
+    while let Some(frame) = rx.recv().await {
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+async fn dispatch_root_chat_stream(
+    message: &str,
+    target: &str,
+) -> anyhow::Result<tokio::sync::mpsc::UnboundedReceiver<WireFrame>> {
+    let bridge = root_api_bridge()
+        .ok_or_else(|| anyhow::anyhow!("root runtime chat bridge is unavailable"))?;
+    let (frames_tx, frames_rx) = tokio::sync::mpsc::unbounded_channel();
+    bridge
+        .send(DirectApiRequest {
+            request: WireRequest::ChatSend {
+                input: message.to_string(),
+                focus: Some(target.to_string()),
+            },
+            frames_tx,
+        })
+        .map_err(|_| anyhow::anyhow!("failed to dispatch chat request to root runtime"))?;
+    Ok(frames_rx)
+}
+
+fn is_bridge_unavailable_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("root runtime chat bridge is unavailable")
+}
+
+fn queue_chat_request(
+    state: &UiServerState,
+    message: &str,
+    target: &str,
+    decision_action: &str,
+) -> anyhow::Result<WireResponse> {
+    execute_ui_wire_request(
+        WireRequest::ChatSend {
+            input: message.to_string(),
+            focus: Some(target.to_string()),
+        },
+        &state.repo_root,
+        &state.agent_id,
+        decision_action,
+    )
+}
+
+fn assistant_text_from_frames(frames: &[WireFrame]) -> String {
+    let mut text = String::new();
+    for frame in frames {
+        if let WireFrame::Event { event } = frame
+            && let crate::wire::WireEvent::MessageDelta { role, content, .. } = &event.payload
+            && role == "assistant"
+        {
+            text.push_str(content);
+        }
+    }
+    text
 }
 
 fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
@@ -314,6 +698,7 @@ fn build_status_payload(state: &UiServerState) -> anyhow::Result<Value> {
     Ok(json!({
         "agent_id": state.agent_id,
         "port": state.port,
+        "root_chat_bridge_available": root_api_bridge().is_some(),
         "launch_mode": {
             "requested_mode": model.summary.launch_mode,
             "description": model.summary.launch_mode_description,

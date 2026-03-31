@@ -1564,14 +1564,15 @@ fn maybe_start_resident_server(
         return Ok(None);
     }
     let port = resident_listen_port(config);
+    if port == 0 {
+        return Ok(None);
+    }
     let handle = spawn_ui_server(repo_root, config.agent_id.clone(), port)?;
     Ok(Some(handle))
 }
 
 pub fn resident_listen_port(config: &ResidentAgentConfig) -> u16 {
-    config
-        .listen_port
-        .unwrap_or_else(|| if config.role == "ui" { 3847 } else { 0 })
+    config.listen_port.unwrap_or(0)
 }
 
 fn sync_ui_surface(project: &ProjectContext, config: &ResidentAgentConfig) -> anyhow::Result<()> {

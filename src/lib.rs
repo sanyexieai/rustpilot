@@ -9,6 +9,7 @@ mod app_support;
 pub mod cli;
 pub mod config;
 pub mod constants;
+pub mod direct_api_bridge;
 pub mod external_tools;
 pub mod launch_backend;
 pub mod launch_log;
