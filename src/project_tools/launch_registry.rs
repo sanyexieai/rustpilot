@@ -316,8 +316,26 @@ fn atomic_write_json(path: PathBuf, content: &str) -> anyhow::Result<()> {
     let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
     fs::write(&tmp_path, content)?;
     if path.exists() {
-        fs::remove_file(&path)?;
+        match fs::remove_file(&path) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Windows can transiently deny delete/rename when another process
+                // still has the file open for reading. Fall back to in-place write
+                // under the registry lock instead of failing the whole scheduler loop.
+                fs::write(&path, content)?;
+                let _ = fs::remove_file(&tmp_path);
+                return Ok(());
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
-    fs::rename(&tmp_path, &path)?;
+    match fs::rename(&tmp_path, &path) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            fs::write(&path, content)?;
+            let _ = fs::remove_file(&tmp_path);
+        }
+        Err(err) => return Err(err.into()),
+    }
     Ok(())
 }

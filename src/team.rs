@@ -559,6 +559,12 @@ fn prepare_task_worktree_for_spawn(
     owner: &str,
 ) -> anyhow::Result<PreparedTaskWorktree> {
     let task = project.tasks().get_record(task_id)?;
+    if !project.worktrees().git_available {
+        project.tasks().update(task.id, None, Some(owner), None)?;
+        return Ok(PreparedTaskWorktree {
+            borrowed_active: false,
+        });
+    }
     if !task.worktree.is_empty() {
         project
             .tasks()
@@ -806,7 +812,7 @@ pub async fn run_teammate_once(
         .first()
         .cloned()
         .unwrap_or_else(root_actor_id);
-    if task.worktree.is_empty() {
+    if project.worktrees().git_available && task.worktree.is_empty() {
         anyhow::bail!("任务 {} 没有绑定 worktree", task_id);
     }
     launch_log::emit(format!(
@@ -2608,6 +2614,7 @@ mod tests {
     use crate::project_tools::{ProjectContext, TaskCreateOptions, TaskRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir {
@@ -2642,6 +2649,31 @@ mod tests {
 
     fn project_context(repo_root: &Path) -> ProjectContext {
         ProjectContext::new(repo_root.to_path_buf()).expect("project context")
+    }
+
+    fn run(repo: &Path, program: &str, args: &[&str]) {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run command");
+        assert!(
+            output.status.success(),
+            "{} {:?} failed: {}{}",
+            program,
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repo(path: &Path) {
+        run(path, "git", &["init"]);
+        run(path, "git", &["config", "user.name", "Codex"]);
+        run(path, "git", &["config", "user.email", "codex@example.com"]);
+        fs::write(path.join("README.md"), "hello\n").expect("write readme");
+        run(path, "git", &["add", "."]);
+        run(path, "git", &["commit", "-m", "init"]);
     }
 
     #[test]
@@ -2780,6 +2812,7 @@ mod tests {
     #[test]
     fn prepare_task_worktree_prefers_active_worktree() {
         let temp = TestDir::new("prepare_task_worktree_prefers_active");
+        init_git_repo(temp.path());
         let project = project_context(temp.path());
 
         let active_task_raw = project
@@ -2828,6 +2861,32 @@ mod tests {
         let task_after = project.tasks().get_record(task.id).expect("task after");
         assert_eq!(task_after.worktree, "team-1");
         assert_eq!(task_after.owner, "teammate-2");
+    }
+
+    #[test]
+    fn prepare_task_worktree_skips_creation_outside_git_repo() {
+        let temp = TestDir::new("prepare_task_worktree_without_git");
+        let project = project_context(temp.path());
+
+        let task_raw = project
+            .tasks()
+            .create_detailed(
+                "new task",
+                "should still spawn worker without a git repo",
+                TaskCreateOptions::default(),
+            )
+            .expect("create task");
+        let task: TaskRecord = serde_json::from_str(&task_raw).expect("parse task");
+
+        assert!(!project.worktrees().git_available);
+
+        let prepared = prepare_task_worktree_for_spawn(&project, task.id, "teammate-1")
+            .expect("prepare task worktree");
+        assert!(!prepared.borrowed_active);
+
+        let task_after = project.tasks().get_record(task.id).expect("task after");
+        assert!(task_after.worktree.is_empty());
+        assert_eq!(task_after.owner, "teammate-1");
     }
 
     #[test]
